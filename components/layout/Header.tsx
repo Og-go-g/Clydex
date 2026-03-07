@@ -4,11 +4,13 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useRef, useEffect } from "react";
 import { useWallet } from "@/lib/wallet/context";
+import { useAuth } from "@/lib/auth/context";
 
 export function Header() {
   const pathname = usePathname();
   const { address, chainId, isConnecting, error, connect, disconnect, switchToBase } =
     useWallet();
+  const { isAuthenticated, signOut, isSigningIn } = useAuth();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -85,12 +87,26 @@ export function Header() {
           >
             Switch to Base
           </button>
+        ) : isSigningIn ? (
+          /* SIWE signature in progress — show signing state */
+          <button
+            disabled
+            className="flex items-center gap-2 rounded-xl border border-[#262626] bg-[#141414] px-4 py-2 text-sm font-medium text-white opacity-70"
+          >
+            <span className="h-2 w-2 animate-pulse rounded-full bg-yellow-400" />
+            Signing...
+          </button>
         ) : (
+          /* Connected (and either authenticated or waiting for auto-sign) */
           <button
             onClick={() => setMenuOpen(!menuOpen)}
             className="flex items-center gap-2 rounded-xl border border-[#262626] bg-[#141414] px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-[#1a1a1a]"
           >
-            <span className="h-2 w-2 rounded-full bg-green-400" />
+            <span
+              className={`h-2 w-2 rounded-full ${
+                isAuthenticated ? "bg-green-400" : "bg-gray-500"
+              }`}
+            />
             {shortAddress}
           </button>
         )}
@@ -99,7 +115,9 @@ export function Header() {
         {menuOpen && address && (
           <div className="absolute right-0 top-full mt-2 w-56 rounded-xl border border-[#262626] bg-[#141414] p-2 shadow-xl">
             <div className="mb-2 border-b border-[#262626] px-3 py-2">
-              <div className="text-xs text-gray-500">Connected to Base</div>
+              <div className="text-xs text-gray-500">
+                {isAuthenticated ? "Signed in on Base" : "Connected to Base"}
+              </div>
               <div className="mt-0.5 text-sm font-mono text-white">
                 {shortAddress}
               </div>
@@ -125,7 +143,8 @@ export function Header() {
               View on BaseScan
             </a>
             <button
-              onClick={() => {
+              onClick={async () => {
+                await signOut();
                 disconnect();
                 setMenuOpen(false);
               }}

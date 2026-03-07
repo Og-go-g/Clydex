@@ -7,6 +7,8 @@ import Link from "next/link";
 import { useWallet } from "@/lib/wallet/context";
 import { useChatSessions } from "@/lib/chat/context";
 import { getMessages, saveMessages } from "@/lib/chat/store";
+import { syncSessionToDb } from "@/lib/chat/sync";
+import { useAuth } from "@/lib/auth/context";
 
 // --- Types for AI SDK message parts ---
 
@@ -79,6 +81,7 @@ export default function ChatPage() {
 
 function ChatContent({ chatId }: { chatId: string }) {
   const { address } = useWallet();
+  const { isAuthenticated } = useAuth();
   const { renameChat, touchChat, sessions } = useChatSessions();
   const addressRef = useRef(address);
   addressRef.current = address;
@@ -124,16 +127,32 @@ function ChatContent({ chatId }: { chatId: string }) {
       touchChat(chatId);
 
       // Auto-title: set title from first user message
+      let title: string | undefined;
       const session = sessions.find((s) => s.id === chatId);
       if (session?.title === "New Chat") {
         const firstUserMsg = messages.find((m) => m.role === "user");
         if (firstUserMsg) {
           const text = msgText(firstUserMsg as unknown as Record<string, unknown>);
-          if (text) renameChat(chatId, text.slice(0, 40));
+          if (text) {
+            title = text.slice(0, 40);
+            renameChat(chatId, title);
+          }
         }
       }
+
+      // Background sync to database
+      if (isAuthenticated) {
+        const serializable = messages.map((m) => ({
+          id: m.id,
+          role: m.role,
+          content: (m as unknown as Record<string, unknown>).content as string ?? "",
+          parts: m.parts,
+          createdAt: (m as unknown as Record<string, unknown>).createdAt as string | undefined,
+        }));
+        syncSessionToDb(chatId, title ?? session?.title ?? "New Chat", serializable);
+      }
     }
-  }, [status, messages, chatId, touchChat, renameChat, sessions]);
+  }, [status, messages, chatId, touchChat, renameChat, sessions, isAuthenticated]);
 
   // Find the last prepareSwap tool call ID — only that card should be actionable.
   // Swap cards are frozen (not refreshing, not actionable) when:
@@ -813,9 +832,28 @@ function SwapCard({ data, isLatest = true, toolCallId }: { data: SwapQuoteData; 
       setTxHash(hash);
       setStatus("confirming");
 
+      // Record swap in database (non-blocking)
+      const { recordSwap } = await import("@/lib/chat/sync");
+      const swapDbId = await recordSwap({
+        fromToken: quote.fromToken.symbol,
+        fromAddress: quote.fromToken.address,
+        toToken: quote.toToken.symbol,
+        toAddress: quote.toToken.address,
+        fromAmount: quote.fromAmount,
+        toAmount: quote.toAmount,
+        provider: quote.provider,
+        txHash: hash,
+      });
+
       await waitForTx(hash, ethereum);
       setStatus("confirmed");
       if (toolCallId) saveSwapState(toolCallId, { status: "confirmed", txHash: hash });
+
+      // Update swap status in database
+      if (swapDbId) {
+        const { updateSwapStatus } = await import("@/lib/chat/sync");
+        updateSwapStatus(swapDbId, "confirmed", hash);
+      }
     } catch (err: unknown) {
       const walletErr = err as { code?: number; message?: string };
       const isSlippage = walletErr.message?.includes("Return amount is not enough") || walletErr.message?.includes("INSUFFICIENT_OUTPUT");

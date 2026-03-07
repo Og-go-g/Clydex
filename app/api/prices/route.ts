@@ -6,7 +6,7 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const token = searchParams.get("token");
 
-    if (!token || token.length > 100 || /[<>"';&]/.test(token)) {
+    if (!token || token.length > 100 || !/^[a-zA-Z0-9_.\-]+$/.test(token)) {
       return NextResponse.json(
         { error: "Missing or invalid token parameter" },
         { status: 400 }

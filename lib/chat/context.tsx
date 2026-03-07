@@ -18,7 +18,10 @@ import {
   updateTitle,
   updateTimestamp,
   getMessages,
+  saveMessages,
 } from "./store";
+import { useAuth } from "@/lib/auth/context";
+import { loadSessionsFromDb, loadMessagesFromDb, deleteSessionFromDb } from "./sync";
 
 interface ChatContextValue {
   sessions: ChatSession[];
@@ -45,9 +48,11 @@ export function useChatSessions() {
 }
 
 export function ChatProvider({ children }: { children: ReactNode }) {
+  const { isAuthenticated } = useAuth();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [mounted, setMounted] = useState(false);
+  const [dbSynced, setDbSynced] = useState(false);
 
   // Load from localStorage on mount.
   // On a new browser session — start a fresh chat (old ones stay in history).
@@ -91,6 +96,63 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     setMounted(true);
   }, []);
 
+  // Reset dbSynced when user signs out so re-auth triggers a fresh sync
+  useEffect(() => {
+    if (!isAuthenticated) setDbSynced(false);
+  }, [isAuthenticated]);
+
+  // Sync from DB when user authenticates — merge remote sessions into localStorage
+  useEffect(() => {
+    if (!isAuthenticated || dbSynced) return;
+    setDbSynced(true);
+
+    (async () => {
+      const remoteSessions = await loadSessionsFromDb();
+      if (!remoteSessions || remoteSessions.length === 0) return;
+
+      const local = getSessions();
+      const localIds = new Set(local.map((s) => s.id));
+      let merged = false;
+
+      for (const rs of remoteSessions) {
+        if (localIds.has(rs.id)) continue;
+
+        // Session exists in DB but not locally — restore it
+        const remoteMessages = await loadMessagesFromDb(rs.id);
+
+        // Add session to localStorage
+        const restored: ChatSession = {
+          id: rs.id,
+          title: rs.title,
+          createdAt: new Date(rs.createdAt).getTime(),
+          updatedAt: new Date(rs.updatedAt).getTime(),
+        };
+        local.push(restored);
+
+        // Save messages to localStorage
+        if (remoteMessages && remoteMessages.length > 0) {
+          saveMessages(rs.id, remoteMessages.map((m) => ({
+            id: m.id,
+            role: m.role,
+            content: m.content,
+            parts: m.parts,
+            createdAt: m.createdAt,
+          })));
+        }
+        merged = true;
+      }
+
+      if (merged) {
+        // Sort by updatedAt descending and persist
+        local.sort((a, b) => b.updatedAt - a.updatedAt);
+        try {
+          localStorage.setItem("clydex_sessions", JSON.stringify(local));
+        } catch {}
+        setSessions([...local]);
+      }
+    })();
+  }, [isAuthenticated, dbSynced]);
+
   const createChat = useCallback(() => {
     const session = createSession();
     setSessions(getSessions());
@@ -105,6 +167,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const deleteChat = useCallback(
     (id: string) => {
       deleteSession(id);
+      if (isAuthenticated) deleteSessionFromDb(id); // background DB cleanup
       const remaining = getSessions();
 
       if (remaining.length === 0) {
@@ -121,7 +184,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         setSessions(remaining);
       }
     },
-    [activeId]
+    [activeId, isAuthenticated]
   );
 
   const renameChat = useCallback((id: string, title: string) => {

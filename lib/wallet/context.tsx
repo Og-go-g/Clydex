@@ -29,6 +29,10 @@ interface WalletState {
   connect: () => Promise<void>;
   disconnect: () => void;
   switchToBase: () => Promise<void>;
+  /** Sign a message with the active wallet provider (EIP-191 personal_sign) */
+  signMessage: (message: string) => Promise<string>;
+  /** True when connection was user-initiated (not auto-reconnect from sessionStorage) */
+  isManualConnect: boolean;
 }
 
 const WalletContext = createContext<WalletState>({
@@ -44,6 +48,8 @@ const WalletContext = createContext<WalletState>({
   connect: async () => {},
   disconnect: () => {},
   switchToBase: async () => {},
+  signMessage: async () => "",
+  isManualConnect: false,
 });
 
 export function useWallet() {
@@ -88,13 +94,15 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const [wallets, setWallets] = useState<EIP6963ProviderDetail[]>([]);
   const [showSelector, setShowSelector] = useState(false);
   const [activeProvider, setActiveProvider] = useState<EIP1193Provider | null>(null);
+  const [isManualConnect, setIsManualConnect] = useState(false);
 
-  // Discover wallets + restore connection on mount
+  // Discover wallets + restore connection on mount (only if user previously connected)
   useEffect(() => {
     discoverWallets().then(setWallets);
 
+    const wasConnected = sessionStorage.getItem("clydex-wallet-connected");
     const ethereum = getEthereum();
-    if (!ethereum) return;
+    if (!ethereum || !wasConnected) return;
 
     ethereum
       .request({ method: "eth_accounts" })
@@ -141,6 +149,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     const provider = wallet.provider;
     setIsConnecting(true);
     setError(null);
+    setIsManualConnect(true);
 
     try {
       const accounts: string[] = await provider.request({
@@ -150,6 +159,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       if (accounts.length > 0) {
         setAddress(accounts[0]);
         setActiveProvider(provider);
+        sessionStorage.setItem("clydex-wallet-connected", "1");
       }
 
       const id: string = await provider.request({ method: "eth_chainId" });
@@ -203,6 +213,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
     setIsConnecting(true);
     setError(null);
+    setIsManualConnect(true);
 
     try {
       const accounts: string[] = await ethereum.request({
@@ -212,6 +223,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       if (accounts.length > 0) {
         setAddress(accounts[0]);
         setActiveProvider(ethereum);
+        sessionStorage.setItem("clydex-wallet-connected", "1");
       }
 
       const id: string = await ethereum.request({ method: "eth_chainId" });
@@ -238,6 +250,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     setChainId(null);
     setError(null);
     setActiveProvider(null);
+    setIsManualConnect(false);
+    sessionStorage.removeItem("clydex-wallet-connected");
   }, []);
 
   const switchToBase = useCallback(async () => {
@@ -247,6 +261,19 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     await switchChainToBase(provider);
     setChainId(8453);
   }, [activeProvider]);
+
+  const signMessage = useCallback(
+    async (message: string): Promise<string> => {
+      const provider = activeProvider ?? getEthereum();
+      if (!provider || !address) throw new Error("No wallet connected");
+      const signature = await provider.request({
+        method: "personal_sign",
+        params: [message, address],
+      });
+      return signature as string;
+    },
+    [activeProvider, address]
+  );
 
   return (
     <WalletContext.Provider
@@ -263,6 +290,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         connect,
         disconnect,
         switchToBase,
+        signMessage,
+        isManualConnect,
       }}
     >
       {children}

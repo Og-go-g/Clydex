@@ -1,0 +1,83 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+//  User — one row per wallet address
+// ---------------------------------------------------------------------------
+model User {
+  id        String   @id @default(cuid())
+  address   String   @unique            // lowercase 0x... wallet address
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sessions  ChatSession[]
+  swaps     Swap[]
+
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+//  ChatSession — a conversation thread
+// ---------------------------------------------------------------------------
+model ChatSession {
+  id        String   @id @default(cuid())
+  title     String   @default("New Chat")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  messages  ChatMessage[]
+
+  @@index([userId])
+  @@map("chat_sessions")
+}
+
+// ---------------------------------------------------------------------------
+//  ChatMessage — individual message in a session
+// ---------------------------------------------------------------------------
+model ChatMessage {
+  id        String   @id @default(cuid())
+  role      String                       // "user" | "assistant"
+  content   String   @default("")        // plain text content
+  parts     Json?                        // AI SDK parts array (tool results etc.)
+  createdAt DateTime @default(now())
+
+  sessionId String
+  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("chat_messages")
+}
+
+// ---------------------------------------------------------------------------
+//  Swap — executed swap record
+// ---------------------------------------------------------------------------
+model Swap {
+  id            String   @id @default(cuid())
+  fromToken     String                   // token symbol (e.g. "USDC")
+  fromAddress   String                   // token contract address
+  toToken       String
+  toAddress     String
+  fromAmount    String                   // human-readable amount
+  toAmount      String                   // estimated output amount
+  txHash        String?                  // on-chain tx hash (null if failed before send)
+  status        String   @default("pending") // "pending" | "confirmed" | "failed"
+  provider      String                   // "OpenOcean" | "ParaSwap"
+  chainId       Int      @default(8453)  // Base mainnet
+  createdAt     DateTime @default(now())
+
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([txHash])
+  @@map("swaps")
+}

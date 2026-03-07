@@ -1,6 +1,7 @@
 "use client";
 
 import { WalletProvider } from "@/lib/wallet/context";
+import { AuthProvider } from "@/lib/auth/context";
 import { ChatProvider } from "@/lib/chat/context";
 import { WalletModal } from "@/components/wallet/WalletModal";
 import { Component, type ReactNode, type ErrorInfo } from "react";
@@ -49,8 +50,10 @@ export function Providers({ children }: { children: ReactNode }) {
   return (
     <ErrorBoundary>
       <WalletProvider>
-        <WalletModal />
-        <ChatProvider>{children}</ChatProvider>
+        <AuthProvider>
+          <WalletModal />
+          <ChatProvider>{children}</ChatProvider>
+        </AuthProvider>
       </WalletProvider>
     </ErrorBoundary>
   );

@@ -1,16 +1,27 @@
 import { NextResponse } from "next/server";
 import { getSwapCalldata } from "@/lib/defi/swap";
 import { simulateSwap } from "@/lib/defi/utils";
+import { getAuthAddress } from "@/lib/auth/session";
 
 export async function POST(request: Request) {
   try {
+    // Verify SIWE session — only authenticated users can swap
+    const authAddress = await getAuthAddress();
+    if (!authAddress) {
+      return NextResponse.json(
+        { error: "Not authenticated — please sign in first" },
+        { status: 401 }
+      );
+    }
+
     const { fromToken, toToken, amount, userAddress, slippage, provider } =
       await request.json();
 
     if (
       typeof fromToken !== "string" || typeof toToken !== "string" ||
       typeof amount !== "string" || typeof userAddress !== "string" ||
-      !fromToken || !toToken || !amount || !userAddress
+      !fromToken || !toToken || !amount || !userAddress ||
+      isNaN(Number(amount)) || Number(amount) <= 0
     ) {
       return NextResponse.json(
         { error: "Missing or invalid parameters" },
@@ -22,6 +33,14 @@ export async function POST(request: Request) {
       return NextResponse.json(
         { error: "Invalid wallet address" },
         { status: 400 }
+      );
+    }
+
+    // Verify the request address matches the authenticated session
+    if (userAddress.toLowerCase() !== authAddress) {
+      return NextResponse.json(
+        { error: "Address mismatch — session does not match request" },
+        { status: 403 }
       );
     }
 

@@ -6,6 +6,11 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const query = searchParams.get("q");
 
+    // Validate query length to prevent excessive string matching
+    if (query && query.length > 100) {
+      return NextResponse.json({ error: "Query too long" }, { status: 400 });
+    }
+
     const pools = query ? await searchYields(query) : await getBaseYields();
 
     return NextResponse.json({ pools });

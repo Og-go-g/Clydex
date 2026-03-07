@@ -7,6 +7,7 @@ import { searchYields, getBaseYields } from "@/lib/defi/yields";
 import { getSwapQuote } from "@/lib/defi/swap";
 import { getTokenBalance, formatUnits } from "@/lib/defi/utils";
 import { TOKENS, OPENOCEAN } from "@/lib/defi/constants";
+import { getAuthAddress } from "@/lib/auth/session";
 
 function getModel() {
   if (process.env.ANTHROPIC_API_KEY) {
@@ -83,12 +84,21 @@ After prepareSwap returns, briefly mention the trade details in your text respon
 ALWAYS call prepareSwap for EVERY swap request, even if the same swap was requested before. Previous quotes expire instantly — never tell the user to "use the existing card" or "confirm the previous swap". Each swap request = a new prepareSwap call, no exceptions.`;
 
 export async function POST(req: Request) {
-  const { messages } = await req.json();
-  if (!messages) {
-    return new Response("Missing messages", { status: 400 });
+  let body;
+  try {
+    body = await req.json();
+  } catch {
+    return new Response("Invalid JSON", { status: 400 });
   }
-  const rawWallet = req.headers.get("x-wallet-address") || "";
-  const walletAddress = /^0x[0-9a-fA-F]{40}$/.test(rawWallet) ? rawWallet : null;
+  const { messages } = body;
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return new Response("Missing or invalid messages", { status: 400 });
+  }
+  if (messages.length > 100) {
+    return new Response("Too many messages", { status: 400 });
+  }
+  // Wallet address from verified SIWE session (not from untrusted header)
+  const walletAddress = await getAuthAddress();
   const modelMessages = await convertToModelMessages(messages);
 
   const result = streamText({
