@@ -4,7 +4,7 @@ import { getAuthAddress } from "@/lib/auth/session";
 import { getOrCreateUser } from "@/lib/db/helpers";
 
 const TX_HASH_RE = /^0x[a-fA-F0-9]{64}$/;
-const VALID_PROVIDERS = new Set(["OpenOcean", "ParaSwap"]);
+const VALID_PROVIDERS = new Set(["OpenOcean", "Paraswap"]);
 const VALID_STATUSES = new Set(["pending", "confirmed", "failed"]);
 
 // Valid state transitions — confirmed and failed are terminal
