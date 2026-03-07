@@ -3,6 +3,7 @@
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { useRef, useEffect, useState, useMemo, useCallback } from "react";
+import Link from "next/link";
 import { useWallet } from "@/lib/wallet/context";
 import { useChatSessions } from "@/lib/chat/context";
 import { getMessages, saveMessages } from "@/lib/chat/store";
@@ -25,6 +26,7 @@ interface PriceData {
   priceChange24h: number;
   volume24h: number;
   liquidity: number;
+  address?: string;
 }
 
 interface TokenData {
@@ -187,11 +189,26 @@ function ChatContent({ chatId }: { chatId: string }) {
             <div className="flex justify-start">
               <div className="max-w-[80%] rounded-2xl border border-border bg-card px-4 py-3 text-sm leading-relaxed text-foreground">
                 <div className="whitespace-pre-wrap">
-                  <SimpleMarkdown
-                    text={
-                      "Hey! I'm Clydex, your AI DeFi companion. I can help you:\n\n- **Check prices** — \"price of ETH\"\n- **Swap tokens** — \"swap 10 USDC to ETH\"\n- **Find yields** — \"best yields for USDC on Base\"\n- **Top tokens** — \"top tokens on Base\"\n- **[Portfolio](/portfolio)** — view multi-chain balances\n\nWhat would you like to do?"
-                    }
-                  />
+                  {"Hey! I'm Clydex, your AI DeFi companion. I can help you:\n\n"}
+                  {"- "}
+                  <strong>Check prices</strong>
+                  {" — "}
+                  <button type="button" onClick={() => setInput("price of ETH")} className="text-muted underline hover:text-foreground transition-colors">{'"price of ETH"'}</button>
+                  {"\n- "}
+                  <strong>Swap tokens</strong>
+                  {" — "}
+                  <button type="button" onClick={() => setInput("swap 10 USDC to ETH")} className="text-muted underline hover:text-foreground transition-colors">{'"swap 10 USDC to ETH"'}</button>
+                  {"\n- "}
+                  <strong>Find yields</strong>
+                  {" — "}
+                  <button type="button" onClick={() => setInput("best yields for USDC on Base")} className="text-muted underline hover:text-foreground transition-colors">{'"best yields for USDC on Base"'}</button>
+                  {"\n- "}
+                  <strong>Top tokens</strong>
+                  {" — "}
+                  <button type="button" onClick={() => setInput("top tokens on Base")} className="text-muted underline hover:text-foreground transition-colors">{'"top tokens on Base"'}</button>
+                  {"\n- "}
+                  <strong><Link href="/portfolio" className="text-muted underline hover:text-foreground transition-colors">Portfolio</Link></strong>
+                  {" — view multi-chain balances\n\nWhat would you like to do?"}
                 </div>
               </div>
             </div>
@@ -324,10 +341,18 @@ function parseInline(text: string, keyPrefix = ""): React.ReactNode[] {
         </code>
       );
     } else if (match[3] !== undefined && match[4] !== undefined) {
+      const href = match[4];
+      const isInternal = href.startsWith("/");
       nodes.push(
-        <a key={k} href={match[4]} target="_blank" rel="noopener noreferrer" className="text-accent underline">
-          {match[3]}
-        </a>
+        isInternal ? (
+          <Link key={k} href={href} className="text-muted underline hover:text-foreground transition-colors">
+            {match[3]}
+          </Link>
+        ) : (
+          <a key={k} href={href} target="_blank" rel="noopener noreferrer" className="text-muted underline hover:text-foreground transition-colors">
+            {match[3]}
+          </a>
+        )
       );
     }
     lastIndex = match.index + match[0].length;
@@ -400,6 +425,24 @@ function ToolResult({ part, lastSwapToolCallId }: { part: ToolMessagePart; lastS
 function PriceCard({ data }: { data: PriceData }) {
   const change = data.priceChange24h;
   const isPositive = change >= 0;
+  const [chartPrices, setChartPrices] = useState<number[]>([]);
+
+  useEffect(() => {
+    // Map native ETH (null address) to WETH for chart lookup
+    const WETH_ADDRESS = "0x4200000000000000000000000000000000000006";
+    const NULL_ADDRESS = "0x0000000000000000000000000000000000000000";
+    const tokenAddr = !data.address || data.address === NULL_ADDRESS
+      ? WETH_ADDRESS
+      : data.address;
+    if (!/^0x[0-9a-fA-F]{40}$/.test(tokenAddr)) return;
+    fetch(`/api/chart?token=${tokenAddr}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.prices?.length > 1) setChartPrices(d.prices);
+      })
+      .catch(() => {});
+  }, [data.address]);
+
   return (
     <div className="my-2 rounded-xl border border-border bg-background p-4">
       <div className="flex items-center justify-between">
@@ -422,11 +465,72 @@ function PriceCard({ data }: { data: PriceData }) {
           </div>
         </div>
       </div>
+      {chartPrices.length > 1 && (
+        <div className="mt-3">
+          <Sparkline prices={chartPrices} positive={isPositive} />
+          <div className="mt-1 flex justify-between text-[10px] text-muted">
+            <span>7d ago</span>
+            <span>Now</span>
+          </div>
+        </div>
+      )}
       <div className="mt-3 flex gap-4 text-xs text-muted">
         <span>Vol 24h: ${formatCompact(data.volume24h)}</span>
         <span>Liq: ${formatCompact(data.liquidity)}</span>
       </div>
     </div>
+  );
+}
+
+/** SVG sparkline chart — pure client-side, no dependencies. */
+function Sparkline({ prices, positive }: { prices: number[]; positive: boolean }) {
+  const width = 320;
+  const height = 50;
+  const padding = 2;
+
+  const min = Math.min(...prices);
+  const max = Math.max(...prices);
+  const range = max - min || 1;
+
+  const points = prices.map((p, i) => ({
+    x: padding + (i / (prices.length - 1)) * (width - padding * 2),
+    y: padding + (1 - (p - min) / range) * (height - padding * 2),
+  }));
+
+  // Build smooth path using cubic bezier curves
+  const linePath = points
+    .map((pt, i) => {
+      if (i === 0) return `M ${pt.x} ${pt.y}`;
+      const prev = points[i - 1];
+      const cpx = (prev.x + pt.x) / 2;
+      return `C ${cpx} ${prev.y}, ${cpx} ${pt.y}, ${pt.x} ${pt.y}`;
+    })
+    .join(" ");
+
+  // Area fill path (line + close to bottom)
+  const lastPt = points[points.length - 1];
+  const firstPt = points[0];
+  const areaPath = `${linePath} L ${lastPt.x} ${height} L ${firstPt.x} ${height} Z`;
+
+  const color = positive ? "#22c55e" : "#ef4444";
+  const gradientId = positive ? "sparkGreen" : "sparkRed";
+
+  return (
+    <svg
+      viewBox={`0 0 ${width} ${height}`}
+      className="w-full"
+      preserveAspectRatio="none"
+      style={{ height: "50px" }}
+    >
+      <defs>
+        <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.2" />
+          <stop offset="100%" stopColor={color} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path d={areaPath} fill={`url(#${gradientId})`} />
+      <path d={linePath} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
   );
 }
 
@@ -629,6 +733,14 @@ function SwapCard({ data, isLatest = true, toolCallId }: { data: SwapQuoteData; 
 
     if (chainId !== 8453) {
       await switchToBase();
+      // Verify chain actually switched before proceeding
+      const currentChain = await ethereum.request({ method: "eth_chainId" }) as string;
+      if (parseInt(currentChain, 16) !== 8453) {
+        setErrorMsg("Please switch to Base network to continue.");
+        setStatus("error");
+        if (toolCallId) saveSwapState(toolCallId, { status: "error", errorMsg: "Please switch to Base network." });
+        return;
+      }
     }
 
     try {
@@ -674,6 +786,15 @@ function SwapCard({ data, isLatest = true, toolCallId }: { data: SwapQuoteData; 
       }
 
       const { transaction } = await res.json();
+
+      // Validate transaction target against known DEX router addresses
+      const TRUSTED_ROUTERS = [
+        "0x6352a56caadc4f1e25cd6c75970fa768a3304e64", // OpenOcean
+        "0x6a000f20005980200259b80c5102003040001068", // Paraswap Augustus V6
+      ];
+      if (!transaction?.to || !TRUSTED_ROUTERS.includes(transaction.to.toLowerCase())) {
+        throw new Error("Untrusted swap router address");
+      }
 
       // Send swap transaction
       const hash = await ethereum.request({
@@ -800,7 +921,7 @@ function SwapCard({ data, isLatest = true, toolCallId }: { data: SwapQuoteData; 
                     const val = e.target.value.replace(/[^0-9.]/g, "");
                     setCustomSlippage(val);
                     const num = parseFloat(val);
-                    if (num > 0 && num <= 50) setSlippage(num);
+                    if (num > 0 && num <= 5) setSlippage(num);
                   }}
                   className="w-16 rounded-md border border-border bg-card px-2 py-1 text-xs text-foreground outline-none focus:border-accent"
                 />
@@ -874,7 +995,7 @@ function SwapCard({ data, isLatest = true, toolCallId }: { data: SwapQuoteData; 
               <a
                 href={`https://basescan.org/tx/${txHash}`}
                 target="_blank"
-                rel="noopener"
+                rel="noopener noreferrer"
                 className="block text-center text-xs text-accent underline"
               >
                 View on BaseScan
@@ -892,7 +1013,7 @@ function SwapCard({ data, isLatest = true, toolCallId }: { data: SwapQuoteData; 
               <a
                 href={`https://basescan.org/tx/${txHash}`}
                 target="_blank"
-                rel="noopener"
+                rel="noopener noreferrer"
                 className="block text-center text-xs text-accent underline"
               >
                 View on BaseScan

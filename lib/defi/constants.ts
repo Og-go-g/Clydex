@@ -61,6 +61,11 @@ export const DEXSCREENER_URLS: string[] = parseUrls(process.env.DEXSCREENER_URLS
 // DeFi Llama — yields/APY, URLs from DEFILLAMA_URLS env var
 export const DEFILLAMA_URLS: string[] = parseUrls(process.env.DEFILLAMA_URLS);
 
+// GeckoTerminal — OHLCV chart data, URLs from GECKOTERMINAL_URLS env var
+export const GECKOTERMINAL_URLS: string[] = parseUrls(
+  process.env.GECKOTERMINAL_URLS || "https://api.geckoterminal.com"
+);
+
 // OpenOcean DEX aggregator — URLs from OPENOCEAN_URLS env var
 export const OPENOCEAN = {
   BASE_URLS: parseUrls(process.env.OPENOCEAN_URLS),

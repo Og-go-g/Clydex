@@ -6,9 +6,9 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const token = searchParams.get("token");
 
-    if (!token) {
+    if (!token || token.length > 100 || /[<>"';&]/.test(token)) {
       return NextResponse.json(
-        { error: "Missing token parameter" },
+        { error: "Missing or invalid token parameter" },
         { status: 400 }
       );
     }
@@ -17,7 +17,7 @@ export async function GET(request: Request) {
 
     if (!price) {
       return NextResponse.json(
-        { error: `Token "${token}" not found on Base` },
+        { error: "Token not found on Base" },
         { status: 404 }
       );
     }

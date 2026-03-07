@@ -87,7 +87,8 @@ export async function POST(req: Request) {
   if (!messages) {
     return new Response("Missing messages", { status: 400 });
   }
-  const walletAddress = req.headers.get("x-wallet-address") || null;
+  const rawWallet = req.headers.get("x-wallet-address") || "";
+  const walletAddress = /^0x[0-9a-fA-F]{40}$/.test(rawWallet) ? rawWallet : null;
   const modelMessages = await convertToModelMessages(messages);
 
   const result = streamText({
@@ -116,7 +117,7 @@ export async function POST(req: Request) {
 
       getTopTokens: tool({
         description:
-          "Get prices for the most popular tokens on Base. Use when user asks about 'top tokens', 'market overview', or 'what tokens are trending'.",
+          "Get top Base tokens sorted by 24h trading volume. Use when user asks about 'top tokens', 'market overview', 'what tokens are trending', or 'most traded'.",
         inputSchema: zodSchema(z.object({})),
         execute: async () => {
           const tokens = await getTopBaseTokens();

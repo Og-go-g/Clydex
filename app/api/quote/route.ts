@@ -5,9 +5,20 @@ export async function POST(request: Request) {
   try {
     const { fromToken, toToken, amount, userAddress } = await request.json();
 
-    if (!fromToken || !toToken || !amount || !userAddress) {
+    if (
+      typeof fromToken !== "string" || typeof toToken !== "string" ||
+      typeof amount !== "string" || typeof userAddress !== "string" ||
+      !fromToken || !toToken || !amount || !userAddress
+    ) {
       return NextResponse.json(
-        { error: "Missing required parameters" },
+        { error: "Missing or invalid parameters" },
+        { status: 400 }
+      );
+    }
+
+    if (!/^0x[0-9a-fA-F]{40}$/.test(userAddress)) {
+      return NextResponse.json(
+        { error: "Invalid wallet address" },
         { status: 400 }
       );
     }

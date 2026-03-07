@@ -15,6 +15,79 @@ interface Pool {
   chain: string;
 }
 
+/** Hardcoded project URLs — never derived from API responses.
+ *  Object.freeze prevents runtime tampering. */
+const PROJECT_URLS: Readonly<Record<string, string>> = Object.freeze({
+  "uniswap-v3": "https://app.uniswap.org/pools",
+  "uniswap-v2": "https://app.uniswap.org/pools",
+  "aave-v3": "https://app.aave.com/",
+  "aave-v2": "https://app.aave.com/",
+  "morpho": "https://app.morpho.org/",
+  "morpho-blue": "https://app.morpho.org/",
+  "aerodrome-v1": "https://aerodrome.finance/liquidity",
+  "aerodrome-v2": "https://aerodrome.finance/liquidity",
+  "aerodrome-slipstream": "https://aerodrome.finance/liquidity",
+  "aerodrome": "https://aerodrome.finance/liquidity",
+  "compound-v3": "https://app.compound.finance/",
+  "compound": "https://app.compound.finance/",
+  "curve-dex": "https://curve.fi/",
+  "curve": "https://curve.fi/",
+  "balancer-v2": "https://app.balancer.fi/",
+  "balancer": "https://app.balancer.fi/",
+  "sushiswap": "https://www.sushi.com/pool",
+  "velodrome-v2": "https://velodrome.finance/liquidity",
+  "velodrome": "https://velodrome.finance/liquidity",
+  "moonwell": "https://moonwell.fi/discover",
+  "seamless-protocol": "https://app.seamlessprotocol.com/",
+  "extra-finance": "https://app.extrafi.io/",
+  "beefy": "https://app.beefy.com/",
+  "yearn-v3": "https://yearn.fi/vaults",
+  "yearn": "https://yearn.fi/vaults",
+  "stargate": "https://stargate.finance/pool",
+  "pendle": "https://app.pendle.finance/",
+  "exactly": "https://app.exact.ly/",
+  "overnight-finance": "https://overnight.fi/",
+  "baseswap": "https://baseswap.fi/",
+  "pancakeswap-amm-v3": "https://pancakeswap.finance/liquidity",
+  "pancakeswap": "https://pancakeswap.finance/liquidity",
+  "radiant-v2": "https://app.radiant.capital/",
+  "sonne-finance": "https://sonne.finance/",
+  "granary-finance": "https://app.granary.finance/",
+  "fluid": "https://fluid.instadapp.io/",
+  "euler": "https://app.euler.finance/",
+  "spark": "https://app.spark.fi/",
+  "ionic-protocol": "https://app.ionic.money/",
+  "kim-exchange-v4": "https://app.kim.exchange/",
+  "baseborrow": "https://baseborrow.com/",
+  "harvest-finance": "https://app.harvest.finance/",
+  "sommelier": "https://app.sommelier.finance/",
+  "clearpool": "https://app.clearpool.finance/",
+  "hop-protocol": "https://app.hop.exchange/",
+  "maker": "https://app.spark.fi/",
+  "lido": "https://stake.lido.fi/",
+  "rocket-pool": "https://stake.rocketpool.net/",
+  "convex-finance": "https://www.convexfinance.com/",
+  "aura": "https://app.aura.finance/",
+  "merkl": "https://app.merkl.xyz/",
+  "extra-finance-leverage-farming": "https://app.extrafi.io/",
+  "morpho-v1": "https://app.morpho.org/",
+  "moonwell-lending": "https://moonwell.fi/discover",
+  "fluid-lending": "https://fluid.instadapp.io/",
+  "fluid-dex": "https://fluid.instadapp.io/",
+  "balancer-v3": "https://app.balancer.fi/",
+  "origin-ether": "https://www.oeth.com/",
+  "stake-dao": "https://app.stakedao.org/",
+  "gauntlet": "https://www.gauntlet.xyz/",
+  "avantis": "https://www.avantisfi.com/",
+  "wasabi": "https://app.wasabi.xyz/",
+});
+
+function getProjectUrl(project: string): string | null {
+  const url = PROJECT_URLS[project.toLowerCase()];
+  if (!url || !url.startsWith("https://")) return null;
+  return url;
+}
+
 export default function YieldsPage() {
   const [pools, setPools] = useState<Pool[]>([]);
   const [loading, setLoading] = useState(true);
@@ -134,9 +207,23 @@ export default function YieldsPage() {
                     )}
                   </td>
                   <td className="px-4 py-3">
-                    <span className="rounded-md bg-accent/10 px-2 py-0.5 text-xs font-medium capitalize text-accent">
-                      {pool.project}
-                    </span>
+                    {getProjectUrl(pool.project) ? (
+                      <a
+                        href={getProjectUrl(pool.project)!}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="group inline-flex items-center gap-1 rounded-md bg-accent/10 px-2 py-0.5 text-xs font-medium capitalize text-accent transition-colors hover:bg-accent/20"
+                      >
+                        {pool.project}
+                        <svg className="h-3 w-3 opacity-0 transition-opacity group-hover:opacity-100" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                        </svg>
+                      </a>
+                    ) : (
+                      <span className="rounded-md bg-accent/10 px-2 py-0.5 text-xs font-medium capitalize text-accent">
+                        {pool.project}
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-right text-muted">
                     ${formatCompact(pool.tvlUsd)}
