@@ -37,6 +37,18 @@ function sanitizeUrl(url: unknown): string {
   return "";
 }
 
+// Known token addresses on Base — used for direct lookup when search fails
+const KNOWN_ADDRESSES: Record<string, string> = {
+  ETH: "0x4200000000000000000000000000000000000006",
+  WETH: "0x4200000000000000000000000000000000000006",
+  ETHEREUM: "0x4200000000000000000000000000000000000006",
+  CBBTC: "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
+  BTC: "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
+  BITCOIN: "0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf",
+  AERO: "0x940181a94A35A4569E4529A3CDfB74e38FD98631",
+  CBETH: "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",
+};
+
 // Well-known stablecoins and tokens that DexScreener may not find as baseToken
 const KNOWN_STABLECOINS: Record<string, TokenPrice> = {
   USDC: {
@@ -91,6 +103,39 @@ export async function getTokenPrice(query: string): Promise<TokenPrice | null> {
   const upper = query.toUpperCase().trim();
   if (KNOWN_STABLECOINS[upper]) {
     return KNOWN_STABLECOINS[upper];
+  }
+
+  // Try direct address lookup for well-known tokens (ETH, BTC, etc.)
+  const knownAddress = KNOWN_ADDRESSES[upper];
+  if (knownAddress) {
+    const addrRes = await fetchDexScreener(`/tokens/v1/base/${knownAddress}`);
+    if (addrRes.ok) {
+      const addrPairs: Record<string, unknown>[] = await addrRes.json();
+      if (Array.isArray(addrPairs) && addrPairs.length > 0) {
+        // Pick highest volume pair
+        const best = addrPairs.reduce((a, b) =>
+          (((a as Record<string, { h24?: number }>).volume?.h24) || 0) >=
+          (((b as Record<string, { h24?: number }>).volume?.h24) || 0) ? a : b
+        );
+        const bt = best.baseToken as { symbol: string; name: string; address: string } | undefined;
+        if (bt) {
+          const displaySymbol = upper === "ETH" || upper === "ETHEREUM" ? "ETH" : bt.symbol;
+          return {
+            symbol: displaySymbol,
+            name: upper === "ETH" || upper === "ETHEREUM" ? "Ethereum" : bt.name,
+            address: bt.address,
+            priceUsd: parseFloat(String(best.priceUsd || "0")),
+            priceChange24h: ((best as Record<string, { h24?: number }>).priceChange?.h24) || 0,
+            volume24h: ((best as Record<string, { h24?: number }>).volume?.h24) || 0,
+            liquidity: ((best as Record<string, { usd?: number }>).liquidity?.usd) || 0,
+            fdv: (best as Record<string, number>).fdv || 0,
+            pairAddress: String(best.pairAddress || ""),
+            dexId: String(best.dexId || ""),
+            url: sanitizeUrl(best.url),
+          };
+        }
+      }
+    }
   }
 
   const res = await fetchDexScreener(
