@@ -31,6 +31,7 @@ export function Header() {
     : null;
 
   return (
+    <>
     <header className="sticky top-0 z-50 flex h-16 items-center justify-between border-b border-[#262626] bg-[#0a0a0a]/80 px-6 backdrop-blur-md">
       <div className="flex items-center gap-8">
         <Link href="/" className="flex items-center gap-2">
@@ -163,5 +164,20 @@ export function Header() {
         )}
       </div>
     </header>
+    <div className="flex items-center justify-end gap-1.5 bg-[#0a0a0a] px-6 py-1">
+      <span className="text-[10px] text-gray-600">built by</span>
+      <a
+        href="https://x.com/_Jitery_"
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-gray-500 transition-colors hover:text-white"
+        aria-label="Follow on X"
+      >
+        <svg viewBox="0 0 24 24" className="h-3 w-3" fill="currentColor">
+          <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+        </svg>
+      </a>
+    </div>
+    </>
   );
 }
