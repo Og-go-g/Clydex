@@ -14,8 +14,13 @@ export async function POST(request: Request) {
       );
     }
 
-    const { fromToken, toToken, amount, userAddress, slippage, provider } =
-      await request.json();
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    }
+    const { fromToken, toToken, amount, userAddress, slippage, provider } = body;
 
     if (
       typeof fromToken !== "string" || typeof toToken !== "string" ||
@@ -44,8 +49,17 @@ export async function POST(request: Request) {
       );
     }
 
-    // Clamp slippage to safe range: 0.1% – 5%
-    const safeSlippage = Math.min(Math.max(Number(slippage) || 1, 0.1), 5);
+    // Clamp slippage to safe range: 0.1% – 3% (lowered from 5% to reduce sandwich attack risk)
+    const safeSlippage = Math.min(Math.max(Number(slippage) || 1, 0.1), 3);
+
+    // Validate provider if specified — must match a known provider name
+    const KNOWN_PROVIDERS = ["OpenOcean", "Paraswap"];
+    if (provider && !KNOWN_PROVIDERS.includes(provider)) {
+      return NextResponse.json(
+        { error: `Unknown provider: "${provider}". Known: ${KNOWN_PROVIDERS.join(", ")}` },
+        { status: 400 }
+      );
+    }
 
     const transaction = await getSwapCalldata(
       fromToken,

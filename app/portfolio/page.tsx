@@ -22,16 +22,22 @@ export default function PortfolioPage() {
       setPortfolio(null);
       return;
     }
+    const controller = new AbortController();
     setLoading(true);
     setError(null);
-    fetch(`/api/portfolio?address=${address}`)
+    fetch(`/api/portfolio?address=${encodeURIComponent(address)}`, {
+      signal: controller.signal,
+    })
       .then((r) => r.json())
       .then((data) => {
         if (data.error) throw new Error(data.error);
         setPortfolio(data);
       })
-      .catch((err) => setError(err.message))
+      .catch((err) => {
+        if (err.name !== "AbortError") setError(err.message);
+      })
       .finally(() => setLoading(false));
+    return () => controller.abort();
   }, [address]);
 
   // Filter + sort (hide tokens worth less than $0.01 entirely)
@@ -349,7 +355,7 @@ function TokenRow({ token, index }: { token: TokenHolding; index: number }) {
       <td className="px-4 py-3 text-xs text-muted">{index + 1}</td>
       <td className="px-4 py-3">
         <div className="flex items-center gap-3">
-          {token.logo ? (
+          {token.logo && token.logo.startsWith("https://") ? (
             <img
               src={token.logo}
               alt={token.symbol}

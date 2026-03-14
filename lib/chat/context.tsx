@@ -11,6 +11,7 @@ import {
 import {
   type ChatSession,
   getSessions,
+  saveSessions,
   getActiveId,
   setActiveId as storeSetActiveId,
   createSession,
@@ -143,11 +144,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       }
 
       if (merged) {
-        // Sort by updatedAt descending and persist
+        // Sort by updatedAt descending and persist via store helper
         local.sort((a, b) => b.updatedAt - a.updatedAt);
-        try {
-          localStorage.setItem("clydex_sessions", JSON.stringify(local));
-        } catch {}
+        saveSessions(local);
         setSessions([...local]);
       }
     })();

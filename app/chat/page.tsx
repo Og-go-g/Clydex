@@ -86,8 +86,9 @@ function ChatContent({ chatId }: { chatId: string }) {
   const addressRef = useRef(address);
   addressRef.current = address;
 
-  // Load stored messages for this chat
-  const initialMessages = useMemo(() => getMessages(chatId), [chatId]);
+  // Load stored messages for this chat (cast to UIMessage[] — runtime shape is compatible)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const initialMessages = useMemo(() => getMessages(chatId) as any[], [chatId]);
 
   const transport = useMemo(
     () =>
@@ -777,7 +778,8 @@ function SwapCard({ data, isLatest = true, toolCallId }: { data: SwapQuoteData; 
             quote.fromToken.address,
             quote.exchangeProxy,
             ethereum,
-            address
+            address,
+            quote.fromAmountRaw
           );
           await waitForTx(approveTxHash, ethereum);
         }
@@ -1146,11 +1148,14 @@ async function sendApproval(
   tokenAddress: string,
   spender: string,
   ethereum: EIP1193Provider,
-  from: string
+  from: string,
+  amountRaw: string
 ): Promise<string> {
+  // Security: approve only the exact swap amount, NOT maxUint256.
+  // Unlimited approvals risk draining ALL user tokens if the router is compromised.
   const spenderPadded = spender.slice(2).toLowerCase().padStart(64, "0");
-  const maxUint256 = "f".repeat(64);
-  const data = `0x095ea7b3${spenderPadded}${maxUint256}`;
+  const amountHex = BigInt(amountRaw).toString(16).padStart(64, "0");
+  const data = `0x095ea7b3${spenderPadded}${amountHex}`;
 
   return ethereum.request({
     method: "eth_sendTransaction",
@@ -1172,7 +1177,9 @@ async function waitForTx(txHash: string, ethereum: EIP1193Provider): Promise<voi
     }
     await new Promise((r) => setTimeout(r, 2000));
   }
-  throw new Error("Transaction confirmation timeout");
+  // Timeout ≠ failure — tx may still confirm later. Throw a distinct error
+  // so the caller can show "still pending" instead of "failed".
+  throw new Error("TIMEOUT: Transaction still pending after 2 minutes. Check your wallet or block explorer for the latest status.");
 }
 
 function formatCompact(n: number): string {

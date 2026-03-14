@@ -18,6 +18,6 @@ export const SUPPORTED_CHAINS: Chain[] = [
   { id: 43114, name: "Avalanche", slug: "avalanche", color: "#E84142", nativeSymbol: "AVAX", explorerUrl: "https://snowtrace.io", rpcUrl: "https://api.avax.network/ext/bc/C/rpc" },
 ];
 
-export const CHAIN_BY_SLUG = Object.fromEntries(
+export const CHAIN_BY_SLUG: Partial<Record<string, Chain>> = Object.fromEntries(
   SUPPORTED_CHAINS.map((c) => [c.slug, c])
-) as Record<string, Chain>;
+);

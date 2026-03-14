@@ -94,6 +94,6 @@ export async function GET(request: Request) {
 
     return NextResponse.json({ prices });
   } catch {
-    return NextResponse.json({ prices: [] }, { status: 200 });
+    return NextResponse.json({ prices: [], error: "Failed to fetch chart data" }, { status: 502 });
   }
 }

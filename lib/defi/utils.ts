@@ -7,9 +7,18 @@ import { BASE_RPCS, OPENOCEAN } from "./constants";
  * E.g. parseUnits("1.5", 18) → "1500000000000000000"
  */
 export function parseUnits(value: string, decimals: number): string {
+  // Security: reject negative, non-numeric, and malformed input
+  // to prevent uint256 wraparound (negative → 2^256-N → unlimited approval)
+  if (!/^\d+(\.\d+)?$/.test(value)) {
+    throw new Error(`Invalid amount: "${value}". Must be a positive decimal number.`);
+  }
   const [whole = "0", fraction = ""] = value.split(".");
   const paddedFraction = fraction.padEnd(decimals, "0").slice(0, decimals);
-  return BigInt(whole + paddedFraction).toString();
+  const result = BigInt(whole + paddedFraction).toString();
+  if (result === "0") {
+    throw new Error("Amount must be greater than zero.");
+  }
+  return result;
 }
 
 /**
@@ -17,11 +26,29 @@ export function parseUnits(value: string, decimals: number): string {
  * E.g. formatUnits("1500000000000000000", 18) → "1.5"
  */
 export function formatUnits(value: string, decimals: number): string {
+  // Security: reject negative values to prevent display corruption
+  if (value.startsWith("-")) {
+    throw new Error(`Cannot format negative value: "${value}"`);
+  }
   const str = value.padStart(decimals + 1, "0");
   const whole = str.slice(0, str.length - decimals) || "0";
   const fraction = str.slice(str.length - decimals);
   const trimmed = fraction.replace(/0+$/, "");
   return trimmed ? `${whole}.${trimmed}` : whole;
+}
+
+// --- Address validation ---
+
+const ETH_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+
+export function isValidAddress(address: string): boolean {
+  return ETH_ADDRESS_RE.test(address);
+}
+
+export function assertValidAddress(address: string, label = "Address"): void {
+  if (!isValidAddress(address)) {
+    throw new Error(`${label} is not a valid Ethereum address: "${address}"`);
+  }
 }
 
 // --- RPC with fallback ---
@@ -77,6 +104,8 @@ export async function getTokenBalance(
   tokenAddress: string,
   ownerAddress: string
 ): Promise<string> {
+  assertValidAddress(ownerAddress, "Owner address");
+
   const isNative =
     !tokenAddress ||
     tokenAddress.toLowerCase() === OPENOCEAN.NATIVE_ETH_ADDRESS.toLowerCase();
@@ -85,6 +114,8 @@ export async function getTokenBalance(
     const result = await rpcCall("eth_getBalance", [ownerAddress, "latest"]);
     return BigInt(result).toString();
   }
+
+  assertValidAddress(tokenAddress, "Token address");
 
   // ERC-20 balanceOf(address) — selector 0x70a08231
   const paddedOwner = ownerAddress.slice(2).toLowerCase().padStart(64, "0");

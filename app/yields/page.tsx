@@ -91,6 +91,7 @@ function getProjectUrl(project: string): string | null {
 export default function YieldsPage() {
   const [pools, setPools] = useState<Pool[]>([]);
   const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [sortBy, setSortBy] = useState<"apy" | "tvl">("apy");
 
@@ -101,7 +102,10 @@ export default function YieldsPage() {
         setPools(data.pools || []);
         setLoading(false);
       })
-      .catch(() => setLoading(false));
+      .catch((err) => {
+        setFetchError(err.message || "Failed to load yield data");
+        setLoading(false);
+      });
   }, []);
 
   const filtered = pools
@@ -165,6 +169,16 @@ export default function YieldsPage() {
             <span className="h-2 w-2 animate-bounce rounded-full bg-accent [animation-delay:150ms]" />
             <span className="h-2 w-2 animate-bounce rounded-full bg-accent [animation-delay:300ms]" />
           </div>
+        </div>
+      ) : fetchError ? (
+        <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-12 text-center">
+          <p className="text-sm text-red-400">{fetchError}</p>
+          <button
+            onClick={() => { setFetchError(null); setLoading(true); fetch("/api/yields").then(r => r.json()).then(data => { setPools(data.pools || []); setLoading(false); }).catch(err => { setFetchError(err.message); setLoading(false); }); }}
+            className="mt-4 rounded-lg bg-red-500/20 px-4 py-2 text-xs text-red-400 transition-colors hover:bg-red-500/30"
+          >
+            Retry
+          </button>
         </div>
       ) : filtered.length === 0 ? (
         <div className="rounded-2xl border border-border bg-card p-12 text-center text-muted">

@@ -56,10 +56,14 @@ export const PROTOCOLS = {
 } as const;
 
 // DexScreener — token prices, URLs from DEXSCREENER_URLS env var
-export const DEXSCREENER_URLS: string[] = parseUrls(process.env.DEXSCREENER_URLS);
+export const DEXSCREENER_URLS: string[] = parseUrls(
+  process.env.DEXSCREENER_URLS || "https://api.dexscreener.com"
+);
 
 // DeFi Llama — yields/APY, URLs from DEFILLAMA_URLS env var
-export const DEFILLAMA_URLS: string[] = parseUrls(process.env.DEFILLAMA_URLS);
+export const DEFILLAMA_URLS: string[] = parseUrls(
+  process.env.DEFILLAMA_URLS || "https://yields.llama.fi"
+);
 
 // GeckoTerminal — OHLCV chart data, URLs from GECKOTERMINAL_URLS env var
 export const GECKOTERMINAL_URLS: string[] = parseUrls(
@@ -68,7 +72,7 @@ export const GECKOTERMINAL_URLS: string[] = parseUrls(
 
 // OpenOcean DEX aggregator — URLs from OPENOCEAN_URLS env var
 export const OPENOCEAN = {
-  BASE_URLS: parseUrls(process.env.OPENOCEAN_URLS),
+  BASE_URLS: parseUrls(process.env.OPENOCEAN_URLS || "https://open-api.openocean.finance"),
   CHAIN_ID: 8453,
   NATIVE_ETH_ADDRESS: "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
   EXCHANGE_PROXY: "0x6352a56caadC4F1E25CD6c75970Fa768A3304e64",
@@ -78,7 +82,7 @@ export const OPENOCEAN = {
 // Paraswap (Velora) DEX aggregator — URLs from PARASWAP_URLS env var
 // Augustus V6.2 — same address on all chains
 export const PARASWAP = {
-  BASE_URLS: parseUrls(process.env.PARASWAP_URLS),
+  BASE_URLS: parseUrls(process.env.PARASWAP_URLS || "https://api.paraswap.io"),
   CHAIN_ID: 8453,
   NATIVE_ETH_ADDRESS: "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
   AUGUSTUS_V6: "0x6a000f20005980200259b80c5102003040001068",

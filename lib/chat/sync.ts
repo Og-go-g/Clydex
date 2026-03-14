@@ -11,6 +11,40 @@
 // Per-session debounce to avoid cancelling syncs for different sessions
 const syncTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 
+// Pending sync payloads — used by beforeunload to flush via sendBeacon
+const pendingSyncs = new Map<string, { sessionId: string; title: string; messages: unknown[] }>();
+
+// Register beforeunload handler to flush pending syncs before tab close
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeunload", () => {
+    for (const [sessionId, payload] of pendingSyncs) {
+      // Clear the debounce timer
+      const timeout = syncTimeouts.get(sessionId);
+      if (timeout) clearTimeout(timeout);
+
+      // Use sendBeacon for reliable delivery on page unload
+      navigator.sendBeacon(
+        "/api/history/sessions",
+        new Blob(
+          [JSON.stringify({ id: payload.sessionId, title: payload.title })],
+          { type: "application/json" }
+        )
+      );
+      if (payload.messages.length > 0) {
+        navigator.sendBeacon(
+          "/api/history/messages",
+          new Blob(
+            [JSON.stringify({ sessionId: payload.sessionId, messages: payload.messages })],
+            { type: "application/json" }
+          )
+        );
+      }
+    }
+    pendingSyncs.clear();
+    syncTimeouts.clear();
+  });
+}
+
 /**
  * Sync a session + its messages to the database (debounced per session).
  */
@@ -22,8 +56,12 @@ export function syncSessionToDb(
   const existing = syncTimeouts.get(sessionId);
   if (existing) clearTimeout(existing);
 
+  // Track pending payload for beforeunload flush
+  pendingSyncs.set(sessionId, { sessionId, title, messages });
+
   syncTimeouts.set(sessionId, setTimeout(async () => {
     syncTimeouts.delete(sessionId);
+    pendingSyncs.delete(sessionId);
     try {
       // Upsert the session
       await fetch("/api/history/sessions", {

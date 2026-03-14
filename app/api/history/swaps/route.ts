@@ -110,20 +110,34 @@ export async function PATCH(request: Request) {
   try {
     const user = await getOrCreateUser(address);
 
-    // Enforce valid state transitions (confirmed/failed are terminal)
-    const existing = await prisma.swap.findFirst({ where: { id, userId: user.id } });
-    if (!existing) {
-      return NextResponse.json({ error: "Swap not found" }, { status: 404 });
-    }
-    const allowed = VALID_TRANSITIONS[existing.status];
-    if (allowed && !allowed.has(status)) {
+    // Atomic state transition: include expected current status in the WHERE clause
+    // to prevent TOCTOU race conditions (two concurrent requests both reading "pending"
+    // and writing different terminal states). Only one will match.
+    const allowedFromStatuses = Object.entries(VALID_TRANSITIONS)
+      .filter(([, allowed]) => allowed.has(status))
+      .map(([from]) => from);
+
+    if (allowedFromStatuses.length === 0) {
       return NextResponse.json({ error: "Invalid status transition" }, { status: 400 });
     }
 
-    await prisma.swap.updateMany({
-      where: { id, userId: user.id },
+    const result = await prisma.swap.updateMany({
+      where: {
+        id,
+        userId: user.id,
+        status: { in: allowedFromStatuses },
+      },
       data: { status, ...(safeTxHash ? { txHash: safeTxHash } : {}) },
     });
+
+    if (result.count === 0) {
+      // Either not found or status transition was invalid (already in terminal state)
+      const exists = await prisma.swap.findFirst({ where: { id, userId: user.id } });
+      if (!exists) {
+        return NextResponse.json({ error: "Swap not found" }, { status: 404 });
+      }
+      return NextResponse.json({ error: "Invalid status transition" }, { status: 400 });
+    }
     return NextResponse.json({ ok: true });
   } catch (error) {
     console.error("[api/history/swaps] PATCH error:", error);

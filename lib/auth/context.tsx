@@ -6,6 +6,7 @@ import {
   useState,
   useEffect,
   useCallback,
+  useRef,
   type ReactNode,
 } from "react";
 import { useWallet } from "@/lib/wallet/context";
@@ -44,6 +45,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const { address, signMessage, isManualConnect } = useWallet();
   const [sessionAddress, setSessionAddress] = useState<string | null>(null);
   const [isSigningIn, setIsSigningIn] = useState(false);
+  // Ref-based guard to prevent concurrent signIn calls (React batching can
+  // cause the useEffect to fire twice before isSigningIn state updates)
+  const isSigningInRef = useRef(false);
   // Track if user rejected the signature — don't auto-retry until address changes
   const [rejected, setRejected] = useState(false);
   // Wait for session check to complete before allowing auto-sign-in
@@ -59,7 +63,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signIn = useCallback(async () => {
-    if (!address) return;
+    if (!address || isSigningInRef.current) return;
+    isSigningInRef.current = true;
     setIsSigningIn(true);
     try {
       // 1. Get a fresh nonce from the server
@@ -98,6 +103,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setRejected(true);
       console.error("SIWE sign-in failed:", err);
     } finally {
+      isSigningInRef.current = false;
       setIsSigningIn(false);
     }
   }, [address, signMessage]);

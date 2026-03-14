@@ -135,6 +135,16 @@ export const paraswap: DexProvider = {
   async getSwapCalldata(params: SwapParams): Promise<SwapTransaction> {
     const { fromToken, toToken, amount, userAddress, slippage } = params;
 
+    // Security: validate slippage bounds to prevent sandwich attacks
+    if (typeof slippage !== "number" || !isFinite(slippage) || slippage < 0.1 || slippage > 50) {
+      throw new Error(`Slippage out of safe range (0.1%-50%): ${slippage}`);
+    }
+
+    // Security: validate amount is positive
+    if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
+      throw new Error("Invalid swap amount: must be a positive number");
+    }
+
     // Step 1: Get fresh priceRoute (required by /transactions)
     const priceRoute = await getPriceRoute(params);
     const amountRaw = parseUnits(amount, fromToken.decimals);
@@ -164,6 +174,19 @@ export const paraswap: DexProvider = {
     const tx = await res.json();
     if (!tx?.to || !tx?.data) {
       throw new Error("Paraswap returned invalid swap transaction");
+    }
+
+    // Security: verify tx.to matches expected Augustus V6 contract
+    // to prevent supply-chain attacks if the API is compromised
+    const expectedTarget = priceRoute.contractAddress || AUGUSTUS_V6;
+    if (
+      tx.to.toLowerCase() !== AUGUSTUS_V6.toLowerCase() &&
+      tx.to.toLowerCase() !== expectedTarget.toLowerCase()
+    ) {
+      throw new Error(
+        `Paraswap returned unexpected target address: ${tx.to}. ` +
+        `Expected: ${AUGUSTUS_V6}. Swap blocked for safety.`
+      );
     }
 
     const gasWithBuffer = Math.ceil((parseInt(tx.gas) || 300000) * 1.3);

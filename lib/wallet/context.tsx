@@ -286,7 +286,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     if (!provider) return;
 
     await switchChainToBase(provider);
-    setChainId(8453);
+    // Don't optimistically set chainId — rely on the chainChanged event listener
+    // to update state. Optimistic set causes UI desync if the switch fails silently.
   }, [activeProvider]);
 
   const signMessage = useCallback(

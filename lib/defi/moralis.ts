@@ -1,7 +1,19 @@
 import { SUPPORTED_CHAINS, type Chain } from "./chains";
+import { isValidAddress } from "./utils";
 
 const MORALIS_API_KEY = process.env.MORALIS_API_KEY || "";
 const MORALIS_BASE = "https://deep-index.moralis.io/api/v2.2";
+
+// Moralis chain slug mapping (different from app slugs for some chains)
+const MORALIS_CHAIN_SLUGS: Record<number, string> = {
+  1: "eth",
+  8453: "base",
+  42161: "arbitrum",
+  10: "optimism",
+  137: "polygon",
+  56: "bsc",
+  43114: "avalanche",
+};
 
 if (!MORALIS_API_KEY && typeof window === "undefined") {
   console.warn("[moralis] MORALIS_API_KEY not set — portfolio will not work");
@@ -67,15 +79,19 @@ async function fetchChainTokens(
   chain: Chain
 ): Promise<TokenHolding[]> {
   if (!MORALIS_API_KEY) throw new Error("MORALIS_API_KEY not configured");
-  const url = `${MORALIS_BASE}/wallets/${address}/tokens?chain=${chain.slug}`;
+
+  // Use Moralis-specific chain slugs (may differ from app slugs)
+  const moralisChain = MORALIS_CHAIN_SLUGS[chain.id] || chain.slug;
+  const url = `${MORALIS_BASE}/wallets/${encodeURIComponent(address)}/tokens?chain=${moralisChain}`;
 
   const res = await fetch(url, {
     headers: {
       "X-API-Key": MORALIS_API_KEY,
       accept: "application/json",
     },
+    signal: AbortSignal.timeout(15000),
     next: { revalidate: 60 },
-  });
+  } as RequestInit);
 
   if (!res.ok) {
     throw new Error(`Moralis ${chain.name}: ${res.status}`);
@@ -126,6 +142,9 @@ async function fetchChainTokens(
 export async function getMultiChainPortfolio(
   address: string
 ): Promise<PortfolioResponse> {
+  if (!isValidAddress(address)) {
+    throw new Error(`Invalid wallet address: "${address}"`);
+  }
   const errors: string[] = [];
 
   const results = await Promise.allSettled(

@@ -104,9 +104,20 @@ export async function POST(req: Request) {
     return new Response("Too many messages", { status: 400 });
   }
 
+  // Security: filter message roles to prevent prompt injection.
+  // Only allow "user" and "assistant" roles from the client.
+  // Block "system", "tool", and any other roles that could manipulate AI behavior.
+  const ALLOWED_ROLES = new Set(["user", "assistant"]);
+  const sanitizedMessages = messages.filter(
+    (msg: { role?: string }) => typeof msg.role === "string" && ALLOWED_ROLES.has(msg.role)
+  );
+  if (sanitizedMessages.length === 0) {
+    return new Response("No valid messages after role filtering", { status: 400 });
+  }
+
   // Cap per-message content length to prevent payload abuse
   const MAX_MSG_LENGTH = 20_000;
-  for (const msg of messages) {
+  for (const msg of sanitizedMessages) {
     if (typeof msg.content === "string" && msg.content.length > MAX_MSG_LENGTH) {
       return new Response("Message content too long", { status: 400 });
     }
@@ -122,7 +133,7 @@ export async function POST(req: Request) {
     }
   }
 
-  const modelMessages = await convertToModelMessages(messages);
+  const modelMessages = await convertToModelMessages(sanitizedMessages);
 
   const result = streamText({
     model: getModel(),

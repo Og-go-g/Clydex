@@ -96,6 +96,16 @@ export const openocean: DexProvider = {
   async getSwapCalldata(params: SwapParams): Promise<SwapTransaction> {
     const { fromToken, toToken, amount, userAddress, slippage } = params;
 
+    // Security: validate slippage bounds to prevent sandwich attacks
+    if (typeof slippage !== "number" || !isFinite(slippage) || slippage < 0.1 || slippage > 50) {
+      throw new Error(`Slippage out of safe range (0.1%-50%): ${slippage}`);
+    }
+
+    // Security: validate amount is positive
+    if (!amount || isNaN(Number(amount)) || Number(amount) <= 0) {
+      throw new Error("Invalid swap amount: must be a positive number");
+    }
+
     const query = new URLSearchParams({
       inTokenAddress: fromToken.address,
       outTokenAddress: toToken.address,
@@ -121,6 +131,15 @@ export const openocean: DexProvider = {
     const tx = data.data;
     if (!tx?.to || !tx?.data) {
       throw new Error("OpenOcean returned invalid swap transaction");
+    }
+
+    // Security: verify tx.to matches expected Exchange Proxy to prevent
+    // supply-chain attacks if the API is compromised
+    if (tx.to.toLowerCase() !== OPENOCEAN.EXCHANGE_PROXY.toLowerCase()) {
+      throw new Error(
+        `OpenOcean returned unexpected target address: ${tx.to}. ` +
+        `Expected: ${OPENOCEAN.EXCHANGE_PROXY}. Swap blocked for safety.`
+      );
     }
 
     const gasWithBuffer = Math.ceil((tx.estimatedGas ?? 300000) * 1.3);

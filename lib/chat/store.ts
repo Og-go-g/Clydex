@@ -25,11 +25,24 @@ const MAX_AGE_MS = 50 * 24 * 60 * 60 * 1000; // 50 days
 
 // --- Sessions ---
 
+function isValidSession(s: unknown): s is ChatSession {
+  return (
+    typeof s === "object" && s !== null &&
+    typeof (s as ChatSession).id === "string" &&
+    typeof (s as ChatSession).title === "string" &&
+    typeof (s as ChatSession).createdAt === "number" &&
+    typeof (s as ChatSession).updatedAt === "number"
+  );
+}
+
 export function getSessions(): ChatSession[] {
   return safe(() => {
     const raw = localStorage.getItem(KEYS.sessions);
     if (!raw) return [];
-    const all: ChatSession[] = JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    // Validate shape to protect against tampered localStorage
+    const all: ChatSession[] = parsed.filter(isValidSession);
     const now = Date.now();
     const fresh = all.filter((s) => now - s.updatedAt < MAX_AGE_MS);
     // Clean up expired sessions and their messages
@@ -42,7 +55,7 @@ export function getSessions(): ChatSession[] {
   }, []);
 }
 
-function saveSessions(sessions: ChatSession[]) {
+export function saveSessions(sessions: ChatSession[]) {
   try {
     localStorage.setItem(KEYS.sessions, JSON.stringify(sessions));
   } catch {
@@ -102,14 +115,36 @@ export function setActiveId(id: string) {
 
 // --- Messages ---
 
-export function getMessages(id: string): any[] {
+export interface PersistedMessage {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  parts?: unknown;
+  createdAt?: string | number;
+}
+
+const VALID_ROLES = new Set(["user", "assistant", "system"]);
+
+function isValidMessage(m: unknown): m is PersistedMessage {
+  return (
+    typeof m === "object" && m !== null &&
+    typeof (m as PersistedMessage).id === "string" &&
+    typeof (m as PersistedMessage).role === "string" &&
+    VALID_ROLES.has((m as PersistedMessage).role)
+  );
+}
+
+export function getMessages(id: string): PersistedMessage[] {
   return safe(() => {
     const raw = localStorage.getItem(KEYS.messages(id));
-    return raw ? JSON.parse(raw) : [];
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(isValidMessage);
   }, []);
 }
 
-export function saveMessages(id: string, messages: any[]) {
+export function saveMessages(id: string, messages: Array<{ id: string; role: string; content?: string; parts?: unknown; createdAt?: string | number }>) {
   // Only save serializable parts — strip functions, refs, etc.
   const serializable = messages.map((m) => ({
     id: m.id,

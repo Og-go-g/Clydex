@@ -182,12 +182,19 @@ export async function getTokenPrice(query: string): Promise<TokenPrice | null> {
   const data = await res.json();
   const pairs = data.pairs || [];
 
-  // Find best Base chain pair where the query matches baseToken
-  const basePair = pairs.find(
+  // Find best Base chain pair by highest volume (not just first match)
+  // Using find() would return a low-liquidity pair with potentially manipulated price
+  const basePairs = pairs.filter(
     (p: Record<string, unknown>) => p.chainId === "base" && p.baseToken
   );
+  if (basePairs.length === 0) return null;
 
-  if (!basePair) return null;
+  const basePair = basePairs.reduce(
+    (a: Record<string, unknown>, b: Record<string, unknown>) =>
+      (((a as Record<string, { h24?: number }>).volume?.h24) || 0) >=
+      (((b as Record<string, { h24?: number }>).volume?.h24) || 0)
+        ? a : b
+  );
 
   return {
     symbol: basePair.baseToken.symbol,

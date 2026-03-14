@@ -359,6 +359,75 @@ export default function ApprovalsPage() {
     return (window as unknown as Record<string, unknown>).ethereum as EIP1193Provider | null;
   }
 
+  // ─── Gas safety check ─────────────────────────────────────────
+  // CRITICAL SECURITY: Protects against TWO attack vectors:
+  //
+  // 1. REVERT DRAIN — frozen/paused contracts waste gas on revert
+  // 2. GAS TOKEN SCAM (BSC) — malicious approve() mints CHI gas tokens
+  //    to the scammer, costing victim $30-65 in BNB. BSC never implemented
+  //    EIP-3529 so this attack is still possible. revoke.cash and Rabby
+  //    both have this same protection.
+  //
+  // Normal ERC-20 approve(spender, 0) uses ~26,000-46,000 gas.
+  // Anything above 100,000 is suspicious. Above 200,000 = almost certain scam.
+
+  const MAX_SAFE_GAS: Record<number, number> = {
+    1: 100_000,     // Ethereum — EIP-3529 active, but still protect
+    8453: 100_000,  // Base
+    42161: 500_000, // Arbitrum (L2 gas accounting is different)
+    10: 100_000,    // Optimism
+    137: 100_000,   // Polygon
+    56: 100_000,    // BSC — GAS TOKEN SCAM VECTOR, strict limit
+    43114: 100_000, // Avalanche
+  };
+
+  // Extra suspicious threshold — if gas is THIS high, it's 100% malicious
+  const GAS_TOKEN_SCAM_THRESHOLD = 200_000;
+
+  async function estimateAndValidateGas(
+    provider: EIP1193Provider,
+    txParams: { from: string; to: string; data: string; value: string },
+    chainIdForTx: number
+  ): Promise<{ safe: boolean; gasEstimate: string; reason?: string }> {
+    try {
+      const gasHex = await provider.request({
+        method: "eth_estimateGas",
+        params: [txParams],
+      }) as string;
+      const gasNum = parseInt(gasHex, 16);
+      const maxSafe = MAX_SAFE_GAS[chainIdForTx] || 100_000;
+
+      if (gasNum > GAS_TOKEN_SCAM_THRESHOLD) {
+        // Almost certainly a Gas Token scam (especially on BSC)
+        return {
+          safe: false,
+          gasEstimate: gasHex,
+          reason: `🚨 BLOCKED: Gas ${gasNum.toLocaleString()} is extremely high (normal revoke ~46,000). This is likely a Gas Token scam — the contract's approve() function is malicious and will steal your gas fees. DO NOT revoke this token.`,
+        };
+      }
+
+      if (gasNum > maxSafe) {
+        return {
+          safe: false,
+          gasEstimate: gasHex,
+          reason: `⚠️ BLOCKED: Gas ${gasNum.toLocaleString()} is abnormally high (expected ~46,000). The token contract may be frozen, paused, or malicious. Transaction blocked to protect your funds.`,
+        };
+      }
+
+      // Use estimated gas + 20% buffer
+      const buffered = Math.ceil(gasNum * 1.2);
+      return { safe: true, gasEstimate: "0x" + buffered.toString(16) };
+    } catch (err) {
+      const errMsg = (err as { message?: string }).message || "";
+      // If estimation itself fails, the tx WILL revert
+      return {
+        safe: false,
+        gasEstimate: "0x0",
+        reason: `⚠️ BLOCKED: Gas estimation failed — transaction will revert. ${errMsg.slice(0, 100)}`,
+      };
+    }
+  }
+
   // ─── Revoke single approval (with auto chain switch) ──────────
 
   const revokeApproval = async (approval: TokenApproval) => {
@@ -397,15 +466,29 @@ export default function ApprovalsPage() {
 
       const tx = json.transaction;
 
+      // ═══ GAS SAFETY CHECK ═══
+      // Estimate gas BEFORE sending. If abnormally high → warn and abort.
+      const txParams = {
+        from: address,
+        to: tx.to,
+        data: tx.data,
+        value: tx.value,
+      };
+
+      setToastMessage(`Estimating gas for ${approval.tokenSymbol}...`);
+      const gasCheck = await estimateAndValidateGas(provider, txParams, approval.chainId);
+
+      if (!gasCheck.safe) {
+        setToastMessage(`⚠️ ${approval.tokenSymbol}: ${gasCheck.reason}`);
+        return; // Don't send — protect user
+      }
+
       const txHash = await provider.request({
         method: "eth_sendTransaction",
         params: [
           {
-            from: address,
-            to: tx.to,
-            data: tx.data,
-            value: tx.value,
-            gas: tx.gasLimit,
+            ...txParams,
+            gas: gasCheck.gasEstimate,
           },
         ],
       });
@@ -507,15 +590,29 @@ export default function ApprovalsPage() {
           if (!res.ok) throw new Error(json.error);
 
           const tx = json.transaction;
+
+          // ═══ GAS SAFETY CHECK (batch) ═══
+          const txParams = {
+            from: address,
+            to: tx.to,
+            data: tx.data,
+            value: tx.value,
+          };
+
+          const gasCheck = await estimateAndValidateGas(provider, txParams, approval.chainId);
+          if (!gasCheck.safe) {
+            setToastMessage(`⚠️ Skipping ${approval.tokenSymbol}: ${gasCheck.reason}`);
+            // Skip this one but continue batch
+            await new Promise((r) => setTimeout(r, 1500));
+            continue;
+          }
+
           const txHash = await provider.request({
             method: "eth_sendTransaction",
             params: [
               {
-                from: address,
-                to: tx.to,
-                data: tx.data,
-                value: tx.value,
-                gas: tx.gasLimit,
+                ...txParams,
+                gas: gasCheck.gasEstimate,
               },
             ],
           });
@@ -961,6 +1058,7 @@ export default function ApprovalsPage() {
                           isSelected={selectedForBatch.has(key)}
                           isRevoking={revokingSet.has(key)}
                           isRevoked={revokedSet.has(key)}
+                          isBatchRevoking={batchRevoking}
                           currentChainId={chainId}
                           onToggleSelect={() => toggleBatchSelect(key)}
                           onRevoke={() => revokeApproval(approval)}
@@ -1025,6 +1123,7 @@ function ApprovalRow({
   isSelected,
   isRevoking,
   isRevoked,
+  isBatchRevoking,
   currentChainId,
   onToggleSelect,
   onRevoke,
@@ -1033,6 +1132,7 @@ function ApprovalRow({
   isSelected: boolean;
   isRevoking: boolean;
   isRevoked: boolean;
+  isBatchRevoking: boolean;
   currentChainId: number | null;
   onToggleSelect: () => void;
   onRevoke: () => void;
@@ -1067,8 +1167,8 @@ function ApprovalRow({
         )}
       </button>
 
-      {/* Token icon */}
-      {approval.tokenLogo ? (
+      {/* Token icon — only render if URL is from a trusted CDN */}
+      {approval.tokenLogo && approval.tokenLogo.startsWith("https://") ? (
         <img
           src={approval.tokenLogo}
           alt={approval.tokenSymbol}
@@ -1101,7 +1201,7 @@ function ApprovalRow({
         <div className="flex items-center gap-2">
           <span className="font-medium">{approval.tokenSymbol}</span>
           <span className="text-xs text-muted">→</span>
-          {approval.explorerUrl ? (
+          {approval.explorerUrl && approval.explorerUrl.startsWith("https://") ? (
             <a
               href={approval.explorerUrl}
               target="_blank"
@@ -1155,9 +1255,9 @@ function ApprovalRow({
       {/* Revoke button */}
       <button
         onClick={onRevoke}
-        disabled={isRevoking}
+        disabled={isRevoking || isBatchRevoking}
         className={`shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
-          isRevoking
+          isRevoking || isBatchRevoking
             ? "bg-border text-muted"
             : approval.risk === "critical" || approval.risk === "high"
             ? "bg-red-500/20 text-red-400 hover:bg-red-500/30"

@@ -86,6 +86,17 @@ export async function getSwapQuote(
   amount: string,
   userAddress: string
 ): Promise<SwapQuote> {
+  // Validate amount
+  const numAmount = Number(amount);
+  if (isNaN(numAmount) || numAmount <= 0) {
+    throw new Error(`Invalid swap amount: "${amount}". Must be a positive number.`);
+  }
+
+  // Prevent swapping a token for itself
+  if (fromTokenSymbol.toUpperCase() === toTokenSymbol.toUpperCase()) {
+    throw new Error("Cannot swap a token for itself.");
+  }
+
   const fromToken = resolveToken(fromTokenSymbol);
   const toToken = resolveToken(toTokenSymbol);
 
@@ -163,6 +174,11 @@ export async function getSwapCalldata(
   slippage: number = 1,
   providerName?: string
 ): Promise<SwapTransaction> {
+  // Validate slippage range
+  if (!isFinite(slippage) || slippage < 0.1 || slippage > 50) {
+    throw new Error(`Slippage out of safe range (0.1%-50%): ${slippage}`);
+  }
+
   const fromToken = resolveToken(fromTokenSymbol);
   const toToken = resolveToken(toTokenSymbol);
 
