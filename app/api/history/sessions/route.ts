@@ -53,20 +53,26 @@ export async function POST(request: Request) {
   try {
     const user = await getOrCreateUser(address);
 
-    // Check ownership before upsert to prevent IDOR
-    const existing = await prisma.chatSession.findUnique({ where: { id } });
-    if (existing && existing.userId !== user.id) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-    }
+    // Atomic ownership check + upsert in a single transaction to prevent TOCTOU race
+    const session = await prisma.$transaction(async (tx) => {
+      const existing = await tx.chatSession.findUnique({ where: { id } });
 
-    const session = await prisma.chatSession.upsert({
-      where: { id },
-      create: { id, title: safeTitle, userId: user.id },
-      update: { title: safeTitle, updatedAt: new Date() },
+      if (existing && existing.userId !== user.id) {
+        throw new Error("FORBIDDEN");
+      }
+
+      return tx.chatSession.upsert({
+        where: { id },
+        create: { id, title: safeTitle, userId: user.id },
+        update: { title: safeTitle, updatedAt: new Date() },
+      });
     });
 
     return NextResponse.json({ session });
   } catch (error) {
+    if (error instanceof Error && error.message === "FORBIDDEN") {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
     console.error("[api/history/sessions] error:", error);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }

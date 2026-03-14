@@ -69,6 +69,14 @@ export function Header() {
           >
             Yields
           </Link>
+          <Link
+            href="/approvals"
+            className={`text-sm transition-colors hover:text-white ${
+              pathname === "/approvals" ? "text-white" : "text-gray-500"
+            }`}
+          >
+            Approvals
+          </Link>
         </nav>
       </div>
 
@@ -164,7 +172,7 @@ export function Header() {
         )}
       </div>
     </header>
-    <div className="flex items-center justify-end gap-1.5 bg-[#0a0a0a] px-6 py-1">
+    <div className="fixed right-6 top-[4.25rem] z-50 flex items-center gap-1.5">
       <span className="text-[10px] text-gray-600">built by</span>
       <a
         href="https://x.com/_Jitery_"

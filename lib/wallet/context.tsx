@@ -6,6 +6,7 @@ import {
   useState,
   useEffect,
   useCallback,
+  useRef,
   type ReactNode,
 } from "react";
 import { discoverWallets, type EIP6963ProviderDetail } from "./eip6963";
@@ -86,6 +87,30 @@ async function switchChainToBase(provider: EIP1193Provider): Promise<void> {
   }
 }
 
+// Shared listener handlers for cleanup tracking
+type ListenerCleanup = () => void;
+
+function attachProviderListeners(
+  provider: EIP1193Provider,
+  setAddress: (a: string | null) => void,
+  setChainId: (c: number) => void
+): ListenerCleanup {
+  const handleAccounts = (accounts: string[]) => {
+    setAddress(accounts[0] ?? null);
+  };
+  const handleChain = (id: string) => {
+    setChainId(parseInt(id, 16));
+  };
+
+  provider.on("accountsChanged", handleAccounts);
+  provider.on("chainChanged", handleChain);
+
+  return () => {
+    provider.removeListener("accountsChanged", handleAccounts);
+    provider.removeListener("chainChanged", handleChain);
+  };
+}
+
 export function WalletProvider({ children }: { children: ReactNode }) {
   const [address, setAddress] = useState<string | null>(null);
   const [chainId, setChainId] = useState<number | null>(null);
@@ -95,6 +120,16 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const [showSelector, setShowSelector] = useState(false);
   const [activeProvider, setActiveProvider] = useState<EIP1193Provider | null>(null);
   const [isManualConnect, setIsManualConnect] = useState(false);
+
+  // Track listener cleanup to prevent leaks on reconnect
+  const listenerCleanupRef = useRef<ListenerCleanup | null>(null);
+
+  function cleanupListeners() {
+    if (listenerCleanupRef.current) {
+      listenerCleanupRef.current();
+      listenerCleanupRef.current = null;
+    }
+  }
 
   // Discover wallets + restore connection on mount (only if user previously connected)
   useEffect(() => {
@@ -119,19 +154,10 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       .then((id: string) => setChainId(parseInt(id, 16)))
       .catch(() => {});
 
-    const handleAccountsChanged = (accounts: string[]) => {
-      setAddress(accounts[0] ?? null);
-    };
-    const handleChainChanged = (id: string) => {
-      setChainId(parseInt(id, 16));
-    };
-
-    ethereum.on("accountsChanged", handleAccountsChanged);
-    ethereum.on("chainChanged", handleChainChanged);
+    listenerCleanupRef.current = attachProviderListeners(ethereum, setAddress, setChainId);
 
     return () => {
-      ethereum.removeListener("accountsChanged", handleAccountsChanged);
-      ethereum.removeListener("chainChanged", handleChainChanged);
+      cleanupListeners();
     };
   }, []);
 
@@ -172,13 +198,9 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
       setShowSelector(false);
 
-      // Listen for changes on this provider
-      provider.on("accountsChanged", (accs: string[]) => {
-        setAddress(accs[0] ?? null);
-      });
-      provider.on("chainChanged", (cid: string) => {
-        setChainId(parseInt(cid, 16));
-      });
+      // Clean up previous listeners before attaching new ones
+      cleanupListeners();
+      listenerCleanupRef.current = attachProviderListeners(provider, setAddress, setChainId);
     } catch (err: unknown) {
       const walletErr = err as { code?: number; message?: string };
       if (walletErr.code === 4001) {
@@ -233,6 +255,10 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         await switchChainToBase(ethereum);
         setChainId(8453);
       }
+
+      // Clean up previous listeners before attaching new ones
+      cleanupListeners();
+      listenerCleanupRef.current = attachProviderListeners(ethereum, setAddress, setChainId);
     } catch (err: unknown) {
       const walletErr = err as { code?: number; message?: string };
       if (walletErr.code === 4001) {
@@ -246,6 +272,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   }, [wallets, connectWallet]);
 
   const disconnect = useCallback(() => {
+    cleanupListeners();
     setAddress(null);
     setChainId(null);
     setError(null);
@@ -266,11 +293,33 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     async (message: string): Promise<string> => {
       const provider = activeProvider ?? getEthereum();
       if (!provider || !address) throw new Error("No wallet connected");
-      const signature = await provider.request({
-        method: "personal_sign",
-        params: [message, address],
-      });
-      return signature as string;
+
+      // Convert message to hex for EIP-191 personal_sign compatibility
+      // Some wallets expect hex-encoded data, others accept UTF-8 strings.
+      // Hex is the safest format per the spec.
+      const hexMessage = `0x${Array.from(new TextEncoder().encode(message))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("")}`;
+
+      try {
+        // Standard EIP-191: params = [data, account]
+        const signature = await provider.request({
+          method: "personal_sign",
+          params: [hexMessage, address],
+        });
+        return signature as string;
+      } catch (err: unknown) {
+        const walletErr = err as { code?: number };
+        // Some older wallets expect [account, data] — try reversed param order
+        if (walletErr.code === -32602) {
+          const signature = await provider.request({
+            method: "personal_sign",
+            params: [address, hexMessage],
+          });
+          return signature as string;
+        }
+        throw err;
+      }
     },
     [activeProvider, address]
   );

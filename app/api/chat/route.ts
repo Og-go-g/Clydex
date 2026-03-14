@@ -84,6 +84,12 @@ After prepareSwap returns, briefly mention the trade details in your text respon
 ALWAYS call prepareSwap for EVERY swap request, even if the same swap was requested before. Previous quotes expire instantly — never tell the user to "use the existing card" or "confirm the previous swap". Each swap request = a new prepareSwap call, no exceptions.`;
 
 export async function POST(req: Request) {
+  // Require authentication — prevents unauthorized AI API usage
+  const walletAddress = await getAuthAddress();
+  if (!walletAddress) {
+    return new Response("Not authenticated — please sign in first", { status: 401 });
+  }
+
   let body;
   try {
     body = await req.json();
@@ -97,8 +103,25 @@ export async function POST(req: Request) {
   if (messages.length > 100) {
     return new Response("Too many messages", { status: 400 });
   }
-  // Wallet address from verified SIWE session (not from untrusted header)
-  const walletAddress = await getAuthAddress();
+
+  // Cap per-message content length to prevent payload abuse
+  const MAX_MSG_LENGTH = 20_000;
+  for (const msg of messages) {
+    if (typeof msg.content === "string" && msg.content.length > MAX_MSG_LENGTH) {
+      return new Response("Message content too long", { status: 400 });
+    }
+    // AI SDK messages can have parts array — check serialized size
+    if (Array.isArray(msg.parts)) {
+      try {
+        if (JSON.stringify(msg.parts).length > MAX_MSG_LENGTH) {
+          return new Response("Message parts too large", { status: 400 });
+        }
+      } catch {
+        return new Response("Invalid message parts", { status: 400 });
+      }
+    }
+  }
+
   const modelMessages = await convertToModelMessages(messages);
 
   const result = streamText({

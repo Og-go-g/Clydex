@@ -49,22 +49,25 @@ const KNOWN_ADDRESSES: Record<string, string> = {
   CBETH: "0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22",
 };
 
-// Well-known stablecoins and tokens that DexScreener may not find as baseToken
-const KNOWN_STABLECOINS: Record<string, TokenPrice> = {
-  USDC: {
-    symbol: "USDC",
-    name: "USD Coin",
-    address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-    priceUsd: 1.0,
-    priceChange24h: 0,
-    volume24h: 0,
-    liquidity: 0,
-    fdv: 0,
-    pairAddress: "",
-    dexId: "",
-    url: "https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-  },
+// USDC metadata — price is fetched live, with $1.00 fallback
+const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const USDC_FALLBACK: TokenPrice = {
+  symbol: "USDC",
+  name: "USD Coin",
+  address: USDC_ADDRESS,
+  priceUsd: 1.0,
+  priceChange24h: 0,
+  volume24h: 0,
+  liquidity: 0,
+  fdv: 0,
+  pairAddress: "",
+  dexId: "",
+  url: "https://basescan.org/token/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
 };
+
+// Simple TTL cache for stablecoin live price
+let usdcCache: { data: TokenPrice; ts: number } | null = null;
+const USDC_CACHE_TTL = 60_000; // 1 minute
 
 /** Fetch with timeout + automatic fallback across all configured DexScreener URLs. */
 async function fetchDexScreener(
@@ -99,10 +102,43 @@ async function fetchDexScreener(
 }
 
 export async function getTokenPrice(query: string): Promise<TokenPrice | null> {
-  // Check stablecoins first — DexScreener often doesn't list them as baseToken
   const upper = query.toUpperCase().trim();
-  if (KNOWN_STABLECOINS[upper]) {
-    return KNOWN_STABLECOINS[upper];
+
+  // USDC: fetch live price from DexScreener with $1.00 fallback
+  if (upper === "USDC") {
+    // Return cached if fresh
+    if (usdcCache && Date.now() - usdcCache.ts < USDC_CACHE_TTL) {
+      return usdcCache.data;
+    }
+    try {
+      const res = await fetchDexScreener(`/tokens/v1/base/${USDC_ADDRESS}`);
+      if (res.ok) {
+        const pairs: Record<string, unknown>[] = await res.json();
+        if (Array.isArray(pairs) && pairs.length > 0) {
+          const best = pairs.reduce((a, b) =>
+            (((a as Record<string, { h24?: number }>).volume?.h24) || 0) >=
+            (((b as Record<string, { h24?: number }>).volume?.h24) || 0) ? a : b
+          );
+          const price = parseFloat(String(best.priceUsd || "1"));
+          // Sanity check: reject clearly broken API data but allow real depegs
+          // (USDC dropped to ~$0.87 in March 2023 — don't mask that)
+          const livePrice: TokenPrice = {
+            ...USDC_FALLBACK,
+            priceUsd: price > 0.5 && price < 2.0 ? price : 1.0,
+            priceChange24h: ((best as Record<string, { h24?: number }>).priceChange?.h24) || 0,
+            volume24h: ((best as Record<string, { h24?: number }>).volume?.h24) || 0,
+            liquidity: ((best as Record<string, { usd?: number }>).liquidity?.usd) || 0,
+            pairAddress: String(best.pairAddress || ""),
+            dexId: String(best.dexId || ""),
+          };
+          usdcCache = { data: livePrice, ts: Date.now() };
+          return livePrice;
+        }
+      }
+    } catch {
+      // DexScreener failed — fall through to fallback
+    }
+    return USDC_FALLBACK;
   }
 
   // Try direct address lookup for well-known tokens (ETH, BTC, etc.)

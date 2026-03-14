@@ -2,7 +2,10 @@ import { NextResponse, type NextRequest } from "next/server";
 
 // ─── Per-tier token-bucket rate limiter ────────────────────────
 // In-memory, per serverless/edge instance. For full distributed
-// rate limiting, swap for Upstash Redis or Cloudflare KV.
+// rate limiting in production, use Upstash Redis (@upstash/ratelimit).
+// This still provides meaningful protection: Vercel reuses instances
+// for multiple requests, so the limiter catches sustained abuse
+// within a single instance's lifetime.
 
 interface Tier {
   maxTokens: number;
@@ -15,26 +18,31 @@ const TIERS: Record<string, Tier> = {
   default:   { maxTokens: 30, refillRate: 30 / 60 },   // 30/min — prices, yields, etc.
 };
 
-function getTier(pathname: string): Tier {
+const TIER_KEYS = ["auth", "expensive", "default"] as const;
+type TierKey = (typeof TIER_KEYS)[number];
+
+function getTierKey(pathname: string): TierKey {
   if (pathname.startsWith("/api/auth/login") || pathname.startsWith("/api/auth/nonce")) {
-    return TIERS.auth;
+    return "auth";
   }
-  if (pathname.startsWith("/api/chat") || pathname.startsWith("/api/swap") || pathname.startsWith("/api/quote")) {
-    return TIERS.expensive;
+  if (pathname.startsWith("/api/chat") || pathname.startsWith("/api/swap") || pathname.startsWith("/api/quote") || pathname.startsWith("/api/approvals")) {
+    return "expensive";
   }
-  return TIERS.default;
+  return "default";
 }
 
-// Separate buckets per IP+tier so limits don't interfere
-const store = new Map<string, { tokens: number; lastRefill: number }>();
+// Use pipe delimiter to avoid conflicts with IPv6 colons
+// Key format: "tierKey|ip"  (tierKey is always one of 3 known values)
+const store = new Map<string, { tokens: number; lastRefill: number; tierKey: TierKey }>();
 
-function rateLimit(ip: string, tier: Tier, tierKey: string): { ok: boolean; retryAfter: number } {
-  const key = `${ip}:${tierKey}`;
+function rateLimit(ip: string, tierKey: TierKey): { ok: boolean; retryAfter: number } {
+  const tier = TIERS[tierKey];
+  const key = `${tierKey}|${ip}`;
   const now = Date.now();
   const entry = store.get(key);
 
   if (!entry) {
-    store.set(key, { tokens: tier.maxTokens - 1, lastRefill: now });
+    store.set(key, { tokens: tier.maxTokens - 1, lastRefill: now, tierKey });
     return { ok: true, retryAfter: 0 };
   }
 
@@ -55,34 +63,45 @@ function rateLimit(ip: string, tier: Tier, tierKey: string): { ok: boolean; retr
 
 // Lazy cleanup every ~200 requests to prevent memory growth
 let reqCount = 0;
+const MAX_STORE_SIZE = 10_000; // Hard cap to prevent unbounded growth
+
 function maybeCleanup() {
-  if (++reqCount % 200 !== 0) return;
+  reqCount += 1;
+  // Force cleanup if store exceeds hard cap, otherwise every 200 requests
+  if (store.size < MAX_STORE_SIZE && reqCount % 200 !== 0) return;
+
   const now = Date.now();
+  const MAX_AGE_MS = 5 * 60 * 1000; // 5 minutes without activity → evict
+
   for (const [key, entry] of store) {
-    const tierKey = key.split(":").pop() ?? "default";
-    const tier = TIERS[tierKey] ?? TIERS.default;
+    // Evict entries that are fully refilled OR stale
+    const tier = TIERS[entry.tierKey] ?? TIERS.default;
     const elapsed = (now - entry.lastRefill) / 1000;
-    if (entry.tokens + elapsed * tier.refillRate >= tier.maxTokens) {
+    const isFull = entry.tokens + elapsed * tier.refillRate >= tier.maxTokens;
+    const isStale = now - entry.lastRefill > MAX_AGE_MS;
+
+    if (isFull || isStale) {
       store.delete(key);
     }
   }
 }
 
+const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
 export function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
 
   // ── Rate limit ──
-  // Prefer x-real-ip (set reliably by Vercel/proxies) over x-forwarded-for (spoofable)
+  // Prefer x-real-ip (set reliably by Vercel/proxies) over x-forwarded-for
   const ip =
     request.headers.get("x-real-ip") ||
     request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     "unknown";
 
-  const tier = getTier(pathname);
-  const tierKey = tier === TIERS.auth ? "auth" : tier === TIERS.expensive ? "expensive" : "default";
+  const tierKey = getTierKey(pathname);
 
   maybeCleanup();
-  const { ok, retryAfter } = rateLimit(ip, tier, tierKey);
+  const { ok, retryAfter } = rateLimit(ip, tierKey);
 
   if (!ok) {
     return NextResponse.json(
@@ -91,9 +110,18 @@ export function middleware(request: NextRequest) {
     );
   }
 
-  // ── CSRF: verify Origin for all mutating methods ──
-  const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
-  if (MUTATING.has(request.method)) {
+  // ── Content-Type + CSRF checks for mutating requests ──
+  if (MUTATING_METHODS.has(request.method)) {
+    const contentType = request.headers.get("content-type");
+    // If Content-Type is present, it must be JSON (allows omitted for backwards compat)
+    if (contentType && !contentType.includes("application/json")) {
+      return NextResponse.json(
+        { error: "Content-Type must be application/json" },
+        { status: 415 }
+      );
+    }
+
+    // ── CSRF: verify Origin for all mutating methods ──
     const origin = request.headers.get("origin");
     const host = request.headers.get("host");
 

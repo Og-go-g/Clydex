@@ -25,6 +25,12 @@ const features = [
     description:
       "View all your token balances across Ethereum, Base, Arbitrum, Optimism, Polygon, BSC and Avalanche.",
   },
+  {
+    icon: "🔐",
+    title: "Approval Manager",
+    description:
+      "Scan and revoke risky token approvals across 7 chains. Protect your wallet from unlimited allowance exploits.",
+  },
 ];
 
 export default function Home() {

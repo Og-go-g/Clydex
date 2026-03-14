@@ -60,20 +60,23 @@ function resolveToken(symbolOrAddress: string): {
 }
 
 // --- Quote Cache ---
-// Key: "fromAddr:toAddr:amount" → { data, timestamp }
+// Key: "fromAddr|toAddr|amount|userAddr" → { data, timestamp }
 
 const QUOTE_CACHE_TTL = 10_000; // 10 seconds
+const QUOTE_CACHE_MAX_SIZE = 500;
 const quoteCache = new Map<string, { data: SwapQuote; timestamp: number }>();
 
-// Cleanup stale entries every 60s to prevent memory leaks
-setInterval(() => {
+// Lazy cleanup — runs on cache access instead of setInterval
+// (setInterval is unreliable in serverless environments)
+function cleanupQuoteCache() {
+  if (quoteCache.size < QUOTE_CACHE_MAX_SIZE) return;
   const now = Date.now();
   for (const [key, entry] of quoteCache) {
     if (now - entry.timestamp > QUOTE_CACHE_TTL * 3) {
       quoteCache.delete(key);
     }
   }
-}, 60_000);
+}
 
 // --- Quote (meta-routing) ---
 
@@ -86,8 +89,11 @@ export async function getSwapQuote(
   const fromToken = resolveToken(fromTokenSymbol);
   const toToken = resolveToken(toTokenSymbol);
 
-  // Check cache
-  const cacheKey = `${fromToken.address}:${toToken.address}:${amount}`;
+  // Lazy cleanup on access
+  cleanupQuoteCache();
+
+  // Cache key includes userAddress to prevent cross-user quote leakage
+  const cacheKey = `${fromToken.address}|${toToken.address}|${amount}|${userAddress.toLowerCase()}`;
   const cached = quoteCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < QUOTE_CACHE_TTL) {
     return cached.data;

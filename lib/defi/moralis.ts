@@ -90,12 +90,21 @@ async function fetchChainTokens(
       if (t.possible_spam) return false;
       // 2. Native tokens always pass
       if (t.native_token) return true;
-      // 3. No token with a real price > $1M per unit exists
-      if (t.usd_price && t.usd_price > 1_000_000) return false;
-      // 4. Unverified contracts with high "value" = scam airdrop
-      if (!t.verified_contract && t.usd_value && t.usd_value > 100) return false;
-      // 5. Zero balance
+      // 3. Zero balance
       if (t.balance === "0") return false;
+      // 4. No legit token has a unit price > $1M
+      if (t.usd_price && t.usd_price > 1_000_000) return false;
+      // 5. Unverified contracts — almost always scam airdrops
+      if (!t.verified_contract) return false;
+      // 6. No price data from Moralis = likely scam or dead token
+      if (t.usd_price === null || t.usd_price === 0) return false;
+      // 7. Suspicious names: URLs, emojis, "claim", "visit", special chars
+      const nameLower = (t.name + " " + t.symbol).toLowerCase();
+      if (/https?:|\.com|\.io|\.xyz|\.org|claim|visit|airdrop|reward/.test(nameLower)) return false;
+      if (/[^\x20-\x7E]/.test(t.symbol)) return false; // non-ASCII symbols
+      // 8. Absurdly high balance with tiny value = fake liquidity scam
+      const balanceNum = parseFloat(t.balance) / 10 ** t.decimals;
+      if (balanceNum > 1_000_000 && (t.usd_value || 0) < 10) return false;
       return true;
     })
     .map((t) => ({

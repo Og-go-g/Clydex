@@ -20,6 +20,12 @@ export interface YieldPool {
 
 const REQUEST_TIMEOUT = 15_000; // DeFi Llama can be slow — 15s
 
+// In-memory cache for Base yields (the full /pools response is ~17MB,
+// too large for Next.js fetch cache which has a 2MB limit).
+// We filter to Base chain immediately and cache only the result (~50KB).
+const YIELDS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+let yieldsCache: { data: YieldPool[]; ts: number } | null = null;
+
 /** Fetch with timeout + automatic fallback across all configured DeFi Llama URLs. */
 async function fetchDefiLlama(
   path: string
@@ -33,8 +39,10 @@ async function fetchDefiLlama(
     try {
       const res = await fetch(`${baseUrl}${path}`, {
         signal: controller.signal,
-        next: { revalidate: 300 },
-      } as RequestInit);
+        // Skip Next.js fetch cache — response is too large (17MB).
+        // We use our own in-memory cache instead.
+        cache: "no-store",
+      });
 
       if (res.status === 429) {
         lastError = new Error(`DeFi Llama rate limited (429) at ${baseUrl}`);
@@ -53,6 +61,11 @@ async function fetchDefiLlama(
 }
 
 export async function getBaseYields(): Promise<YieldPool[]> {
+  // Return from in-memory cache if fresh
+  if (yieldsCache && Date.now() - yieldsCache.ts < YIELDS_CACHE_TTL) {
+    return yieldsCache.data;
+  }
+
   const res = await fetchDefiLlama("/pools");
   if (!res.ok) throw new Error(`DeFi Llama API error: ${res.status}`);
 
@@ -60,7 +73,7 @@ export async function getBaseYields(): Promise<YieldPool[]> {
   const pools: YieldPool[] = data.data;
 
   // Filter Base chain, minimum $10K TVL, positive APY
-  return pools
+  const filtered = pools
     .filter(
       (p) =>
         p.chain === "Base" &&
@@ -69,6 +82,11 @@ export async function getBaseYields(): Promise<YieldPool[]> {
     )
     .sort((a, b) => b.tvlUsd - a.tvlUsd)
     .slice(0, 100);
+
+  // Cache the filtered result (~50KB instead of 17MB)
+  yieldsCache = { data: filtered, ts: Date.now() };
+
+  return filtered;
 }
 
 export async function searchYields(
