@@ -21,6 +21,14 @@ interface ChainCache {
 // Default chain to load first
 const DEFAULT_CHAIN = "base";
 
+// ─── Module-level session cache ─────────────────────────────────
+// Survives component unmount (page navigation) but resets on
+// full page reload / site leave. Exactly like revoke.cash.
+let _sessionCache: Record<string, ChainCache> = {};
+let _sessionAddress: string | null = null;
+let _sessionActiveChain: string = DEFAULT_CHAIN;
+let _sessionRevokedKeys: Set<string> = new Set();
+
 // ─── Chain hex IDs for wallet_switchEthereumChain ───────────────
 
 const CHAIN_HEX: Record<number, string> = {
@@ -125,16 +133,22 @@ async function switchWalletChain(provider: EIP1193Provider, targetChainId: numbe
 export default function ApprovalsPage() {
   const { address, chainId, connect } = useWallet();
 
-  // Per-chain cache — persists between tab switches within session
-  const [chainCache, setChainCache] = useState<Record<string, ChainCache>>({});
-  const [activeChain, setActiveChain] = useState<string>(DEFAULT_CHAIN);
+  // Initialize from module-level session cache (survives navigation)
+  const [chainCache, setChainCacheState] = useState<Record<string, ChainCache>>(
+    () => (_sessionAddress === address ? _sessionCache : {})
+  );
+  const [activeChain, setActiveChainState] = useState<string>(
+    () => (_sessionAddress === address ? _sessionActiveChain : DEFAULT_CHAIN)
+  );
   const [loadingChains, setLoadingChains] = useState<Set<string>>(new Set());
   const [chainErrors, setChainErrors] = useState<Record<string, string>>({});
 
   const [filter, setFilter] = useState<FilterRisk>("all");
   const [search, setSearch] = useState("");
   const [revokingSet, setRevokingSet] = useState<Set<string>>(new Set());
-  const [revokedSet, setRevokedSet] = useState<Set<string>>(new Set());
+  const [revokedSet, setRevokedSetState] = useState<Set<string>>(
+    () => (_sessionAddress === address ? _sessionRevokedKeys : new Set())
+  );
   const [selectedForBatch, setSelectedForBatch] = useState<Set<string>>(new Set());
   const [batchRevoking, setBatchRevoking] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -144,6 +158,28 @@ export default function ApprovalsPage() {
   // Ref to read current cache without stale closures
   const chainCacheRef = useRef(chainCache);
   chainCacheRef.current = chainCache;
+
+  // Wrappers that sync to module-level cache
+  const setChainCache = useCallback((updater: Record<string, ChainCache> | ((prev: Record<string, ChainCache>) => Record<string, ChainCache>)) => {
+    setChainCacheState((prev) => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      _sessionCache = next;
+      return next;
+    });
+  }, []);
+
+  const setActiveChain = useCallback((chain: string) => {
+    _sessionActiveChain = chain;
+    setActiveChainState(chain);
+  }, []);
+
+  const setRevokedSet = useCallback((updater: Set<string> | ((prev: Set<string>) => Set<string>)) => {
+    setRevokedSetState((prev) => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      _sessionRevokedKeys = next;
+      return next;
+    });
+  }, []);
 
   // ─── Fetch single chain approvals ──────────────────────────────
 
@@ -212,8 +248,26 @@ export default function ApprovalsPage() {
 
   useEffect(() => {
     if (address && address !== lastAddress.current) {
-      // Wallet changed — clear all cached data and load default chain
+      // Check BEFORE overwriting — does the session cache belong to this address?
+      const hasCachedSession =
+        _sessionAddress === address &&
+        Object.keys(_sessionCache).length > 0;
+
       lastAddress.current = address;
+      _sessionAddress = address;
+
+      // Restore from module cache — no refetch needed (e.g. navigated away and back)
+      if (hasCachedSession) {
+        setChainCache(_sessionCache);
+        setActiveChain(_sessionActiveChain);
+        setRevokedSet(_sessionRevokedKeys);
+        setChainErrors({});
+        setLoadingChains(new Set());
+        setSelectedForBatch(new Set());
+        return;
+      }
+
+      // New address or no cache — clear and fetch default chain
       setChainCache({});
       setChainErrors({});
       setLoadingChains(new Set());
@@ -256,14 +310,19 @@ export default function ApprovalsPage() {
       };
       doFetch();
     } else if (!address) {
+      // Wallet disconnected — clear everything including session cache
       lastAddress.current = null;
+      _sessionAddress = null;
+      _sessionCache = {};
+      _sessionActiveChain = DEFAULT_CHAIN;
+      _sessionRevokedKeys = new Set();
       setChainCache({});
       setChainErrors({});
       setLoadingChains(new Set());
       setRevokedSet(new Set());
       setSelectedForBatch(new Set());
     }
-  }, [address]);
+  }, [address, setChainCache, setActiveChain, setRevokedSet]);
 
   // ─── Switch chain tab ──────────────────────────────────────────
 
