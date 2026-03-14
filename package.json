@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "next dev",
     "build": "prisma generate && next build",
-    "start": "next start"
+    "start": "next start",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.50",
@@ -13,6 +15,9 @@
     "@ai-sdk/react": "^3.0.107",
     "@prisma/adapter-neon": "^7.4.2",
     "@prisma/client": "^7.4.2",
+    "@sentry/nextjs": "^10.43.0",
+    "@upstash/ratelimit": "^2.0.8",
+    "@upstash/redis": "^1.37.0",
     "ai": "^6.0.105",
     "iron-session": "^8.0.4",
     "next": "^16.1.6",
@@ -26,10 +31,12 @@
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^6.0.1",
     "autoprefixer": "^10.4.27",
     "dotenv": "^17.3.1",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.19",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.1.0"
   }
 }

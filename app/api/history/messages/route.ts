@@ -110,14 +110,27 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    // Full sync: delete + create + touch session in one transaction
+    // Optimistic concurrency: only sync if no other tab synced in the last 1s.
+    // This prevents two tabs from overwriting each other's messages.
+    const now = new Date();
+    const lockResult = await prisma.chatSession.updateMany({
+      where: {
+        id: sessionId,
+        userId: user.id,
+        updatedAt: { lt: new Date(now.getTime() - 1000) },
+      },
+      data: { updatedAt: now },
+    });
+
+    if (lockResult.count === 0) {
+      // Another tab synced very recently — skip to avoid data loss
+      return NextResponse.json({ ok: true, skipped: true });
+    }
+
+    // Safe to proceed — delete old + write new in one transaction
     await prisma.$transaction([
       prisma.chatMessage.deleteMany({ where: { sessionId } }),
       prisma.chatMessage.createMany({ data: validated }),
-      prisma.chatSession.update({
-        where: { id: sessionId },
-        data: { updatedAt: new Date() },
-      }),
     ]);
 
     return NextResponse.json({ ok: true });

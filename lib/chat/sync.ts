@@ -14,7 +14,10 @@ const syncTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 // Pending sync payloads — used by beforeunload to flush via sendBeacon
 const pendingSyncs = new Map<string, { sessionId: string; title: string; messages: unknown[] }>();
 
-// Register beforeunload handler to flush pending syncs before tab close
+// Register beforeunload handler to flush pending syncs before tab close.
+// Uses fetch() with keepalive instead of sendBeacon — keepalive guarantees
+// delivery on page unload AND properly sends Origin header (required by
+// our CSRF middleware). sendBeacon omits Origin in some browsers → 403.
 if (typeof window !== "undefined") {
   window.addEventListener("beforeunload", () => {
     for (const [sessionId, payload] of pendingSyncs) {
@@ -22,22 +25,21 @@ if (typeof window !== "undefined") {
       const timeout = syncTimeouts.get(sessionId);
       if (timeout) clearTimeout(timeout);
 
-      // Use sendBeacon for reliable delivery on page unload
-      navigator.sendBeacon(
-        "/api/history/sessions",
-        new Blob(
-          [JSON.stringify({ id: payload.sessionId, title: payload.title })],
-          { type: "application/json" }
-        )
-      );
+      // keepalive: true allows fetch to outlive the page
+      fetch("/api/history/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: payload.sessionId, title: payload.title }),
+        keepalive: true,
+      }).catch(() => {});
+
       if (payload.messages.length > 0) {
-        navigator.sendBeacon(
-          "/api/history/messages",
-          new Blob(
-            [JSON.stringify({ sessionId: payload.sessionId, messages: payload.messages })],
-            { type: "application/json" }
-          )
-        );
+        fetch("/api/history/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId: payload.sessionId, messages: payload.messages }),
+          keepalive: true,
+        }).catch(() => {});
       }
     }
     pendingSyncs.clear();

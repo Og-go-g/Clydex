@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import { Providers } from "@/components/Providers";
 import { Header } from "@/components/layout/Header";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import "./globals.css";
 
 const inter = Inter({ subsets: ["latin"] });
@@ -22,7 +23,9 @@ export default function RootLayout({
       <body className={`${inter.className} antialiased`}>
         <Providers>
           <Header />
-          <main className="min-h-[calc(100vh-4rem)]">{children}</main>
+          <main className="min-h-[calc(100vh-4rem)]">
+            <ErrorBoundary>{children}</ErrorBoundary>
+          </main>
         </Providers>
       </body>
     </html>

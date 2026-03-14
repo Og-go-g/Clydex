@@ -176,13 +176,10 @@ export const paraswap: DexProvider = {
       throw new Error("Paraswap returned invalid swap transaction");
     }
 
-    // Security: verify tx.to matches expected Augustus V6 contract
-    // to prevent supply-chain attacks if the API is compromised
-    const expectedTarget = priceRoute.contractAddress || AUGUSTUS_V6;
-    if (
-      tx.to.toLowerCase() !== AUGUSTUS_V6.toLowerCase() &&
-      tx.to.toLowerCase() !== expectedTarget.toLowerCase()
-    ) {
+    // Security: verify tx.to matches hardcoded Augustus V6 contract ONLY.
+    // Do NOT trust priceRoute.contractAddress — it comes from the same API
+    // and could be spoofed in a supply-chain attack to bypass this check.
+    if (tx.to.toLowerCase() !== AUGUSTUS_V6.toLowerCase()) {
       throw new Error(
         `Paraswap returned unexpected target address: ${tx.to}. ` +
         `Expected: ${AUGUSTUS_V6}. Swap blocked for safety.`

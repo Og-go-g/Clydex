@@ -1,7 +1,14 @@
 import { NextResponse } from "next/server";
 import { getTokenPrice } from "@/lib/defi/prices";
+import { getAuthAddress } from "@/lib/auth/session";
 
 export async function GET(request: Request) {
+  // Require auth to prevent abuse as free API proxy
+  const address = await getAuthAddress();
+  if (!address) {
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  }
+
   try {
     const { searchParams } = new URL(request.url);
     const token = searchParams.get("token");

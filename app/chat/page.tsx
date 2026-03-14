@@ -94,9 +94,6 @@ function ChatContent({ chatId }: { chatId: string }) {
     () =>
       new DefaultChatTransport({
         api: "/api/chat",
-        headers: () => ({
-          "x-wallet-address": addressRef.current || "",
-        }),
       }),
     []
   );
@@ -643,7 +640,7 @@ function SwapCard({ data, isLatest = true, toolCallId }: { data: SwapQuoteData; 
   const persisted = toolCallId ? loadSwapState(toolCallId) : null;
 
   const [status, setStatus] = useState<
-    "idle" | "approving" | "swapping" | "confirming" | "confirmed" | "error"
+    "idle" | "approving" | "swapping" | "simulated" | "confirming" | "confirmed" | "error"
   >(persisted?.status || "idle");
   const [txHash, setTxHash] = useState<string | null>(persisted?.txHash || null);
   const [errorMsg, setErrorMsg] = useState<string | null>(persisted?.errorMsg || null);
@@ -806,7 +803,14 @@ function SwapCard({ data, isLatest = true, toolCallId }: { data: SwapQuoteData; 
         throw new Error(errBody.error || "Failed to get swap data");
       }
 
-      const { transaction } = await res.json();
+      const { transaction, simulated } = await res.json();
+
+      // Show simulation success indicator before sending to wallet
+      if (simulated) {
+        setStatus("simulated");
+        // Brief pause so the user sees the simulation confirmation
+        await new Promise((r) => setTimeout(r, 800));
+      }
 
       // Validate transaction target against known DEX router addresses
       const TRUSTED_ROUTERS = [
@@ -1022,7 +1026,14 @@ function SwapCard({ data, isLatest = true, toolCallId }: { data: SwapQuoteData; 
 
         {status === "swapping" && (
           <div className="flex items-center justify-center gap-2 rounded-xl bg-card py-3 text-sm text-muted">
-            <Spinner /> Preparing swap...
+            <Spinner /> Simulating transaction...
+          </div>
+        )}
+
+        {status === "simulated" && (
+          <div className="flex items-center justify-center gap-2 rounded-xl bg-success/10 py-3 text-sm font-medium text-success">
+            <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg>
+            Transaction simulated successfully
           </div>
         )}
 

@@ -1,3 +1,5 @@
+import { withSentryConfig } from "@sentry/nextjs";
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   productionBrowserSourceMaps: false,
@@ -27,6 +29,11 @@ const nextConfig = {
             key: "Permissions-Policy",
             value: "camera=(), microphone=(), geolocation=()",
           },
+          {
+            key: "Content-Security-Policy",
+            value:
+              "default-src 'self'; script-src 'self' 'unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: blob:; font-src 'self' data:; connect-src 'self' https://api.dexscreener.com https://yields.llama.fi https://deep-index.moralis.io https://open-api.openocean.finance https://api.paraswap.io https://apiv5.paraswap.io https://*.base.org https://*.publicnode.com https://*.drpc.org wss://*.base.org; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+          },
         ],
       },
       {
@@ -42,4 +49,12 @@ const nextConfig = {
   },
 };
 
-export default nextConfig;
+export default withSentryConfig(nextConfig, {
+  // Suppress source map upload logs during build
+  silent: true,
+  // Don't upload source maps unless SENTRY_AUTH_TOKEN is set
+  org: process.env.SENTRY_ORG || "",
+  project: process.env.SENTRY_PROJECT || "",
+  // Only upload when env vars are present
+  ...(process.env.SENTRY_AUTH_TOKEN ? {} : { dryRun: true }),
+});

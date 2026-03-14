@@ -3,6 +3,7 @@
 
 import { NextResponse } from "next/server";
 import { GECKOTERMINAL_URLS } from "@/lib/defi/constants";
+import { getAuthAddress } from "@/lib/auth/session";
 
 const REQUEST_TIMEOUT = 10_000;
 
@@ -43,6 +44,12 @@ async function fetchGeckoTerminal(path: string): Promise<Response> {
 }
 
 export async function GET(request: Request) {
+  // Require auth to prevent abuse as free API proxy
+  const address = await getAuthAddress();
+  if (!address) {
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  }
+
   const { searchParams } = new URL(request.url);
   const tokenAddress = searchParams.get("token");
 

@@ -72,7 +72,7 @@ export async function POST(request: Request) {
 
     // Dry-run: simulate the swap via eth_call before sending to the user.
     // Catches reverts (insufficient balance, bad route, expired quote)
-    // without costing any gas. Fail-open if RPC is unreachable.
+    // without costing any gas. Fail-closed: blocks swap if RPC is unreachable.
     const sim = await simulateSwap(userAddress, transaction);
 
     if (!sim.success) {
@@ -82,7 +82,7 @@ export async function POST(request: Request) {
       );
     }
 
-    return NextResponse.json({ transaction });
+    return NextResponse.json({ transaction, simulated: true });
   } catch (error: unknown) {
     console.error("Swap API error:", error);
     const message = error instanceof Error ? error.message : "";
