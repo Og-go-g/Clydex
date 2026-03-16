@@ -13,9 +13,11 @@ import {
   ConnectionProvider,
   WalletProvider as SolanaWalletProvider,
   useWallet as useSolanaWallet,
-  useConnection,
 } from "@solana/wallet-adapter-react";
-import { WalletModalProvider } from "@solana/wallet-adapter-react-ui";
+import {
+  WalletModalProvider,
+  useWalletModal,
+} from "@solana/wallet-adapter-react-ui";
 import {
   PhantomWalletAdapter,
   SolflareWalletAdapter,
@@ -78,6 +80,7 @@ function WalletContextInner({ children }: { children: ReactNode }) {
     wallets,
     wallet,
   } = useSolanaWallet();
+  const { setVisible } = useWalletModal();
 
   const [error, setError] = useState<string | null>(null);
   const [isManualConnect, setIsManualConnect] = useState(false);
@@ -112,15 +115,9 @@ function WalletContextInner({ children }: { children: ReactNode }) {
       select(wallets[0].adapter.name);
       return;
     }
-    // Otherwise the WalletModalProvider handles showing the modal
-    // We trigger it by selecting null which prompts the modal
-    // The @solana/wallet-adapter-react-ui WalletMultiButton handles this
-    // For our custom flow, we'll dispatch a click on the hidden button
-    const btn = document.querySelector("[data-wallet-modal-trigger]") as HTMLButtonElement | null;
-    if (btn) {
-      btn.click();
-    }
-  }, [wallet, wallets, select]);
+    // Open the wallet selection modal
+    setVisible(true);
+  }, [wallet, wallets, select, setVisible]);
 
   const disconnect = useCallback(async () => {
     try {
