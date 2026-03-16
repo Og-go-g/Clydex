@@ -166,7 +166,7 @@ export default function MarketsPage() {
                     className="border-b border-border transition-colors hover:bg-card/50"
                   >
                     <td className="px-4 py-3">
-                      <Link href={`/chat`} className="flex items-center gap-2 hover:text-accent">
+                      <Link href={`/markets/${m.id}`} className="flex items-center gap-2 hover:text-accent">
                         <span className="font-medium text-foreground">{m.symbol.replace("-PERP", "")}</span>
                         <span className={`text-[10px] ${TIER_COLORS[m.tier] ?? "text-muted"}`}>T{m.tier}</span>
                       </Link>
