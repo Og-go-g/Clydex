@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useWallet } from "@/lib/wallet/context";
 import { useAuth } from "@/lib/auth/context";
+import { DepositWithdrawModal } from "@/components/collateral/DepositWithdrawModal";
 
 interface PositionData {
   marketId: number;
@@ -87,31 +88,32 @@ export default function PortfolioPage() {
   const [data, setData] = useState<AccountData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [collateralModalOpen, setCollateralModalOpen] = useState(false);
+
+  const fetchAccount = useCallback(async () => {
+    try {
+      setLoading(true);
+      const res = await fetch("/api/account");
+      if (res.status === 401) {
+        setError("Please sign in to view your portfolio.");
+        return;
+      }
+      if (!res.ok) throw new Error("Failed to fetch");
+      setData(await res.json());
+    } catch {
+      setError("Failed to load account data");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (!isAuthenticated) {
       setLoading(false);
       return;
     }
-
-    async function fetchAccount() {
-      try {
-        const res = await fetch("/api/account");
-        if (res.status === 401) {
-          setError("Please sign in to view your portfolio.");
-          return;
-        }
-        if (!res.ok) throw new Error("Failed to fetch");
-        setData(await res.json());
-      } catch {
-        setError("Failed to load account data");
-      } finally {
-        setLoading(false);
-      }
-    }
-
     fetchAccount();
-  }, [isAuthenticated]);
+  }, [isAuthenticated, fetchAccount]);
 
   if (!address) {
     return (
@@ -180,7 +182,21 @@ export default function PortfolioPage() {
   return (
     <div className="min-h-screen bg-background p-6">
       <div className="mx-auto max-w-5xl">
-        <h1 className="mb-6 text-2xl font-bold text-foreground">Portfolio</h1>
+        <div className="mb-6 flex items-center justify-between">
+          <h1 className="text-2xl font-bold text-foreground">Portfolio</h1>
+          <button
+            onClick={() => setCollateralModalOpen(true)}
+            className="rounded-xl bg-blue-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-600"
+          >
+            Deposit / Withdraw
+          </button>
+        </div>
+
+        <DepositWithdrawModal
+          isOpen={collateralModalOpen}
+          onClose={() => setCollateralModalOpen(false)}
+          onSuccess={fetchAccount}
+        />
 
         {/* Account Summary */}
         <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-4">
