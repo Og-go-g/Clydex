@@ -1,0 +1,106 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+//  User — one row per Solana wallet address
+// ---------------------------------------------------------------------------
+model User {
+  id        String   @id @default(cuid())
+  address   String   @unique            // base58 Solana public key
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sessions  ChatSession[]
+  trades    Trade[]
+  alerts    Alert[]
+
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+//  ChatSession — a conversation thread
+// ---------------------------------------------------------------------------
+model ChatSession {
+  id        String   @id @default(cuid())
+  title     String   @default("New Chat")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  messages  ChatMessage[]
+
+  @@index([userId])
+  @@map("chat_sessions")
+}
+
+// ---------------------------------------------------------------------------
+//  ChatMessage — individual message in a session
+// ---------------------------------------------------------------------------
+model ChatMessage {
+  id        String   @id @default(cuid())
+  role      String                       // "user" | "assistant"
+  content   String   @default("")        // plain text content
+  parts     Json?                        // AI SDK parts array (tool results etc.)
+  createdAt DateTime @default(now())
+
+  sessionId String
+  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("chat_messages")
+}
+
+// ---------------------------------------------------------------------------
+//  Trade — executed perpetual futures trade record
+// ---------------------------------------------------------------------------
+model Trade {
+  id         String   @id @default(cuid())
+  marketId   Int                          // N1 market ID (0=BTC, 1=ETH, etc.)
+  symbol     String                       // "BTC-PERP"
+  side       String                       // "Long" | "Short"
+  size       Float                        // base asset units
+  price      Float                        // entry/exit price
+  leverage   Float                        // leverage used
+  orderId    String?                      // N1 order ID
+  actionId   String?                      // N1 action ID
+  orderType  String   @default("market")  // "market" | "limit" | "stop_loss" | "take_profit"
+  status     String   @default("pending") // "pending" | "filled" | "cancelled" | "failed"
+  pnl        Float?                       // realized PnL in USDC
+  fee        Float?                       // trading fee in USDC
+  createdAt  DateTime @default(now())
+
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([symbol])
+  @@map("trades")
+}
+
+// ---------------------------------------------------------------------------
+//  Alert — liquidation and risk alerts
+// ---------------------------------------------------------------------------
+model Alert {
+  id          String   @id @default(cuid())
+  type        String                       // "liquidation_warning" | "liquidation_critical" | "liquidation_emergency"
+  marketId    Int?                          // specific market, or null for account-level
+  symbol      String?                       // "BTC-PERP" etc.
+  marginRatio Float                         // margin ratio at time of alert
+  message     String                        // human-readable alert text
+  dismissed   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("alerts")
+}

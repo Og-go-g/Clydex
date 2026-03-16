@@ -1,0 +1,49 @@
+{
+  "name": "clydex-n1",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "prisma generate && next build",
+    "start": "next start",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.50",
+    "@ai-sdk/openai": "^3.0.37",
+    "@ai-sdk/react": "^3.0.107",
+    "@n1xyz/nord-ts": "latest",
+    "@prisma/adapter-neon": "^7.4.2",
+    "@prisma/client": "^7.4.2",
+    "@sentry/nextjs": "^10.43.0",
+    "@solana/spl-token": "^0.4.9",
+    "@solana/wallet-adapter-react": "^0.15.35",
+    "@solana/wallet-adapter-react-ui": "^0.9.35",
+    "@solana/wallet-adapter-wallets": "^0.19.32",
+    "@solana/web3.js": "^1.98.0",
+    "@upstash/ratelimit": "^2.0.8",
+    "@upstash/redis": "^1.37.0",
+    "ai": "^6.0.105",
+    "bs58": "^6.0.0",
+    "iron-session": "^8.0.4",
+    "next": "^16.1.6",
+    "prisma": "^7.4.2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "tweetnacl": "^1.0.3",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^6.0.1",
+    "autoprefixer": "^10.4.27",
+    "dotenv": "^17.3.1",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.19",
+    "typescript": "^5",
+    "vitest": "^4.1.0"
+  }
+}
