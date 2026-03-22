@@ -294,12 +294,25 @@ export default function PortfolioPage() {
 
   if (!data?.exists) {
     return (
-      <div className="flex min-h-[60vh] items-center justify-center">
-        <div className="text-center">
-          <h2 className="text-xl font-semibold text-foreground">No Account</h2>
-          <p className="mt-2 text-sm text-muted">{data?.message || "Deposit USDC to 01 Exchange to create your account."}</p>
+      <>
+        <div className="flex min-h-[60vh] items-center justify-center">
+          <div className="text-center">
+            <h2 className="text-xl font-semibold text-foreground">No Account</h2>
+            <p className="mt-2 text-sm text-muted">Deposit USDC to create your 01 Exchange trading account.</p>
+            <button
+              onClick={() => setCollateralModalOpen(true)}
+              className="mt-4 rounded-xl bg-green-500 px-6 py-2.5 text-sm font-medium text-white transition-colors hover:bg-green-600"
+            >
+              Deposit USDC
+            </button>
+          </div>
         </div>
-      </div>
+        <DepositWithdrawModal
+          isOpen={collateralModalOpen}
+          onClose={() => setCollateralModalOpen(false)}
+          onSuccess={fetchAccount}
+        />
+      </>
     );
   }
 
