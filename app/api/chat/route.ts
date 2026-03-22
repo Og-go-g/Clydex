@@ -782,19 +782,32 @@ export async function POST(req: Request) {
             return { error: "Please specify a valid size (in base asset or USD)." };
           }
 
+          // ── Check account exists BEFORE any calculations ──
+          // If no account, return error immediately — no leverage warnings, no preview card
+          let accountId: number | null = null;
+          try {
+            accountId = walletAddress ? await getUserAccountId(walletAddress) : null;
+          } catch {
+            // Account check failed — will fallback to isolated estimate below
+          }
+          if (!accountId) {
+            return {
+              error: "You don't have an 01 Exchange account yet. Go to the Portfolio page and deposit USDC to create your trading account first.",
+            };
+          }
+
           // Calculate order economics
           const notionalValue = orderSize * entryPrice;
           const marginRequired = notionalValue / leverage;
           const imf = market.initialMarginFraction;
           const mmf = imf / 2; // maintenance = 50% of initial
 
-          // Fetch account data once for both liq price + margin checks
-          const pmmf = mmf; // per-market maintenance margin fraction
+          // Fetch account data for liq price + margin checks
+          const pmmf = mmf;
           let liquidationPrice = 0;
           const warnings: string[] = [];
 
           try {
-            const accountId = walletAddress ? await getUserAccountId(walletAddress) : null;
             if (accountId) {
               const account = await getAccount(accountId);
               const accountMf = account.margins?.mf ?? account.margins?.omf ?? 0;
@@ -818,10 +831,6 @@ export async function POST(req: Request) {
               if (marginRequired > available) {
                 warnings.push("🚫 Insufficient margin. You need $" + marginRequired.toFixed(2) + " but have $" + available.toFixed(2) + " available.");
               }
-            } else {
-              return {
-                error: "You don't have an 01 Exchange account yet. Go to the Portfolio page and deposit USDC to create your trading account first.",
-              };
             }
           } catch (err) {
             console.error("[prepareOrder] account fetch failed, using isolated margin estimate:", err);
