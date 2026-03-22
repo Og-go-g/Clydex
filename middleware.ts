@@ -14,17 +14,17 @@ const upstashLimiters = redis
   ? {
       auth: new Ratelimit({
         redis,
-        limiter: Ratelimit.slidingWindow(5, "60 s"),
+        limiter: Ratelimit.slidingWindow(10, "60 s"),
         prefix: "rl:auth",
       }),
       expensive: new Ratelimit({
         redis,
-        limiter: Ratelimit.slidingWindow(10, "60 s"),
+        limiter: Ratelimit.slidingWindow(30, "60 s"),
         prefix: "rl:expensive",
       }),
       default: new Ratelimit({
         redis,
-        limiter: Ratelimit.slidingWindow(30, "60 s"),
+        limiter: Ratelimit.slidingWindow(60, "60 s"),
         prefix: "rl:default",
       }),
     }
@@ -139,9 +139,13 @@ export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
 
   // ── Rate limit ──
-  // Use Next.js built-in IP (reliable on Vercel).
-  // Fallback: use LAST hop of x-forwarded-for (closest proxy, harder to spoof).
-  const ip = (request as unknown as { ip?: string }).ip || "unknown";
+  // 1. Vercel sets request.ip from their edge (trusted, not spoofable)
+  // 2. Fallback: last entry of x-forwarded-for (closest proxy to Vercel edge)
+  // 3. Last resort: "unknown" (shared bucket — very aggressive limiting)
+  const vercelIp = (request as unknown as { ip?: string }).ip;
+  const xff = request.headers.get("x-forwarded-for");
+  const lastHop = xff?.split(",").pop()?.trim();
+  const ip = vercelIp || lastHop || "unknown";
 
   const tierKey = getTierKey(pathname);
 

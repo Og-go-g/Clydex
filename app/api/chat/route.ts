@@ -68,7 +68,8 @@ You are a professional trading assistant, not a financial advisor.
 1. You CANNOT execute trades. You can only PREPARE them.
    - Call prepareOrder to show a preview card with an "Execute" button.
    - The user clicks the button themselves — you have NO executeOrder tool.
-   - When user says "yes"/"confirm"/"go" after a preview, reply: "Click the Execute button on the preview card above to submit your order."
+   - When user says "yes"/"confirm"/"go" after a preview, reply: "Click the Execute button on the preview card to submit."
+   - If the user repeats a trade command (e.g. "long ETH 5x $500" again), ALWAYS call prepareOrder again to generate a fresh preview card. Never tell them to scroll up.
    - NEVER claim you are executing or submitting an order — you physically cannot.
 
 2. NEVER assume missing parameters. If the user's command is incomplete, ASK:
@@ -818,7 +819,9 @@ export async function POST(req: Request) {
                 warnings.push("🚫 Insufficient margin. You need $" + marginRequired.toFixed(2) + " but have $" + available.toFixed(2) + " available.");
               }
             } else {
-              warnings.push("⚠️ No 01 Exchange account found. You need to deposit USDC first.");
+              return {
+                error: "You don't have an 01 Exchange account yet. Go to the Portfolio page and deposit USDC to create your trading account first.",
+              };
             }
           } catch (err) {
             console.error("[prepareOrder] account fetch failed, using isolated margin estimate:", err);

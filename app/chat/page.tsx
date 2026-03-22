@@ -1881,10 +1881,12 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage }: { data: Recor
   useEffect(() => {
     if (!isExecuted || reloadChecked) return;
     if (previewId && getConfirmedPosition(previewId)) { setReloadState("position"); setReloadChecked(true); return; }
+    // Timeout: if check takes >5s, stop loading and show static card
+    const timeout = setTimeout(() => { setReloadState("completed"); setReloadChecked(true); }, 5000);
     (async () => {
       try {
         const res = await fetch(`/api/account?_t=${Date.now()}`);
-        if (!res.ok) { setReloadState("completed"); setReloadChecked(true); return; }
+        if (!res.ok) { clearTimeout(timeout); setReloadState("completed"); setReloadChecked(true); return; }
         const acc = await res.json();
         const sym = normSym(market);
         const ba = baseAssetFrom(sym);
@@ -1906,6 +1908,7 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage }: { data: Recor
             liqPrice: pos.liqPrice ?? 0, usedMargin: pos.usedMargin ?? 0,
             maxLeverage: pos.maxLeverage ?? 1, pnlPercent: 0,
           });
+          clearTimeout(timeout);
           setReloadState("position");
           setReloadChecked(true);
           return;
@@ -1917,10 +1920,12 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage }: { data: Recor
           const oSym = (o.symbol ?? o.marketSymbol ?? "").toUpperCase();
           return oSym === sym || oSym.startsWith(ba);
         });
+        clearTimeout(timeout);
         setReloadState(hasOrder ? "order" : "completed");
-      } catch { setReloadState("completed"); }
+      } catch { clearTimeout(timeout); setReloadState("completed"); }
       setReloadChecked(true);
     })();
+    return () => clearTimeout(timeout);
   }, [isExecuted, reloadChecked, previewId, market]);
 
   const handleExecute = () => {
