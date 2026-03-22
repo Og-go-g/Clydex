@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
+import * as Sentry from "@sentry/nextjs";
 import { getSession } from "@/lib/auth/session";
 import { parseSiwsMessage, verifySiwsSignature, isValidSolanaAddress } from "@/lib/auth/siws";
+import { consumeNonce } from "@/lib/auth/nonce-store";
 
 /** POST /api/auth/login — verify Solana signature and create a session. */
 export async function POST(req: Request) {
@@ -29,16 +31,10 @@ export async function POST(req: Request) {
       );
     }
 
-    // Validate domain matches this server
-    const origin = req.headers.get("origin") || req.headers.get("referer") || "";
+    // Validate domain matches this server (only use origin, not referer — referer is spoofable)
+    const origin = req.headers.get("origin") || "";
     const expectedHost = origin ? new URL(origin).host : "";
     if (!expectedHost || fields.domain !== expectedHost) {
-      return NextResponse.json({ error: "Authentication failed" }, { status: 401 });
-    }
-
-    // Verify nonce matches the one stored in the session
-    const session = await getSession();
-    if (!session.nonce || fields.nonce !== session.nonce) {
       return NextResponse.json({ error: "Authentication failed" }, { status: 401 });
     }
 
@@ -60,21 +56,32 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Authentication failed" }, { status: 401 });
     }
 
-    // CRITICAL: Verify the ed25519 signature
+    // CRITICAL: Verify the ed25519 signature BEFORE consuming the nonce
     const valid = verifySiwsSignature(message, signature);
     if (!valid) {
       return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
     }
 
+    // Atomically consume nonce server-side AFTER signature is verified
+    // (prevents nonce exhaustion via forged signatures)
+    if (!consumeNonce(fields.nonce)) {
+      return NextResponse.json({ error: "Authentication failed" }, { status: 401 });
+    }
+    // Also clean up session nonce
+    const session = await getSession();
+    delete session.nonce;
+    await session.save();
+
     // Session rotation: destroy old session, create new
     session.destroy();
     const newSession = await getSession();
     newSession.address = fields.address; // base58 public key (case-sensitive)
+    newSession.createdAt = Date.now();
     await newSession.save();
 
     return NextResponse.json({ address: newSession.address });
   } catch (error) {
-    console.error("[api/auth/login] error:", error);
+    Sentry.captureException(error, { tags: { endpoint: "auth-login" } });
     return NextResponse.json(
       { error: "Authentication failed" },
       { status: 500 }

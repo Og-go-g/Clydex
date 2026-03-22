@@ -1,7 +1,7 @@
 import { NordUser, Side, FillMode, TriggerKind } from "@n1xyz/nord-ts";
 import type { PublicKey, Transaction } from "@solana/web3.js";
 import { getNord } from "./client";
-import { N1_MARKETS, validateLeverage } from "./constants";
+import { resolveMarket, validateLeverage } from "./constants";
 import type { OrderSide } from "./types";
 
 // ─── Types ───────────────────────────────────────────────────────
@@ -92,7 +92,11 @@ export async function createNordUser(params: CreateUserParams): Promise<NordUser
  * Validates leverage against market tier limits before submitting.
  */
 export async function placeOrder(user: NordUser, params: PlaceOrderParams) {
-  const market = N1_MARKETS[params.symbol] ?? N1_MARKETS[`${params.symbol}-PERP`];
+  // Ensure market cache is populated (needed on client-side)
+  const { ensureMarketCache } = await import("./constants");
+  await ensureMarketCache();
+
+  const market = resolveMarket(params.symbol);
   if (!market) {
     throw new Error(`Unknown market: ${params.symbol}`);
   }
@@ -135,7 +139,7 @@ export async function cancelOrder(user: NordUser, orderId: string | number, acco
  * Add a stop-loss or take-profit trigger.
  */
 export async function setTrigger(user: NordUser, params: SetTriggerParams) {
-  const market = N1_MARKETS[params.symbol] ?? N1_MARKETS[`${params.symbol}-PERP`];
+  const market = resolveMarket(params.symbol);
   if (!market) {
     throw new Error(`Unknown market: ${params.symbol}`);
   }
@@ -163,7 +167,7 @@ export async function removeTrigger(
     accountId?: number;
   }
 ) {
-  const market = N1_MARKETS[params.symbol] ?? N1_MARKETS[`${params.symbol}-PERP`];
+  const market = resolveMarket(params.symbol);
   if (!market) {
     throw new Error(`Unknown market: ${params.symbol}`);
   }
@@ -198,35 +202,20 @@ export async function withdrawUsdc(user: NordUser, amount: number) {
 }
 
 /**
- * Get on-chain Solana token balances for this user.
- */
-export async function getSolanaBalances(user: NordUser) {
-  return user.getSolanaBalances({
-    includeZeroBalances: false,
-    includeTokenAccounts: true,
-  });
-}
-
-/**
- * Close a position by placing a reduce-only market order in the opposite direction.
+ * Close a position (full or partial) via reduce-only market order.
  */
 export async function closePosition(
   user: NordUser,
-  params: {
-    symbol: string;
-    side: OrderSide;
-    size: number;
-    accountId?: number;
-  }
+  params: { symbol: string; side: OrderSide; size: number; accountId?: number }
 ) {
-  const market = N1_MARKETS[params.symbol] ?? N1_MARKETS[`${params.symbol}-PERP`];
-  if (!market) {
-    throw new Error(`Unknown market: ${params.symbol}`);
-  }
+  const { ensureMarketCache } = await import("./constants");
+  await ensureMarketCache();
 
-  // To close a Long, we sell (Ask). To close a Short, we buy (Bid).
+  const market = resolveMarket(params.symbol);
+  if (!market) throw new Error(`Unknown market: ${params.symbol}`);
+
+  // Close = opposite side, reduce-only market order
   const closeSide = params.side === "Long" ? Side.Ask : Side.Bid;
-
   return user.placeOrder({
     marketId: market.id,
     side: closeSide,
@@ -236,3 +225,16 @@ export async function closePosition(
     accountId: params.accountId,
   });
 }
+
+/**
+ * Get on-chain Solana token balances for this user.
+ */
+export async function getSolanaBalances(user: NordUser) {
+  return user.getSolanaBalances({
+    includeZeroBalances: false,
+    includeTokenAccounts: true,
+  });
+}
+
+/** @deprecated — use the closePosition defined above */
+// (duplicate removed)

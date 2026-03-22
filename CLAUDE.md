@@ -1,48 +1,47 @@
-# Clydex — Project Instructions
+# Clydex N1 — Project Instructions
 
 ## Role
 You are a senior full-stack Web3 engineer. You write production-grade code.
 No shortcuts, no placeholders, no "TODO" comments. Ship complete features.
 
 ## Tech Stack
-- **Frontend:** Next.js 14+ (App Router), TypeScript, TailwindCSS, Framer Motion
-- **Web3:** ethers.js v6, wagmi v2, viem, RainbowKit
-- **Backend:** Node.js, tRPC or REST API routes in Next.js
-- **Database:** PostgreSQL + Prisma ORM
-- **Auth:** NextAuth.js + SIWE (Sign-In with Ethereum)
-- **State:** Zustand for client state, TanStack Query for server state
-- **Testing:** Vitest + Playwright
+- **Frontend:** Next.js 16 (App Router, Turbopack), TypeScript, TailwindCSS
+- **Web3:** @solana/web3.js, @solana/wallet-adapter-react, @n1xyz/nord-ts (01 Exchange SDK)
+- **Backend:** REST API routes in Next.js
+- **Database:** PostgreSQL + Prisma ORM (Neon)
+- **Auth:** SIWS (Sign-In with Solana) via iron-session encrypted cookies
+- **Monitoring:** Sentry, Upstash Redis for rate limiting
 
 ## Architecture Rules
-- All components in `src/components/` organized by feature
-- Pages in `src/app/` using Next.js App Router conventions
-- Smart contracts ABIs in `src/contracts/`
-- Hooks in `src/hooks/`, utils in `src/lib/`
-- Types in `src/types/`
-- API routes in `src/app/api/`
+- Components in `components/` organized by feature
+- Pages in `app/` using Next.js App Router conventions
+- Hooks in `hooks/`, utils in `lib/`
+- N1/01 Exchange SDK wrappers in `lib/n1/`
+- API routes in `app/api/`
+- Market IDs come from the 01 Exchange API — never hardcode them
 
 ## Code Standards
 - TypeScript strict mode, no `any` types
 - All async operations must have error handling
 - Use server components by default, `"use client"` only when needed
 - Mobile-first responsive design
-- Dark mode support via TailwindCSS `dark:` classes
-- All Web3 interactions must handle: wallet not connected, wrong chain, tx rejected, tx pending, tx confirmed, tx failed
-- Use environment variables for all contract addresses and API keys
+- Dark mode by default
+- All wallet interactions must handle: not connected, tx rejected, tx pending, tx confirmed, tx failed
+- Use environment variables for all API keys (server-side only, never NEXT_PUBLIC_ for secrets)
 
-## UI/UX Standards
-- Smooth animations with Framer Motion (subtle, not distracting)
-- Loading skeletons instead of spinners
-- Toast notifications for async operations
-- Responsive: mobile, tablet, desktop
-- Accessibility: semantic HTML, ARIA labels, keyboard navigation
+## Security
+- RPC keys stay on server, proxied to browser via `/api/solana-rpc`
+- Wallet private keys never leave the user's wallet
+- Session keypairs are ephemeral (in-memory only)
+- All API routes check authentication via `getAuthAddress()`
+- Rate limiting on proxy endpoints
 
 ## Web3 Patterns
-- Always check chain ID before transactions
-- Show gas estimates before confirming
-- Implement proper tx lifecycle UI (pending -> confirmed -> done)
-- Cache contract reads with TanStack Query
-- Use multicall for batch reads
+- Solana wallet adapter for wallet connections (Phantom, Solflare, etc.)
+- NordUser sessions for trading operations (ephemeral keypair, wallet signs session creation)
+- Market cache: `setMarketCache()` / `getCachedMarkets()` / `ensureMarketCache()`
+- `resolveMarket()` for flexible market lookup (symbol, base asset, ID)
+- `tierFromImf()` derives tier and max leverage from API's initial margin fraction
 
 ## Git
 - Conventional commits: feat:, fix:, refactor:, docs:, test:

@@ -19,13 +19,21 @@ export async function getNord(): Promise<Nord> {
   if (nordInstance) return nordInstance;
 
   if (!initPromise) {
+    // Detect if we're running in the browser
+    const isBrowser = typeof window !== "undefined";
+
+    // In the browser, use our own API proxy for Solana RPC to avoid CORS/403
+    // from the public Solana RPC endpoint. Server-side can hit Solana directly.
+    const rpcUrl = isBrowser
+      ? `${window.location.origin}/api/solana-rpc`
+      : (process.env.SOLANA_RPC_URL || SOLANA_MAINNET_RPC);
+
+    const apiUrl = process.env.N1_API_URL || N1_MAINNET_URL;
+
     initPromise = Nord.new({
       app: N1_APP_ID,
-      solanaConnection: new Connection(
-        process.env.SOLANA_RPC_URL || SOLANA_MAINNET_RPC,
-        "confirmed"
-      ),
-      webServerUrl: process.env.N1_API_URL || N1_MAINNET_URL,
+      solanaConnection: new Connection(rpcUrl, "confirmed"),
+      webServerUrl: apiUrl,
     }).then((nord) => {
       nordInstance = nord;
       return nord;

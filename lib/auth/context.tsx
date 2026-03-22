@@ -19,6 +19,7 @@ import { createSiwsMessage } from "@/lib/auth/siws";
 interface AuthState {
   isAuthenticated: boolean;
   sessionAddress: string | null;
+  /** Sign-in (SIWS) — for manual "Sign In" button when session expired */
   signIn: () => Promise<void>;
   signOut: () => Promise<void>;
   isSigningIn: boolean;
@@ -41,10 +42,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [sessionAddress, setSessionAddress] = useState<string | null>(null);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const isSigningInRef = useRef(false);
-  const [rejected, setRejected] = useState(false);
+  const addressRef = useRef(address);
+  addressRef.current = address;
   const [sessionChecked, setSessionChecked] = useState(false);
+  const rejectedRef = useRef(false);
 
-  // Check existing session on mount
+  // Check existing session on mount (restores session if cookie is valid)
   useEffect(() => {
     fetch("/api/auth/session")
       .then((r) => r.json())
@@ -53,17 +56,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .finally(() => setSessionChecked(true));
   }, []);
 
+  // Core sign-in logic
   const signIn = useCallback(async () => {
     if (!address || isSigningInRef.current) return;
+    // Reset rejected flag on manual signIn call (button click)
+    rejectedRef.current = false;
     isSigningInRef.current = true;
     setIsSigningIn(true);
     try {
-      // 1. Get a fresh nonce from the server
       const nonceRes = await fetch("/api/auth/nonce");
       if (!nonceRes.ok) throw new Error("Failed to get nonce");
       const { nonce } = await nonceRes.json();
 
-      // 2. Build the SIWS message
       const message = createSiwsMessage({
         domain: window.location.host,
         address,
@@ -73,15 +77,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         issuedAt: new Date().toISOString(),
       });
 
-      // 3. Sign with Solana wallet (ed25519)
       const signatureBytes = await signMessage(message);
-
-      // 4. Encode signature as base58 for transport
-      // Dynamic import to avoid SSR issues with bs58
       const { default: bs58 } = await import("bs58");
       const signature = bs58.encode(signatureBytes);
 
-      // 5. Send to server for verification
       const loginRes = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -91,10 +90,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (loginRes.ok) {
         const data = await loginRes.json();
         setSessionAddress(data.address);
+      } else {
+        throw new Error(`Login failed: ${loginRes.status}`);
       }
     } catch (err) {
-      setRejected(true);
-      console.error("SIWS sign-in failed:", err);
+      const msg = err instanceof Error ? err.message : String(err);
+      const isUserReject =
+        /user rejected|user denied|cancelled|canceled|rejected the request|declined/i.test(msg);
+      // Mark as rejected so auto sign-in doesn't retry
+      rejectedRef.current = true;
+      if (!isUserReject) {
+        console.error("SIWS sign-in failed:", msg);
+      }
     } finally {
       isSigningInRef.current = false;
       setIsSigningIn(false);
@@ -102,30 +109,57 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [address, signMessage]);
 
   const signOut = useCallback(async () => {
-    await fetch("/api/auth/logout", { method: "POST" });
+    try {
+      const res = await fetch("/api/auth/logout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok) {
+        console.error("Logout request failed:", res.status);
+      }
+    } catch {
+      // Network error — still clear local session
+    }
     setSessionAddress(null);
   }, []);
 
-  // Auto sign-in when wallet connects
+  // Auto sign-in ONLY when user clicked "Connect Wallet" (manual connect)
+  // Does NOT trigger on page reload auto-reconnect
+  // Does NOT retry after user rejected or sign-in failed
   useEffect(() => {
-    if (!address && sessionAddress) {
-      fetch("/api/auth/logout", { method: "POST" }).then(() =>
-        setSessionAddress(null)
-      );
-      setRejected(false);
-      return;
-    }
-    if (address && sessionAddress && address !== sessionAddress) {
-      fetch("/api/auth/logout", { method: "POST" }).then(() =>
-        setSessionAddress(null)
-      );
-      setRejected(false);
-      return;
-    }
-    if (address && !sessionAddress && !isSigningIn && !rejected && sessionChecked && isManualConnect) {
+    if (
+      isManualConnect &&
+      address &&
+      !sessionAddress &&
+      !isSigningIn &&
+      sessionChecked &&
+      !rejectedRef.current
+    ) {
       signIn();
     }
-  }, [address, sessionAddress, isSigningIn, rejected, sessionChecked, isManualConnect, signIn]);
+  }, [isManualConnect, address, sessionAddress, isSigningIn, sessionChecked, signIn]);
+
+  // Clear session when wallet disconnects or address changes
+  // Consolidated into single check to prevent duplicate logout requests
+  const logoutInFlightRef = useRef(false);
+  useEffect(() => {
+    const shouldLogout =
+      (!address && sessionAddress) ||
+      (address && sessionAddress && address !== sessionAddress);
+    if (!shouldLogout || logoutInFlightRef.current) return;
+    logoutInFlightRef.current = true;
+    const currentAddr = address;
+    fetch("/api/auth/logout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    })
+      .finally(() => {
+        logoutInFlightRef.current = false;
+        // Address changed during fetch — a new effect cycle will handle it
+        if (addressRef.current !== currentAddr) return;
+        setSessionAddress(null);
+      });
+  }, [address, sessionAddress]);
 
   return (
     <AuthContext.Provider

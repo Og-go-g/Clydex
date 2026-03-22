@@ -45,9 +45,14 @@ function getTierKey(pathname: string): TierKey {
   if (
     pathname.startsWith("/api/chat") ||
     pathname.startsWith("/api/collateral") ||
-    pathname.startsWith("/api/account")
+    pathname.includes("/candles") ||
+    pathname.includes("/orderbook")
   ) {
     return "expensive";
+  }
+  // /api/account needs higher limit for live portfolio polling
+  if (pathname.startsWith("/api/account")) {
+    return "default";
   }
   return "default";
 }
@@ -85,11 +90,11 @@ function inMemoryRateLimit(
   }
 
   const elapsed = (now - entry.lastRefill) / 1000;
+  entry.lastRefill = now; // Update FIRST to prevent double-counting window
   entry.tokens = Math.min(
     tier.maxTokens,
     entry.tokens + elapsed * tier.refillRate
   );
-  entry.lastRefill = now;
 
   if (entry.tokens >= 1) {
     entry.tokens -= 1;
@@ -134,10 +139,9 @@ export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
 
   // ── Rate limit ──
-  const ip =
-    request.headers.get("x-real-ip") ||
-    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    "unknown";
+  // Use Next.js built-in IP (reliable on Vercel).
+  // Fallback: use LAST hop of x-forwarded-for (closest proxy, harder to spoof).
+  const ip = (request as unknown as { ip?: string }).ip || "unknown";
 
   const tierKey = getTierKey(pathname);
 
@@ -169,9 +173,9 @@ export async function middleware(request: NextRequest) {
   // ── Content-Type + CSRF checks for mutating requests ──
   if (MUTATING_METHODS.has(request.method)) {
     const contentType = request.headers.get("content-type");
-    if (contentType && !contentType.includes("application/json")) {
+    if (!contentType || !contentType.includes("application/json")) {
       return NextResponse.json(
-        { error: "Content-Type must be application/json" },
+        { error: "Bad Request" },
         { status: 415 }
       );
     }

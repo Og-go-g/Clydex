@@ -12,6 +12,7 @@ export const N1_DEVNET_WS = "wss://zo-devnet.n1.xyz/ws";
 export const N1_APP_ID = "zoau54n5U24GHNKqyoziVaVxgsiQYnPMx33fKmLLCT5";
 
 // ─── Tier Definitions ──────────────────────────────────────────
+// Based on per-market IMF from API (NOT doubled). Max leverage = floor(1 / imf).
 export const TIERS: Record<number, { imf: number; maxLeverage: number; label: string }> = {
   1: { imf: 0.02, maxLeverage: 50, label: "Tier 1 (Major)" },
   2: { imf: 0.05, maxLeverage: 20, label: "Tier 2 (Large Cap)" },
@@ -20,58 +21,108 @@ export const TIERS: Record<number, { imf: number; maxLeverage: number; label: st
   5: { imf: 0.33, maxLeverage: 3, label: "Tier 5 (Micro Cap)" },
 };
 
-// ─── 24 Perpetual Markets ──────────────────────────────────────
-// Source: https://zo-mainnet.n1.xyz/info (01 Exchange)
-export const N1_MARKETS: Record<string, N1Market> = {
-  "BTC-PERP":      { id: 0,  symbol: "BTC-PERP",      baseAsset: "BTC",     tier: 1, initialMarginFraction: 0.02, maxLeverage: 50 },
-  "ETH-PERP":      { id: 1,  symbol: "ETH-PERP",      baseAsset: "ETH",     tier: 1, initialMarginFraction: 0.02, maxLeverage: 50 },
-  "SOL-PERP":      { id: 2,  symbol: "SOL-PERP",      baseAsset: "SOL",     tier: 2, initialMarginFraction: 0.05, maxLeverage: 20 },
-  "HYPE-PERP":     { id: 3,  symbol: "HYPE-PERP",     baseAsset: "HYPE",    tier: 2, initialMarginFraction: 0.05, maxLeverage: 20 },
-  "SUI-PERP":      { id: 4,  symbol: "SUI-PERP",      baseAsset: "SUI",     tier: 3, initialMarginFraction: 0.10, maxLeverage: 10 },
-  "XRP-PERP":      { id: 5,  symbol: "XRP-PERP",      baseAsset: "XRP",     tier: 3, initialMarginFraction: 0.10, maxLeverage: 10 },
-  "EIGEN-PERP":    { id: 6,  symbol: "EIGEN-PERP",    baseAsset: "EIGEN",   tier: 3, initialMarginFraction: 0.10, maxLeverage: 10 },
-  "VIRTUAL-PERP":  { id: 7,  symbol: "VIRTUAL-PERP",  baseAsset: "VIRTUAL", tier: 3, initialMarginFraction: 0.10, maxLeverage: 10 },
-  "ENA-PERP":      { id: 8,  symbol: "ENA-PERP",      baseAsset: "ENA",     tier: 3, initialMarginFraction: 0.10, maxLeverage: 10 },
-  "NEAR-PERP":     { id: 9,  symbol: "NEAR-PERP",     baseAsset: "NEAR",    tier: 3, initialMarginFraction: 0.10, maxLeverage: 10 },
-  "ARB-PERP":      { id: 10, symbol: "ARB-PERP",      baseAsset: "ARB",     tier: 3, initialMarginFraction: 0.10, maxLeverage: 10 },
-  "ASTER-PERP":    { id: 11, symbol: "ASTER-PERP",    baseAsset: "ASTER",   tier: 3, initialMarginFraction: 0.10, maxLeverage: 10 },
-  "PAXG-PERP":     { id: 12, symbol: "PAXG-PERP",     baseAsset: "PAXG",    tier: 3, initialMarginFraction: 0.10, maxLeverage: 10 },
-  "BERA-PERP":     { id: 13, symbol: "BERA-PERP",     baseAsset: "BERA",    tier: 4, initialMarginFraction: 0.20, maxLeverage: 5 },
-  "XPL-PERP":      { id: 14, symbol: "XPL-PERP",      baseAsset: "XPL",     tier: 4, initialMarginFraction: 0.20, maxLeverage: 5 },
-  "S-PERP":        { id: 15, symbol: "S-PERP",        baseAsset: "S",       tier: 4, initialMarginFraction: 0.20, maxLeverage: 5 },
-  "JUP-PERP":      { id: 16, symbol: "JUP-PERP",      baseAsset: "JUP",     tier: 4, initialMarginFraction: 0.20, maxLeverage: 5 },
-  "APT-PERP":      { id: 17, symbol: "APT-PERP",      baseAsset: "APT",     tier: 4, initialMarginFraction: 0.20, maxLeverage: 5 },
-  "AAVE-PERP":     { id: 18, symbol: "AAVE-PERP",     baseAsset: "AAVE",    tier: 4, initialMarginFraction: 0.20, maxLeverage: 5 },
-  "ZEC-PERP":      { id: 19, symbol: "ZEC-PERP",      baseAsset: "ZEC",     tier: 4, initialMarginFraction: 0.20, maxLeverage: 5 },
-  "LIT-PERP":      { id: 20, symbol: "LIT-PERP",      baseAsset: "LIT",     tier: 4, initialMarginFraction: 0.20, maxLeverage: 5 },
-  "WLFI-PERP":     { id: 21, symbol: "WLFI-PERP",     baseAsset: "WLFI",    tier: 5, initialMarginFraction: 0.33, maxLeverage: 3 },
-  "IP-PERP":       { id: 22, symbol: "IP-PERP",       baseAsset: "IP",      tier: 5, initialMarginFraction: 0.33, maxLeverage: 3 },
-  "KAITO-PERP":    { id: 23, symbol: "KAITO-PERP",    baseAsset: "KAITO",   tier: 5, initialMarginFraction: 0.33, maxLeverage: 3 },
-};
+// ─── Market Cache (populated from API at startup) ──────────────
+// IDs come from the 01 Exchange API — never hardcode them.
+let _marketCache: N1Market[] | null = null;
+let _marketCachePromise: Promise<N1Market[]> | null = null;
+
+/**
+ * Populate market cache from the live API info response.
+ * Called by the API route after fetching getInfo().
+ */
+export function setMarketCache(markets: N1Market[]): void {
+  _marketCache = markets;
+  _marketCachePromise = null; // Clear promise so it won't re-fetch
+}
+
+/** Get cached markets. Falls back to empty array if not yet populated. */
+export function getCachedMarkets(): N1Market[] {
+  return _marketCache ?? [];
+}
+
+/** Derive tier from per-market IMF value (raw from API, NOT doubled) */
+export function tierFromImf(imf: number): { tier: number; maxLeverage: number } {
+  if (!isFinite(imf) || imf <= 0) return { tier: 5, maxLeverage: 1 };
+
+  for (const [tierNum, tierDef] of Object.entries(TIERS)) {
+    if (Math.abs(imf - tierDef.imf) < 0.005) {
+      return { tier: Number(tierNum), maxLeverage: tierDef.maxLeverage };
+    }
+  }
+  const maxLev = Math.min(200, Math.max(1, Math.floor(1 / imf)));
+  if (imf <= 0.03) return { tier: 1, maxLeverage: maxLev };
+  if (imf <= 0.07) return { tier: 2, maxLeverage: maxLev };
+  if (imf <= 0.15) return { tier: 3, maxLeverage: maxLev };
+  if (imf <= 0.25) return { tier: 4, maxLeverage: maxLev };
+  return { tier: 5, maxLeverage: maxLev };
+}
+
+/**
+ * Ensure market cache is populated (lazy init from API).
+ * Safe to call multiple times — deduplicates the fetch.
+ */
+export async function ensureMarketCache(): Promise<N1Market[]> {
+  if (_marketCache) return _marketCache;
+
+  if (!_marketCachePromise) {
+    // Dynamic import to avoid circular deps
+    _marketCachePromise = import("./client").then(async ({ getMarketsInfo }) => {
+      const info = await getMarketsInfo();
+      const markets: N1Market[] = info.markets.map((apiMarket) => {
+        // Per-market IMF from API is the correct trading IMF (NOT halved)
+      // Note: only account-level margins.imf needs *2, not per-market imf
+      const { tier, maxLeverage } = tierFromImf(apiMarket.imf);
+        return {
+          id: apiMarket.marketId,
+          symbol: apiMarket.symbol,
+          baseAsset: apiMarket.symbol.replace(/USD$/, ""),
+          tier,
+          initialMarginFraction: apiMarket.imf,
+          maxLeverage,
+        };
+      });
+      _marketCache = markets;
+      return markets;
+    }).catch((err) => {
+      _marketCachePromise = null;
+      throw err;
+    });
+  }
+
+  return _marketCachePromise;
+}
 
 // ─── Market Lookup Helpers ─────────────────────────────────────
 
-/** Find market by base asset name (case-insensitive). e.g. "btc" -> "BTC-PERP" */
+/** Find market by base asset name, symbol, or ID (case-insensitive). */
 export function resolveMarket(input: string): N1Market | null {
+  const markets = getCachedMarkets();
   const upper = input.toUpperCase().trim();
 
-  // Direct match: "BTC-PERP"
-  if (N1_MARKETS[upper]) return N1_MARKETS[upper];
+  // Direct symbol match: "BTCUSD" or "BTC-PERP"
+  const bySymbol = markets.find((m) => m.symbol.toUpperCase() === upper);
+  if (bySymbol) return bySymbol;
 
-  // Base asset match: "BTC" -> "BTC-PERP"
+  // Base asset match: "BTC" -> look for symbol containing "BTC"
+  const byBase = markets.find((m) => m.baseAsset.toUpperCase() === upper);
+  if (byBase) return byBase;
+
+  // Try with USD suffix: "BTC" -> "BTCUSD"
+  const withUsd = `${upper}USD`;
+  const byUsd = markets.find((m) => m.symbol.toUpperCase() === withUsd);
+  if (byUsd) return byUsd;
+
+  // Try with -PERP suffix: legacy compatibility
   const withPerp = `${upper}-PERP`;
-  if (N1_MARKETS[withPerp]) return N1_MARKETS[withPerp];
+  const byPerp = markets.find((m) => m.symbol.toUpperCase() === withPerp);
+  if (byPerp) return byPerp;
 
-  // Search by baseAsset field
-  const found = Object.values(N1_MARKETS).find(
-    (m) => m.baseAsset.toUpperCase() === upper
-  );
-  return found ?? null;
+  return null;
 }
 
 /** Get all markets as a sorted array */
 export function getAllMarkets(): N1Market[] {
-  return Object.values(N1_MARKETS).sort((a, b) => a.id - b.id);
+  return getCachedMarkets().sort((a, b) => a.id - b.id);
 }
 
 /** Get max leverage for a market */
@@ -81,10 +132,10 @@ export function getMaxLeverage(market: N1Market): number {
 
 /** Validate leverage for a market — returns error message or null */
 export function validateLeverage(market: N1Market, leverage: number): string | null {
+  if (!Number.isFinite(leverage)) return "Invalid leverage value";
   const max = getMaxLeverage(market);
   if (leverage < 1) return "Leverage must be at least 1x";
   if (leverage > max) return `Max leverage for ${market.symbol} is ${max}x (${TIERS[market.tier]?.label})`;
-  if (!Number.isFinite(leverage)) return "Invalid leverage value";
   return null;
 }
 

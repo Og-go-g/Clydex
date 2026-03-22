@@ -109,7 +109,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       message?: string;
       duration?: number;
     }) => {
-      const id = `toast_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const id = typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `toast_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       const toast: Toast = { id, type, title, message, duration, createdAt: Date.now() };
 
       setToasts((prev) => {
@@ -141,13 +143,13 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
       {/* Toast Container */}
       <div
-        className="fixed bottom-4 right-4 z-[100] flex flex-col gap-2"
-        role="status"
-        aria-live="polite"
+        className="fixed top-4 right-4 z-[100] flex flex-col gap-2"
       >
         {toasts.map((toast) => (
           <div
             key={toast.id}
+            role={toast.type === "error" || toast.type === "warning" ? "alert" : "status"}
+            aria-live={toast.type === "error" || toast.type === "warning" ? "assertive" : "polite"}
             className={`flex w-80 items-start gap-3 rounded-xl border p-3 shadow-2xl backdrop-blur-md animate-[slideUp_0.2s_ease-out] ${TYPE_STYLES[toast.type]}`}
           >
             <ToastIcon type={toast.type} />

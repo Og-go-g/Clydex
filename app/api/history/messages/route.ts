@@ -11,7 +11,7 @@ const VALID_ROLES = new Set(["user", "assistant"]);
 export async function GET(request: Request) {
   const address = await getAuthAddress();
   if (!address) {
-    return NextResponse.json({ messages: [] });
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
 
   const { searchParams } = new URL(request.url);
@@ -73,13 +73,31 @@ export async function POST(request: Request) {
     const createdAt = m.createdAt ? new Date(m.createdAt) : new Date();
     if (isNaN(createdAt.getTime())) continue;
 
-    // Validate parts: must be array, within size limit
+    // Validate parts: must be array of objects with type string, within size limit
     let safeParts = undefined as undefined | typeof m.parts;
     if (Array.isArray(m.parts)) {
       try {
-        const serialized = JSON.stringify(m.parts);
+        // Limit array length to prevent abuse
+        const trimmedParts = m.parts.slice(0, 50);
+        // Validate each item has a type string
+        const validParts = trimmedParts.filter(
+          (p: unknown) => typeof p === "object" && p !== null && typeof (p as Record<string, unknown>).type === "string"
+        );
+        // Strip dangerous URI schemes from src, href, url fields
+        for (const part of validParts) {
+          const obj = part as Record<string, unknown>;
+          for (const field of ["src", "href", "url"]) {
+            if (typeof obj[field] === "string") {
+              const val = (obj[field] as string).trim().toLowerCase();
+              if (val.startsWith("javascript:") || val.startsWith("data:")) {
+                delete obj[field];
+              }
+            }
+          }
+        }
+        const serialized = JSON.stringify(validParts);
         if (serialized.length <= MAX_PARTS_SIZE) {
-          safeParts = m.parts;
+          safeParts = validParts;
         }
       } catch {
         // Malformed parts — skip

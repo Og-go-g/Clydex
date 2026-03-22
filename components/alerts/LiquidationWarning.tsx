@@ -173,7 +173,7 @@ export function LiquidationWarning() {
           </a>
           <button
             onClick={handleDismiss}
-            className="rounded p-1 text-muted hover:text-foreground transition-colors"
+            className="flex h-8 w-8 items-center justify-center rounded-lg text-muted hover:text-foreground transition-colors"
             aria-label="Dismiss warning"
           >
             <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">

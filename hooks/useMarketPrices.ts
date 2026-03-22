@@ -42,10 +42,14 @@ export function useMarketPrices({
   const [prices, setPrices] = useState<Map<number, MarketPrice>>(new Map());
   const [isConnected, setIsConnected] = useState(false);
   const failCountRef = useRef(0);
+  const inFlightRef = useRef(false);
   const maxBackoff = 30_000;
 
   const fetchPrices = useCallback(async () => {
     if (marketIds.length === 0) return;
+    // Prevent cascading fetches — skip if a request is already in-flight
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
 
     try {
       const results = await Promise.allSettled(
@@ -84,6 +88,8 @@ export function useMarketPrices({
     } catch {
       failCountRef.current += 1;
       if (failCountRef.current > 3) setIsConnected(false);
+    } finally {
+      inFlightRef.current = false;
     }
   }, [marketIds]);
 

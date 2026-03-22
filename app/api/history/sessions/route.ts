@@ -12,7 +12,7 @@ import { getOrCreateUser } from "@/lib/db/helpers";
 export async function GET() {
   const address = await getAuthAddress();
   if (!address) {
-    return NextResponse.json({ sessions: [] });
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
 
   try {

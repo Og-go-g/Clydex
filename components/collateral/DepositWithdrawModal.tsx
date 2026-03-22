@@ -2,9 +2,15 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/lib/auth/context";
+import { useCollateral } from "@/hooks/useCollateral";
+import { useWallet as useSolanaWallet } from "@solana/wallet-adapter-react";
+import { useVerification } from "@/components/collateral/VerificationProvider";
+
+const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const USDC_DECIMALS = 6;
 
 type Tab = "deposit" | "withdraw";
-type Step = "input" | "confirm" | "pending" | "success" | "error";
+type Step = "input" | "confirm" | "signing" | "error";
 
 interface CollateralInfo {
   exists: boolean;
@@ -44,6 +50,9 @@ export function DepositWithdrawModal({
   onSuccess,
 }: DepositWithdrawModalProps) {
   const { isAuthenticated } = useAuth();
+  const { publicKey } = useSolanaWallet();
+  const { execute, reset: resetCollateral, executing, error: collateralError, success: collateralSuccess } = useCollateral();
+  const startVerification = useVerification();
 
   const [tab, setTab] = useState<Tab>(initialTab);
   const [amount, setAmount] = useState("");
@@ -52,25 +61,91 @@ export function DepositWithdrawModal({
   const [validation, setValidation] = useState<ValidationResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [walletUsdcBalance, setWalletUsdcBalance] = useState<number | null>(null);
+  const [confirmedAmount, setConfirmedAmount] = useState<number>(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Fetch collateral info when modal opens
-  useEffect(() => {
-    if (!isOpen || !isAuthenticated) return;
-
-    async function fetchInfo() {
-      try {
-        const res = await fetch("/api/collateral");
-        if (res.ok) {
-          setInfo(await res.json());
-        }
-      } catch {
-        // Non-critical — modal still functional
+  // Fetch collateral info from server
+  const fetchCollateralInfo = useCallback(async (signal?: AbortSignal) => {
+    if (!isAuthenticated) return;
+    try {
+      const res = await fetch("/api/collateral", { signal });
+      if (res.ok) {
+        setInfo(await res.json());
       }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      // Non-critical
     }
+  }, [isAuthenticated]);
 
-    fetchInfo();
-  }, [isOpen, isAuthenticated]);
+  // Fetch wallet USDC balance via RPC proxy
+  const fetchWalletUsdc = useCallback(async (signal?: AbortSignal) => {
+    if (!publicKey) {
+      setWalletUsdcBalance(null);
+      return;
+    }
+    try {
+      const res = await fetch("/api/solana-rpc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "getTokenAccountsByOwner",
+          params: [
+            publicKey.toBase58(),
+            { mint: USDC_MINT },
+            { encoding: "jsonParsed" },
+          ],
+        }),
+        signal,
+      });
+
+      if (!res.ok) return;
+
+      const data = await res.json();
+      const accounts = data?.result?.value;
+      if (!Array.isArray(accounts) || accounts.length === 0) {
+        setWalletUsdcBalance(0);
+        return;
+      }
+
+      let total = 0;
+      for (const acc of accounts) {
+        const amt = acc?.account?.data?.parsed?.info?.tokenAmount?.amount;
+        if (amt) {
+          const balance = Number(amt) / 10 ** USDC_DECIMALS;
+          if (!isFinite(balance)) continue;
+          total += balance;
+        }
+      }
+      setWalletUsdcBalance(total);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      // Non-critical
+    }
+  }, [publicKey]);
+
+  // Background verification: poll collateral balance until it changes, then show toast
+  // Track collateral hook state changes
+  useEffect(() => {
+    if (step !== "signing") return;
+
+    if (collateralError) {
+      setErrorMsg(collateralError);
+      setStep("error");
+    }
+  }, [collateralError, step]);
+
+  // Fetch both balances when modal opens; abort in-flight requests on close
+  useEffect(() => {
+    if (!isOpen) return;
+    const controller = new AbortController();
+    fetchCollateralInfo(controller.signal);
+    fetchWalletUsdc(controller.signal);
+    return () => controller.abort();
+  }, [isOpen, fetchCollateralInfo, fetchWalletUsdc]);
 
   // Reset state on tab change or modal open
   useEffect(() => {
@@ -78,7 +153,8 @@ export function DepositWithdrawModal({
     setStep("input");
     setValidation(null);
     setErrorMsg(null);
-  }, [tab, isOpen]);
+    resetCollateral();
+  }, [tab, isOpen, resetCollateral]);
 
   // Focus input when modal opens
   useEffect(() => {
@@ -92,7 +168,6 @@ export function DepositWithdrawModal({
 
   const handleAmountChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
-    // Allow only valid decimal number input
     if (val === "" || /^\d*\.?\d{0,6}$/.test(val)) {
       setAmount(val);
     }
@@ -133,14 +208,10 @@ export function DepositWithdrawModal({
 
       setValidation(data);
 
-      // For deposits with no warnings, or withdrawals that are approved with no warnings
-      if (data.approved && data.warnings.length === 0) {
-        setStep("confirm");
-      } else if (data.approved && data.warnings.length > 0) {
-        // Show warnings, require confirmation
+      if (data.approved) {
+        setConfirmedAmount(parsedAmount);
         setStep("confirm");
       } else {
-        // Not approved — show error with warnings
         setErrorMsg(data.message);
       }
     } catch {
@@ -150,56 +221,49 @@ export function DepositWithdrawModal({
     }
   }, [isValidAmount, parsedAmount, tab]);
 
-  // Step 2: Execute (client-side wallet signing)
+  // Step 2: Execute via useCollateral hook (wallet signing)
   const handleExecute = useCallback(async () => {
-    setStep("pending");
+    setStep("signing");
+    setErrorMsg(null);
 
-    try {
-      // The actual deposit/withdraw happens client-side via NordUser SDK.
-      // This modal dispatches a custom event that the wallet context picks up.
-      // The wallet context creates a NordUser, calls depositUsdc/withdrawUsdc,
-      // and the wallet prompts the user to sign.
+    const currentTab = tab;
+    const currentAmount = confirmedAmount;
 
-      const event = new CustomEvent("clydex:collateral", {
-        detail: {
-          action: tab,
-          amount: parsedAmount,
-        },
-      });
-      window.dispatchEvent(event);
+    const result = await execute(currentTab, currentAmount);
 
-      // Listen for the result
-      const result = await new Promise<{ success: boolean; error?: string }>((resolve) => {
-        const timeout = setTimeout(() => {
-          resolve({ success: false, error: "Transaction timed out. Please check your wallet." });
-        }, 120_000); // 2 minute timeout
-
-        function onResult(e: Event) {
-          clearTimeout(timeout);
-          window.removeEventListener("clydex:collateral-result", onResult);
-          resolve((e as CustomEvent).detail);
-        }
-
-        window.addEventListener("clydex:collateral-result", onResult);
-      });
-
-      if (result.success) {
-        setStep("success");
+    if (result.ok) {
+      // Tx sent — start background verification, show success step
+      // Don't auto-close: let user see the status and close manually
+      // This prevents confusion when user thinks tx failed because modal disappeared
+      startVerification(currentTab, currentAmount, result.balanceBefore, () => {
         onSuccess?.();
-      } else {
-        setErrorMsg(result.error || "Transaction failed");
-        setStep("error");
-      }
-    } catch {
-      setErrorMsg("Transaction failed. Please try again.");
-      setStep("error");
+        // Auto-close only AFTER verification succeeds
+        onClose();
+      });
+    } else {
+      // Hook will set error via state → useEffect handles transition to error step
+      // Fallback if hook didn't set error
+      setTimeout(() => {
+        setStep((current) => {
+          if (current === "signing") {
+            setErrorMsg("Transaction could not be completed. Please check your wallet.");
+            return "error";
+          }
+          return current;
+        });
+      }, 500);
     }
-  }, [tab, parsedAmount, onSuccess]);
+  }, [tab, confirmedAmount, execute, onClose, startVerification, onSuccess]);
 
+  // Close handler — always closeable
   const handleClose = useCallback(() => {
-    if (step === "pending") return; // Don't close during tx
+    if (executing) {
+      resetCollateral();
+    }
+    setStep("input");
+    setErrorMsg(null);
     onClose();
-  }, [step, onClose]);
+  }, [executing, resetCollateral, onClose]);
 
   if (!isOpen) return null;
 
@@ -217,8 +281,7 @@ export function DepositWithdrawModal({
           <h2 className="text-lg font-semibold text-white">Manage Collateral</h2>
           <button
             onClick={handleClose}
-            disabled={step === "pending"}
-            className="rounded-lg p-1 text-gray-500 transition-colors hover:bg-[#1a1a1a] hover:text-white disabled:opacity-50"
+            className="rounded-lg p-1 text-gray-500 transition-colors hover:bg-[#1a1a1a] hover:text-white"
             aria-label="Close"
           >
             <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
@@ -233,7 +296,7 @@ export function DepositWithdrawModal({
             <button
               key={t}
               onClick={() => setTab(t)}
-              disabled={step === "pending"}
+              disabled={step === "signing"}
               className={`flex-1 py-3 text-sm font-medium transition-colors ${
                 tab === t
                   ? "border-b-2 border-blue-500 text-white"
@@ -289,6 +352,26 @@ export function DepositWithdrawModal({
                   </span>
                 </div>
               </div>
+
+              {/* Wallet balance + Max button for deposit */}
+              {tab === "deposit" && walletUsdcBalance !== null && (
+                <div className="mb-4 flex items-center justify-between">
+                  <span className="text-xs text-gray-500">
+                    Wallet: <span className="font-mono text-gray-400">{formatUsd(walletUsdcBalance)}</span>
+                  </span>
+                  <button
+                    onClick={() => {
+                      if (walletUsdcBalance > 0) {
+                        setAmount(walletUsdcBalance.toFixed(6).replace(/0+$/, "").replace(/\.$/, ""));
+                      }
+                    }}
+                    disabled={walletUsdcBalance <= 0}
+                    className="rounded-lg border border-[#262626] bg-[#141414] px-3 py-1 text-xs font-medium text-blue-400 transition-colors hover:border-blue-500/30 hover:text-blue-300 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Max
+                  </button>
+                </div>
+              )}
 
               {/* Quick percentage buttons for withdraw */}
               {tab === "withdraw" && info?.exists && info.collateral > 0 && (
@@ -362,7 +445,8 @@ export function DepositWithdrawModal({
                 </button>
                 <button
                   onClick={handleExecute}
-                  className={`flex-1 rounded-xl py-3 text-sm font-semibold text-white transition-colors ${
+                  disabled={executing}
+                  className={`flex-1 rounded-xl py-3 text-sm font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
                     tab === "withdraw"
                       ? "bg-orange-500 hover:bg-orange-600"
                       : "bg-blue-500 hover:bg-blue-600"
@@ -374,8 +458,8 @@ export function DepositWithdrawModal({
             </>
           )}
 
-          {/* Pending step */}
-          {step === "pending" && (
+          {/* Signing step — wallet interaction in progress */}
+          {step === "signing" && (
             <div className="flex flex-col items-center py-8">
               <div className="mb-4 h-10 w-10 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
               <div className="text-sm text-gray-300">
@@ -386,28 +470,11 @@ export function DepositWithdrawModal({
               <div className="mt-2 text-xs text-gray-500">
                 Please confirm the transaction in your wallet.
               </div>
-            </div>
-          )}
-
-          {/* Success step */}
-          {step === "success" && (
-            <div className="flex flex-col items-center py-8">
-              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-green-500/20">
-                <svg viewBox="0 0 24 24" className="h-6 w-6 text-green-400" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </div>
-              <div className="text-sm font-medium text-white">
-                {tab === "deposit" ? "Deposit successful!" : "Withdrawal successful!"}
-              </div>
-              <div className="mt-1 text-xs text-gray-500">
-                {formatUsd(parsedAmount)} USDC {tab === "deposit" ? "deposited" : "withdrawn"}
-              </div>
               <button
                 onClick={handleClose}
-                className="mt-6 rounded-xl bg-[#1a1a1a] px-8 py-2.5 text-sm text-white transition-colors hover:bg-[#262626]"
+                className="mt-4 text-xs text-gray-600 underline transition-colors hover:text-gray-400"
               >
-                Done
+                Cancel and close
               </button>
             </div>
           )}
@@ -428,6 +495,7 @@ export function DepositWithdrawModal({
                 onClick={() => {
                   setStep("input");
                   setErrorMsg(null);
+                  resetCollateral();
                 }}
                 className="mt-6 rounded-xl bg-[#1a1a1a] px-8 py-2.5 text-sm text-white transition-colors hover:bg-[#262626]"
               >

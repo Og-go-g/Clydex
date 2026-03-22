@@ -51,44 +51,42 @@ export default function MarketsPage() {
   const [sortBy, setSortBy] = useState<"symbol" | "volume" | "change">("volume");
 
   useEffect(() => {
+    let cancelled = false;
+    let retries = 0;
+
     async function fetchMarkets() {
       try {
         const res = await fetch("/api/markets");
-        if (!res.ok) throw new Error("Failed to fetch");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-
-        // Fetch stats for each market
-        const withStats = await Promise.all(
-          data.markets.map(async (m: { id: number; symbol: string; tier: number; maxLeverage: number }) => {
-            try {
-              const statsRes = await fetch(`/api/markets/${m.id}`);
-              if (!statsRes.ok) return { ...m, markPrice: null, change24h: null, volume24h: null, fundingRate: null };
-              const stats = await statsRes.json();
-              return {
-                ...m,
-                markPrice: stats.perpStats?.mark_price ?? stats.indexPrice ?? null,
-                change24h: stats.close24h && stats.prevClose24h
-                  ? ((stats.close24h - stats.prevClose24h) / stats.prevClose24h) * 100
-                  : null,
-                volume24h: stats.volumeQuote24h ?? null,
-                fundingRate: stats.perpStats?.funding_rate ?? null,
-              };
-            } catch {
-              return { ...m, markPrice: null, change24h: null, volume24h: null, fundingRate: null };
-            }
-          })
-        );
-
-        setMarkets(withStats);
-      } catch (err) {
-        setError("Failed to load markets");
+        if (!cancelled) {
+          setMarkets(data.markets);
+          setError(null);
+          retries = 0;
+        }
+      } catch {
+        if (!cancelled) {
+          retries++;
+          // Only show error if we have NO data yet and retried enough
+          setMarkets((prev) => {
+            if (prev.length === 0 && retries >= 3) setError("Failed to load markets");
+            return prev;
+          });
+        }
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     }
 
     fetchMarkets();
-  }, []);
+    // Poll when tab is visible; also refetch immediately on tab focus
+    const interval = setInterval(() => {
+      if (!document.hidden) fetchMarkets();
+    }, 60_000);
+    const onVis = () => { if (!document.hidden && !cancelled) fetchMarkets(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { cancelled = true; clearInterval(interval); document.removeEventListener("visibilitychange", onVis); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const filtered = tierFilter ? markets.filter((m) => m.tier === tierFilter) : markets;
   const sorted = [...filtered].sort((a, b) => {
@@ -139,8 +137,31 @@ export default function MarketsPage() {
         </div>
 
         {loading ? (
-          <div className="flex items-center justify-center py-20">
-            <div className="h-8 w-8 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+          <div className="overflow-hidden rounded-xl border border-border">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border bg-card text-xs text-muted">
+                  <th className="px-4 py-3 text-left">Market</th>
+                  <th className="px-4 py-3 text-right">Price</th>
+                  <th className="px-4 py-3 text-right">24h Change</th>
+                  <th className="hidden px-4 py-3 text-right md:table-cell">Volume 24h</th>
+                  <th className="hidden px-4 py-3 text-right md:table-cell">Funding</th>
+                  <th className="px-4 py-3 text-right">Max Leverage</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Array.from({ length: 10 }).map((_, i) => (
+                  <tr key={i} className="border-b border-border">
+                    <td className="px-4 py-3"><div className="h-4 w-24 animate-pulse rounded bg-card" /></td>
+                    <td className="px-4 py-3 text-right"><div className="ml-auto h-4 w-20 animate-pulse rounded bg-card" /></td>
+                    <td className="px-4 py-3 text-right"><div className="ml-auto h-4 w-16 animate-pulse rounded bg-card" /></td>
+                    <td className="hidden px-4 py-3 text-right md:table-cell"><div className="ml-auto h-4 w-20 animate-pulse rounded bg-card" /></td>
+                    <td className="hidden px-4 py-3 text-right md:table-cell"><div className="ml-auto h-4 w-16 animate-pulse rounded bg-card" /></td>
+                    <td className="px-4 py-3 text-right"><div className="ml-auto h-4 w-10 animate-pulse rounded bg-card" /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         ) : error ? (
           <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-6 text-center text-red-400">

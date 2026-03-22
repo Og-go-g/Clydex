@@ -6,6 +6,7 @@ import {
   useState,
   useEffect,
   useCallback,
+  useRef,
   type ReactNode,
 } from "react";
 import {
@@ -56,9 +57,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const [dbSynced, setDbSynced] = useState(false);
 
   // Load from localStorage on mount.
-  // On a new browser session — start a fresh chat (old ones stay in history).
-  // Within the same tab session — restore the active chat.
+  // Guard against React strict mode double-execution.
+  const initRef = useRef(false);
   useEffect(() => {
+    if (initRef.current) return;
+    initRef.current = true;
+
     let stored = getSessions();
     const visitedThisSession = sessionStorage.getItem("clydex_visited");
 
@@ -76,21 +80,19 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       setSessions(stored);
       setActiveId(active);
     } else {
-      // New browser session — reuse last chat if empty, otherwise create fresh
+      // New browser session — reuse last chat, only create if none exist
       sessionStorage.setItem("clydex_visited", "1");
-      const latest = stored[0];
-      const lastMessages = latest ? getMessages(latest.id) : [];
 
-      if (latest && lastMessages.length === 0) {
-        // Last chat is empty — reuse it
-        storeSetActiveId(latest.id);
+      if (stored.length === 0) {
+        const first = createSession();
+        stored = [first];
         setSessions(stored);
-        setActiveId(latest.id);
+        setActiveId(first.id);
       } else {
-        // Last chat has messages — create new one
-        const fresh = createSession();
-        setSessions(getSessions());
-        setActiveId(fresh.id);
+        // Switch to the most recent chat (don't auto-create new ones)
+        storeSetActiveId(stored[0].id);
+        setSessions(stored);
+        setActiveId(stored[0].id);
       }
     }
 
@@ -105,33 +107,41 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   // Sync from DB when user authenticates — merge remote sessions into localStorage
   useEffect(() => {
     if (!isAuthenticated || dbSynced) return;
-    setDbSynced(true);
+    let cancelled = false;
 
     (async () => {
-      const remoteSessions = await loadSessionsFromDb();
-      if (!remoteSessions || remoteSessions.length === 0) return;
+      try {
+        const remoteSessions = await loadSessionsFromDb();
+        if (cancelled) return;
+        if (!remoteSessions || remoteSessions.length === 0) return;
 
-      const local = getSessions();
-      const localIds = new Set(local.map((s) => s.id));
-      let merged = false;
+        const local = getSessions();
+        const localIds = new Set(local.map((s) => s.id));
+        let merged = false;
 
-      for (const rs of remoteSessions) {
-        if (localIds.has(rs.id)) continue;
+        for (const rs of remoteSessions) {
+          if (cancelled) return;
+          if (localIds.has(rs.id)) continue;
 
-        // Session exists in DB but not locally — restore it
-        const remoteMessages = await loadMessagesFromDb(rs.id);
+          // Session exists in DB but not locally — restore it only if it has messages
+          const remoteMessages = await loadMessagesFromDb(rs.id);
+          if (cancelled) return;
+          if (!remoteMessages || remoteMessages.length === 0) {
+            // Empty session — don't restore, clean up from DB
+            deleteSessionFromDb(rs.id);
+            continue;
+          }
 
-        // Add session to localStorage
-        const restored: ChatSession = {
-          id: rs.id,
-          title: rs.title,
-          createdAt: new Date(rs.createdAt).getTime(),
-          updatedAt: new Date(rs.updatedAt).getTime(),
-        };
-        local.push(restored);
+          // Add session to localStorage
+          const restored: ChatSession = {
+            id: rs.id,
+            title: rs.title,
+            createdAt: new Date(rs.createdAt).getTime(),
+            updatedAt: new Date(rs.updatedAt).getTime(),
+          };
+          local.push(restored);
 
-        // Save messages to localStorage
-        if (remoteMessages && remoteMessages.length > 0) {
+          // Save messages to localStorage
           saveMessages(rs.id, remoteMessages.map((m) => ({
             id: m.id,
             role: m.role,
@@ -139,20 +149,36 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             parts: m.parts,
             createdAt: m.createdAt,
           })));
+          merged = true;
         }
-        merged = true;
-      }
 
-      if (merged) {
-        // Sort by updatedAt descending and persist via store helper
-        local.sort((a, b) => b.updatedAt - a.updatedAt);
-        saveSessions(local);
-        setSessions([...local]);
+        if (merged && !cancelled) {
+          // Sort by updatedAt descending and persist via store helper
+          local.sort((a, b) => b.updatedAt - a.updatedAt);
+          saveSessions(local);
+          setSessions([...local]);
+        }
+      } finally {
+        if (!cancelled) setDbSynced(true);
       }
     })();
+
+    return () => { cancelled = true; };
   }, [isAuthenticated, dbSynced]);
 
   const createChat = useCallback(() => {
+    // Limit: max 2 empty chats (no messages) at a time
+    const current = getSessions();
+    const emptyCount = current.filter((s) => getMessages(s.id).length === 0).length;
+    if (emptyCount >= 2) {
+      // Switch to the most recent empty chat instead of creating
+      const emptyChat = current.find((s) => getMessages(s.id).length === 0);
+      if (emptyChat) {
+        storeSetActiveId(emptyChat.id);
+        setActiveId(emptyChat.id);
+        return;
+      }
+    }
     const session = createSession();
     setSessions(getSessions());
     setActiveId(session.id);

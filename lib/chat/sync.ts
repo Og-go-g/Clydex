@@ -91,7 +91,10 @@ export function syncSessionToDb(
  */
 export async function deleteSessionFromDb(sessionId: string) {
   try {
-    await fetch(`/api/history/sessions?id=${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+    await fetch(`/api/history/sessions?id=${encodeURIComponent(sessionId)}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+    });
   } catch {
     // Non-critical — will be cleaned up eventually
   }

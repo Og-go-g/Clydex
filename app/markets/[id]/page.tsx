@@ -1,10 +1,27 @@
 "use client";
 
-import { useState, useEffect, useMemo, use } from "react";
+import { useState, useEffect, use, lazy, Suspense, useMemo } from "react";
 import Link from "next/link";
-import { N1_MARKETS, TIERS } from "@/lib/n1/constants";
+import { TIERS } from "@/lib/n1/constants";
+import { useAuth } from "@/lib/auth/context";
+import { useRealtimePrices } from "@/hooks/useRealtimePrices";
+
+const PriceChart = lazy(() =>
+  import("@/components/charts/PriceChart").then((m) => ({
+    default: m.PriceChart,
+  }))
+);
 
 // ─── Types ──────────────────────────────────────────────────────
+
+interface MarketInfo {
+  id: number;
+  symbol: string;
+  baseAsset: string;
+  tier: number;
+  maxLeverage: number;
+  initialMarginFraction: number;
+}
 
 interface MarketStats {
   perpStats?: {
@@ -122,51 +139,153 @@ export default function MarketDetailPage({
   const { id } = use(params);
   const marketId = parseInt(id, 10);
 
-  const market = useMemo(
-    () => Object.values(N1_MARKETS).find((m) => m.id === marketId) ?? null,
-    [marketId]
-  );
-
+  const { isAuthenticated } = useAuth();
+  const [market, setMarket] = useState<MarketInfo | null>(null);
+  const [marketNotFound, setMarketNotFound] = useState(false);
   const [stats, setStats] = useState<MarketStats | null>(null);
-  const [bids, setBids] = useState<OrderbookEntry[]>([]);
-  const [asks, setAsks] = useState<OrderbookEntry[]>([]);
-  const [trades, setTrades] = useState<RecentTrade[]>([]);
   const [loading, setLoading] = useState(true);
   const [countdown, setCountdown] = useState("");
 
-  // Fetch all data
+  // User's position data for this market (liq price, entry, TP/SL)
+  interface PositionOverlay {
+    entryPrice: number;
+    liqPrice: number;
+    isLong: boolean;
+    triggerOrders: Array<{ price: number; kind: string }>;
+  }
+  const [positionOverlay, setPositionOverlay] = useState<PositionOverlay | null>(null);
+
+  // Fetch market info from the API (single source of truth for IDs)
   useEffect(() => {
-    if (!market) return;
+    if (isNaN(marketId)) {
+      setMarketNotFound(true);
+      setLoading(false);
+      return;
+    }
 
-    async function fetchData() {
+    let cancelled = false;
+    let attempt = 0;
+    let retryTimer: ReturnType<typeof setTimeout>;
+
+    async function fetchMarketInfo() {
       try {
-        const [statsRes, obRes] = await Promise.all([
-          fetch(`/api/markets/${market!.id}`),
-          fetch(`/api/markets/${market!.id}/orderbook`),
-        ]);
-
-        if (statsRes.ok) setStats(await statsRes.json());
-
-        if (obRes.ok) {
-          const ob = await obRes.json();
-          setBids(
-            (ob.bids ?? []).slice(0, 15).map(([price, size]: [number, number]) => ({ price, size }))
-          );
-          setAsks(
-            (ob.asks ?? []).slice(0, 15).map(([price, size]: [number, number]) => ({ price, size }))
-          );
+        const res = await fetch("/api/markets");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!data.markets?.length) throw new Error("Empty response");
+        const found = data.markets.find((m: MarketInfo) => m.id === marketId);
+        if (!cancelled) {
+          if (found) {
+            setMarket({
+              id: found.id,
+              symbol: found.symbol,
+              baseAsset: found.baseAsset ?? found.symbol.replace(/USD$/, ""),
+              tier: found.tier,
+              maxLeverage: found.maxLeverage,
+              initialMarginFraction: found.initialMarginFraction ?? found.imf ?? 0,
+            });
+            attempt = 0;
+          } else {
+            // Market genuinely doesn't exist in the list
+            setMarketNotFound(true);
+            setLoading(false);
+          }
         }
       } catch {
-        // Non-critical — data will show as "—"
-      } finally {
-        setLoading(false);
+        if (!cancelled) {
+          attempt++;
+          // Keep retrying with backoff (2s, 4s, 6s, max 10s)
+          const delay = Math.min(attempt * 2000, 10_000);
+          retryTimer = setTimeout(fetchMarketInfo, delay);
+        }
       }
     }
 
+    fetchMarketInfo();
+    return () => { cancelled = true; clearTimeout(retryTimer); };
+  }, [marketId]);
+
+  // Fetch stats (no orderbook — not needed without trading UI)
+  useEffect(() => {
+    if (!market) return;
+
+    let cancelled = false;
+
+    async function fetchData() {
+      try {
+        const statsRes = await fetch(`/api/markets/${market!.id}`);
+        if (!cancelled && statsRes.ok) setStats(await statsRes.json());
+      } catch { /* keep stale data */ }
+
+      if (!cancelled) setLoading(false);
+    }
+
     fetchData();
-    const interval = setInterval(fetchData, 10_000); // Refresh every 10s
-    return () => clearInterval(interval);
+    const interval = setInterval(fetchData, 30_000);
+    return () => { cancelled = true; clearInterval(interval); };
   }, [market]);
+
+  // Fetch user's position for this market (for chart overlays)
+  useEffect(() => {
+    if (!isAuthenticated || !market) { setPositionOverlay(null); return; }
+    let cancelled = false;
+
+    async function fetchPosition() {
+      try {
+        const res = await fetch("/api/account");
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!data.exists || cancelled) { setPositionOverlay(null); return; }
+
+        // Find position for this market
+        const pos = (data.positions ?? []).find(
+          (p: { marketId: number; perp?: { baseSize: number } }) =>
+            p.marketId === market!.id && p.perp && p.perp.baseSize !== 0
+        );
+        if (!pos) { setPositionOverlay(null); return; }
+
+        // Compute liq price using same formula as portfolio
+        const isLong = pos.perp.isLong ?? true;
+        const absSize = Math.abs(pos.perp.baseSize);
+        const entryPrice = pos.perp.price ?? 0;
+        const pmmf = pos.marketMmf ?? 0.025;
+        const mf = data.margins?.mf ?? data.margins?.omf ?? 0;
+        const mmf = data.margins?.mmf ?? 0;
+        const cushion = mf - mmf;
+        const divisor = absSize * (isLong ? (1 - pmmf) : (1 + pmmf));
+        const markP = pos.markPrice ?? entryPrice;
+        const liqPrice = Math.abs(divisor) > 1e-12
+          ? (isLong ? markP - cushion / divisor : markP + cushion / divisor)
+          : 0;
+
+        // Find trigger orders (TP/SL) for this market
+        const triggers = (data.triggers ?? [])
+          .filter((t: { marketId: number }) => t.marketId === market!.id)
+          .map((t: { triggerPrice?: number; price?: number; kind: string }) => ({
+            price: t.triggerPrice ?? t.price ?? 0,
+            kind: t.kind,
+          }));
+
+        setPositionOverlay({
+          entryPrice,
+          liqPrice: liqPrice > 0 && isFinite(liqPrice) ? liqPrice : 0,
+          isLong,
+          triggerOrders: triggers,
+        });
+      } catch {
+        // silent
+      }
+    }
+
+    fetchPosition();
+    const id = setInterval(fetchPosition, 30_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [isAuthenticated, market]);
+
+  // Real-time price via WS orderbook deltas
+  const wsSymbol = useMemo(() => market ? [market.symbol] : [], [market?.symbol]);
+  const realtimePrices = useRealtimePrices(wsSymbol);
+  const livePrice = market ? realtimePrices[market.symbol] : undefined;
 
   // Funding countdown
   useEffect(() => {
@@ -177,7 +296,7 @@ export default function MarketDetailPage({
     return () => clearInterval(interval);
   }, [stats?.perpStats?.next_funding_time]);
 
-  if (isNaN(marketId) || !market) {
+  if (marketNotFound) {
     return (
       <div className="flex min-h-[60vh] items-center justify-center">
         <div className="text-center">
@@ -191,23 +310,23 @@ export default function MarketDetailPage({
     );
   }
 
+  if (!market) {
+    return (
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+      </div>
+    );
+  }
+
   const perp = stats?.perpStats;
-  const markPrice = perp?.mark_price ?? stats?.indexPrice ?? null;
+  // Prefer WS live price → REST mark price → index price
+  const markPrice = livePrice ?? perp?.mark_price ?? stats?.indexPrice ?? null;
   const change24h =
     stats?.close24h && stats?.prevClose24h
       ? ((stats.close24h - stats.prevClose24h) / stats.prevClose24h) * 100
       : null;
   const tier = TIERS[market.tier];
 
-  // Orderbook cumulative totals for bar width calculation
-  const bidTotal = bids.reduce((s, b) => s + b.size, 0);
-  const askTotal = asks.reduce((s, a) => s + a.size, 0);
-  const maxTotal = Math.max(bidTotal, askTotal);
-
-  const spread =
-    asks.length > 0 && bids.length > 0 ? asks[0].price - bids[0].price : null;
-  const spreadPct =
-    spread && bids[0]?.price ? (spread / bids[0].price) * 100 : null;
 
   return (
     <div className="min-h-screen bg-background p-4 md:p-6">
@@ -261,6 +380,22 @@ export default function MarketDetailPage({
           </Link>
         </div>
 
+        {/* Candlestick Chart */}
+        <div className="mb-6">
+          <Suspense fallback={<div className="h-[340px] rounded-xl border border-[#262626] bg-[#0a0a0a] animate-pulse" />}>
+            <PriceChart
+              marketId={market.id}
+              baseAsset={market.baseAsset}
+              currentPrice={markPrice ?? undefined}
+              change24h={change24h}
+              entryPrice={positionOverlay?.entryPrice}
+              liqPrice={positionOverlay?.liqPrice}
+              isLong={positionOverlay?.isLong}
+              triggerOrders={positionOverlay?.triggerOrders}
+            />
+          </Suspense>
+        </div>
+
         {/* Stats Cards */}
         <div className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-5">
           {[
@@ -310,81 +445,7 @@ export default function MarketDetailPage({
           </div>
         )}
 
-        {/* Orderbook + Trades Grid */}
-        <div className="grid gap-4 md:grid-cols-2">
-          {/* Orderbook */}
-          <div className="rounded-xl border border-border bg-card">
-            <div className="flex items-center justify-between border-b border-border px-4 py-3">
-              <h2 className="text-sm font-semibold text-foreground">Order Book</h2>
-              {spread != null && (
-                <span className="text-xs text-muted">
-                  Spread: {spread.toFixed(2)} ({spreadPct?.toFixed(3)}%)
-                </span>
-              )}
-            </div>
-            {loading ? (
-              <div className="flex items-center justify-center py-20">
-                <div className="h-6 w-6 animate-spin rounded-full border-2 border-accent border-t-transparent" />
-              </div>
-            ) : bids.length === 0 && asks.length === 0 ? (
-              <div className="py-12 text-center text-sm text-muted">No orderbook data</div>
-            ) : (
-              <div className="px-1 py-2">
-                {/* Header */}
-                <div className="flex justify-between px-3 pb-1 text-[10px] text-muted">
-                  <span>Price</span>
-                  <span>Size</span>
-                  <span>Total</span>
-                </div>
-                {/* Asks (reversed, cheapest at bottom) */}
-                <OrderbookSide entries={asks.slice(0, 12)} side="ask" maxTotal={maxTotal} />
-                {/* Spread bar */}
-                {markPrice != null && (
-                  <div className="my-1 flex items-center justify-center gap-2 border-y border-border py-1.5">
-                    <span className="text-sm font-bold font-mono text-foreground">
-                      {fmt(markPrice, markPrice > 100 ? 2 : 4)}
-                    </span>
-                  </div>
-                )}
-                {/* Bids */}
-                <OrderbookSide entries={bids.slice(0, 12)} side="bid" maxTotal={maxTotal} />
-              </div>
-            )}
-          </div>
-
-          {/* Recent Trades */}
-          <div className="rounded-xl border border-border bg-card">
-            <div className="border-b border-border px-4 py-3">
-              <h2 className="text-sm font-semibold text-foreground">Recent Trades</h2>
-            </div>
-            {loading ? (
-              <div className="flex items-center justify-center py-20">
-                <div className="h-6 w-6 animate-spin rounded-full border-2 border-accent border-t-transparent" />
-              </div>
-            ) : trades.length === 0 ? (
-              <div className="py-12 text-center text-sm text-muted">
-                Trade feed available with WebSocket connection
-              </div>
-            ) : (
-              <div className="max-h-[400px] overflow-y-auto px-1 py-2">
-                <div className="flex justify-between px-3 pb-1 text-[10px] text-muted">
-                  <span>Price</span>
-                  <span>Size</span>
-                  <span>Time</span>
-                </div>
-                {trades.map((t, i) => (
-                  <div key={i} className="flex justify-between px-3 py-0.5 text-xs font-mono">
-                    <span className={t.side === "buy" ? "text-green-400" : "text-red-400"}>
-                      {t.price.toLocaleString("en-US", { minimumFractionDigits: 2 })}
-                    </span>
-                    <span className="text-gray-400">{t.size.toFixed(4)}</span>
-                    <span className="text-gray-600">{fmtTime(t.timestamp)}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
+        {/* Market Info */}
 
         {/* Market Info */}
         <div className="mt-6 rounded-xl border border-border bg-card p-4">

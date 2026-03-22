@@ -10,6 +10,8 @@ export interface SessionData {
   nonce?: string;
   /** Authenticated Solana public key (base58) */
   address?: string;
+  /** Absolute session creation time (ms since epoch) for max lifetime enforcement */
+  createdAt?: number;
 }
 
 const SESSION_PASSWORD = process.env.SESSION_SECRET || process.env.SIWE_SECRET;
@@ -23,9 +25,9 @@ const sessionOptions: SessionOptions = {
   cookieOptions: {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
-    sameSite: "lax" as const,
+    sameSite: "strict" as const,
     path: "/",
-    maxAge: 60 * 60 * 24, // 24 hours
+    maxAge: 60 * 60 * 24 * 7, // 7 days
   },
 };
 
@@ -35,8 +37,21 @@ export async function getSession() {
   return getIronSession<SessionData>(cookieStore, sessionOptions);
 }
 
-/** Shorthand: return the authenticated address or null. */
+/** Max absolute session lifetime: 30 days (even with sliding refresh) */
+const MAX_SESSION_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Shorthand: return the authenticated address or null. Refreshes cookie TTL. */
 export async function getAuthAddress(): Promise<string | null> {
   const session = await getSession();
-  return session.address ?? null;
+  if (!session.address) return null;
+
+  // Enforce absolute session lifetime
+  if (session.createdAt && Date.now() - session.createdAt > MAX_SESSION_LIFETIME_MS) {
+    try { session.destroy(); } catch { /* session already invalid */ }
+    return null;
+  }
+
+  // Refresh cookie TTL on each authenticated request (sliding session)
+  await session.save();
+  return session.address;
 }

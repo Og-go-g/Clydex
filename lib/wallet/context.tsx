@@ -88,13 +88,10 @@ function WalletContextInner({ children }: { children: ReactNode }) {
   const address = publicKey?.toBase58() ?? null;
 
   // Track manual connect via sessionStorage
+  // On auto-reconnect (page reload), isManualConnect stays false
+  // Only set to true when user explicitly clicks Connect Wallet
   useEffect(() => {
     if (connected && address) {
-      // If there's a flag in sessionStorage, this is an auto-reconnect
-      const wasConnected = sessionStorage.getItem("clydex-wallet-connected");
-      if (!wasConnected) {
-        setIsManualConnect(true);
-      }
       sessionStorage.setItem("clydex-wallet-connected", "1");
     }
     if (!connected) {
@@ -172,10 +169,10 @@ function WalletContextInner({ children }: { children: ReactNode }) {
 /* ------------------------------------------------------------------ */
 
 export function WalletProvider({ children }: { children: ReactNode }) {
-  const endpoint = useMemo(
-    () => process.env.NEXT_PUBLIC_SOLANA_RPC_URL || clusterApiUrl("mainnet-beta"),
-    []
-  );
+  // Use public Solana RPC for wallet adapter (connect/sign only).
+  // All data reads go through our server proxy (/api/solana-rpc).
+  // NEVER use a keyed RPC URL here — it would leak to the browser.
+  const endpoint = useMemo(() => clusterApiUrl("mainnet-beta"), []);
 
   const wallets = useMemo(
     () => [new PhantomWalletAdapter(), new SolflareWalletAdapter()],

@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
+import * as Sentry from "@sentry/nextjs";
 import { z } from "zod/v4";
 import { getAuthAddress } from "@/lib/auth/session";
 import { getUser, getAccount } from "@/lib/n1/client";
 import { checkLiquidationRisk } from "@/lib/n1/alerts";
+import { collateralLimiter, memRateLimit, memCleanup } from "@/lib/ratelimit";
 
 // ─── Zod Schemas ──────────────────────────────────────────────────
 
@@ -22,11 +24,16 @@ export async function GET() {
 
     const user = await getUser(address);
     if (!user || !user.accountIds?.length) {
+      // Intentional: return same shape with exists: false so the deposit flow UI
+      // can show "create account" messaging. This is NOT a privacy leak since
+      // the endpoint is authenticated (requires valid session for this wallet).
       return NextResponse.json({
         exists: false,
         collateral: 0,
         availableMargin: 0,
         hasPositions: false,
+        positionCount: 0,
+        isBankrupt: false,
         message: "No 01 Exchange account found. Deposit USDC to create one.",
       });
     }
@@ -51,7 +58,7 @@ export async function GET() {
       isBankrupt: margins?.bankruptcy ?? false,
     });
   } catch (error) {
-    console.error("[/api/collateral] GET error:", error);
+    Sentry.captureException(error, { tags: { endpoint: "collateral", method: "GET" } });
     return NextResponse.json(
       { error: "Failed to fetch collateral info" },
       { status: 500 }
@@ -71,6 +78,20 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
 
+  // Per-user rate limit
+  if (collateralLimiter) {
+    const { success } = await collateralLimiter.limit(address);
+    if (!success) {
+      return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    }
+  } else {
+    memCleanup();
+    const { success } = memRateLimit(`collateral:${address}`, 20);
+    if (!success) {
+      return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    }
+  }
+
   let body: unknown;
   try {
     body = await req.json();
@@ -81,16 +102,16 @@ export async function POST(req: Request) {
   const parsed = CollateralActionSchema.safeParse(body);
   if (!parsed.success) {
     return NextResponse.json(
-      { error: "Invalid request", details: parsed.error.issues.map(i => i.message) },
+      { error: "Invalid request parameters" },
       { status: 400 }
     );
   }
 
   const { action, amount } = parsed.data;
 
-  // Additional numeric safety
-  if (amount > 1_000_000_000) {
-    return NextResponse.json({ error: "Amount exceeds maximum" }, { status: 400 });
+  // Additional numeric safety — matches client-side MAX_AMOUNT
+  if (amount > 1_000_000) {
+    return NextResponse.json({ error: "Amount exceeds maximum ($1M)" }, { status: 400 });
   }
 
   try {
@@ -198,7 +219,10 @@ export async function POST(req: Request) {
       requiresConfirmation: warnings.length > 0,
     });
   } catch (error) {
-    console.error("[/api/collateral] POST error:", error);
+    Sentry.captureException(error, {
+      tags: { endpoint: "collateral", method: "POST" },
+      extra: { action, amount, user: address.slice(0, 8) },
+    });
     return NextResponse.json(
       { error: "Failed to validate collateral action" },
       { status: 500 }

@@ -6,6 +6,7 @@ import { AuthProvider } from "@/lib/auth/context";
 import { ChatProvider } from "@/lib/chat/context";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ToastProvider } from "@/components/alerts/ToastProvider";
+import { VerificationProvider } from "@/components/collateral/VerificationProvider";
 
 export function Providers({ children }: { children: ReactNode }) {
   return (
@@ -13,7 +14,9 @@ export function Providers({ children }: { children: ReactNode }) {
       <WalletProvider>
         <AuthProvider>
           <ToastProvider>
-            <ChatProvider>{children}</ChatProvider>
+            <VerificationProvider>
+              <ChatProvider>{children}</ChatProvider>
+            </VerificationProvider>
           </ToastProvider>
         </AuthProvider>
       </WalletProvider>

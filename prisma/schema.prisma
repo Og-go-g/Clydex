@@ -66,15 +66,15 @@ model Trade {
   marketId   Int                          // N1 market ID (0=BTC, 1=ETH, etc.)
   symbol     String                       // "BTC-PERP"
   side       String                       // "Long" | "Short"
-  size       Float                        // base asset units
-  price      Float                        // entry/exit price
-  leverage   Float                        // leverage used
+  size       Decimal  @db.Decimal(30, 18) // base asset units
+  price      Decimal  @db.Decimal(30, 18) // entry/exit price
+  leverage   Decimal  @db.Decimal(10, 4)  // leverage used
   orderId    String?                      // N1 order ID
   actionId   String?                      // N1 action ID
   orderType  String   @default("market")  // "market" | "limit" | "stop_loss" | "take_profit"
   status     String   @default("pending") // "pending" | "filled" | "cancelled" | "failed"
-  pnl        Float?                       // realized PnL in USDC
-  fee        Float?                       // trading fee in USDC
+  pnl        Decimal? @db.Decimal(30, 18) // realized PnL in USDC
+  fee        Decimal? @db.Decimal(30, 18) // trading fee in USDC
   createdAt  DateTime @default(now())
 
   userId     String
@@ -93,7 +93,7 @@ model Alert {
   type        String                       // "liquidation_warning" | "liquidation_critical" | "liquidation_emergency"
   marketId    Int?                          // specific market, or null for account-level
   symbol      String?                       // "BTC-PERP" etc.
-  marginRatio Float                         // margin ratio at time of alert
+  marginRatio Decimal  @db.Decimal(10, 6)    // margin ratio at time of alert
   message     String                        // human-readable alert text
   dismissed   Boolean  @default(false)
   createdAt   DateTime @default(now())
@@ -103,4 +103,18 @@ model Alert {
 
   @@index([userId])
   @@map("alerts")
+}
+
+// ---------------------------------------------------------------------------
+//  PriceHistory — hourly mark prices from 01 Exchange for chart data
+// ---------------------------------------------------------------------------
+model PriceHistory {
+  id       Int      @id @default(autoincrement())
+  marketId Int                          // N1 market ID
+  time     DateTime                     // 15-min interval timestamp
+  price    Decimal  @db.Decimal(30, 18)  // mark price in USD
+
+  @@unique([marketId, time])
+  @@index([marketId, time])
+  @@map("price_history")
 }

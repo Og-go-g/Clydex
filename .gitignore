@@ -9,6 +9,9 @@ out/
 .env
 .env.local
 .env.production
+.env.development
+.env.staging
+.env.test
 .env.*.local
 
 # IDE
