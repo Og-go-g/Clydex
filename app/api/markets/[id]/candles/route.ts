@@ -119,24 +119,27 @@ export async function GET(
 
     if (binanceSymbol) {
       try {
-        const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${binanceSymbol}&interval=${binanceInterval}&limit=${binanceLimit}`;
-        let res = await fetch(url);
-        if (!res.ok) {
-          // Fallback to spot API if futures API fails
-          res = await fetch(
-            `https://api.binance.com/api/v3/klines?symbol=${binanceSymbol}&interval=${binanceInterval}&limit=${binanceLimit}`
-          );
+        // Try multiple Binance endpoints — fapi is geo-blocked on some hosting providers
+        const endpoints = [
+          `https://fapi.binance.com/fapi/v1/klines?symbol=${binanceSymbol}&interval=${binanceInterval}&limit=${binanceLimit}`,
+          `https://api.binance.com/api/v3/klines?symbol=${binanceSymbol}&interval=${binanceInterval}&limit=${binanceLimit}`,
+          `https://data-api.binance.vision/api/v3/klines?symbol=${binanceSymbol}&interval=${binanceInterval}&limit=${binanceLimit}`,
+        ];
+        let res: Response | null = null;
+        for (const ep of endpoints) {
+          try {
+            const r = await fetch(ep);
+            if (r.ok) { res = r; break; }
+          } catch { /* try next */ }
         }
-        if (res.ok) {
-          const raw = (await res.json()) as unknown[];
-          for (const k of raw) {
-            if (!Array.isArray(k) || k.length < 5) continue;
-            // k[0] = open time (ms), k[4] = close price
-            const t = Math.floor(Number(k[0]) / 1000);
-            const price = Number(k[4]);
-            if (!isFinite(t) || !isFinite(price) || price <= 0) continue;
-            points.push({ time: t, price });
-          }
+        if (!res) throw new Error("All Binance endpoints failed");
+        const raw = (await res.json()) as unknown[];
+        for (const k of raw) {
+          if (!Array.isArray(k) || k.length < 5) continue;
+          const t = Math.floor(Number(k[0]) / 1000);
+          const price = Number(k[4]);
+          if (!isFinite(t) || !isFinite(price) || price <= 0) continue;
+          points.push({ time: t, price });
         }
       } catch {
         // Binance unavailable
