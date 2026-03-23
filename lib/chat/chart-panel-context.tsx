@@ -49,3 +49,8 @@ export function useChartPanel(): ChartPanelState {
   if (!ctx) throw new Error("useChartPanel must be used within ChartPanelProvider");
   return ctx;
 }
+
+/** Safe version — returns null when outside ChartPanelProvider (no throw) */
+export function useChartPanelSafe(): ChartPanelState | null {
+  return useContext(ChartPanelContext);
+}

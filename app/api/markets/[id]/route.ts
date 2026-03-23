@@ -5,6 +5,21 @@ import { getMarketStats } from "@/lib/n1/client";
 const statsCache = new Map<number, { data: unknown; time: number }>();
 const STATS_TTL = 15_000; // 15s fresh
 const STATS_STALE = 120_000; // 2min stale fallback
+const MAX_CACHE_SIZE = 100;
+
+/** Evict oldest entries when cache exceeds MAX_CACHE_SIZE */
+function evictOldest(): void {
+  if (statsCache.size <= MAX_CACHE_SIZE) return;
+  let oldestKey: number | null = null;
+  let oldestTime = Infinity;
+  for (const [key, entry] of statsCache) {
+    if (entry.time < oldestTime) {
+      oldestTime = entry.time;
+      oldestKey = key;
+    }
+  }
+  if (oldestKey !== null) statsCache.delete(oldestKey);
+}
 
 /** GET /api/markets/[id] — get single market stats */
 export async function GET(
@@ -28,6 +43,7 @@ export async function GET(
   try {
     const stats = await getMarketStats(marketId);
     statsCache.set(marketId, { data: stats, time: now });
+    evictOldest();
     return NextResponse.json(stats);
   } catch (error) {
     // Return stale cache if available

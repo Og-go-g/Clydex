@@ -338,10 +338,15 @@ export default function PortfolioPage() {
     const entryPrice = p.perp?.price ?? 0;
     const fundingPnl = p.perp?.fundingPaymentPnl ?? 0;
     const wsKey = p.symbol.replace("/", "");
-    const markPrice = realtimePrices[wsKey] ?? p.markPrice ?? entryPrice;
-    const priceDiff = markPrice - entryPrice;
-    // Long PnL = (mark - entry) * size; Short PnL = (entry - mark) * size
-    const sizePricePnl = isLong ? priceDiff * absSize : -priceDiff * absSize;
+    const apiMarkPrice = p.markPrice ?? entryPrice;
+    const wsPrice = realtimePrices[wsKey];
+    const markPrice = wsPrice ?? apiMarkPrice;
+    // Hybrid PnL: API sizePricePnl (ground truth from 01) + WS delta for real-time interpolation
+    const apiPnl = p.perp?.sizePricePnl ?? 0;
+    const wsDelta = wsPrice
+      ? (isLong ? 1 : -1) * (wsPrice - apiMarkPrice) * absSize
+      : 0;
+    const sizePricePnl = apiPnl + wsDelta;
     const totalPnl = sizePricePnl + fundingPnl;
     // Display size: positive for long, negative for short (matches 01 Exchange)
     const displaySize = isLong ? absSize : -absSize;

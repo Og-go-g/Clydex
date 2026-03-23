@@ -14,8 +14,7 @@ const REDIS_PREFIX = "preview:";
 
 // ── Redis client (reuse from ratelimit config) ──
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let redis: any = null;
+let redis: import("@upstash/redis").Redis | null = null;
 
 async function getRedis() {
   if (redis) return redis;
@@ -124,14 +123,20 @@ export async function consumePreview(
       const data = typeof raw === "string" ? JSON.parse(raw) : raw;
       return data.preview as OrderPreview;
     } catch {
-      // Fallback if Lua not supported (e.g. some Upstash plans)
-      // Check ownership BEFORE deleting to prevent consuming another user's preview
-      const raw = await r.get(key);
-      if (!raw) return null;
-      const data = typeof raw === "string" ? JSON.parse(raw) : raw;
-      if (data.userId !== userId) return null;
-      await r.del(key);
-      return data.preview as OrderPreview;
+      // Fallback if Lua not supported — use SETNX lock to prevent TOCTOU race
+      const lockKey = `${REDIS_PREFIX}lock:${previewId}`;
+      const locked = await r.set(lockKey, "1", { ex: 10, nx: true });
+      if (!locked) return null; // Another request is consuming this preview
+      try {
+        const raw = await r.get(key);
+        if (!raw) return null;
+        const data = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (data.userId !== userId) return null;
+        await r.del(key);
+        return data.preview as OrderPreview;
+      } finally {
+        await r.del(lockKey).catch(() => {}); // Cleanup lock
+      }
     }
   }
 

@@ -223,7 +223,7 @@ export default function MarketDetailPage({
     fetchData();
     const interval = setInterval(fetchData, 30_000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [market]);
+  }, [market?.id]);
 
   // Fetch user's position for this market (for chart overlays)
   useEffect(() => {

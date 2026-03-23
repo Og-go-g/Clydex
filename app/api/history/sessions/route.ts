@@ -92,9 +92,13 @@ export async function DELETE(request: Request) {
 
   try {
     const user = await getOrCreateUser(address);
-    await prisma.chatSession.deleteMany({
-      where: { id, userId: user.id },
-    });
+    // Prisma schema has onDelete: Cascade on ChatMessage → ChatSession,
+    // so messages are automatically deleted when the session is removed.
+    // Explicit message deletion here as defense-in-depth.
+    await prisma.$transaction([
+      prisma.chatMessage.deleteMany({ where: { sessionId: id, session: { userId: user.id } } }),
+      prisma.chatSession.deleteMany({ where: { id, userId: user.id } }),
+    ]);
     return NextResponse.json({ ok: true });
   } catch (error) {
     console.error("[api/history/sessions] error:", error);

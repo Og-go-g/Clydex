@@ -6,6 +6,11 @@ import { consumeNonce } from "@/lib/auth/nonce-store";
 
 /** POST /api/auth/login — verify Solana signature and create a session. */
 export async function POST(req: Request) {
+  const contentLength = Number(req.headers.get("content-length") ?? 0);
+  if (contentLength > 10_000) {
+    return NextResponse.json({ error: "Request too large" }, { status: 413 });
+  }
+
   try {
     const body = await req.json();
     const { message, signature } = body;

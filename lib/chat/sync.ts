@@ -18,28 +18,47 @@ const pendingSyncs = new Map<string, { sessionId: string; title: string; message
 // Uses fetch() with keepalive instead of sendBeacon — keepalive guarantees
 // delivery on page unload AND properly sends Origin header (required by
 // our CSRF middleware). sendBeacon omits Origin in some browsers → 403.
+// Browser keepalive fetches have a 64KB total body limit across all pending requests.
+// Only send the most recent session, and truncate messages to fit within budget.
+const KEEPALIVE_BUDGET = 50_000; // 50KB safe margin under 64KB
 if (typeof window !== "undefined") {
   window.addEventListener("beforeunload", () => {
+    let budgetLeft = KEEPALIVE_BUDGET;
+
     for (const [sessionId, payload] of pendingSyncs) {
-      // Clear the debounce timer
       const timeout = syncTimeouts.get(sessionId);
       if (timeout) clearTimeout(timeout);
 
-      // keepalive: true allows fetch to outlive the page
-      fetch("/api/history/sessions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: payload.sessionId, title: payload.title }),
-        keepalive: true,
-      }).catch(() => {});
-
-      if (payload.messages.length > 0) {
-        fetch("/api/history/messages", {
+      // Session upsert — always small (~200 bytes)
+      const sessionBody = JSON.stringify({ id: payload.sessionId, title: payload.title });
+      if (sessionBody.length < budgetLeft) {
+        budgetLeft -= sessionBody.length;
+        fetch("/api/history/sessions", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId: payload.sessionId, messages: payload.messages }),
+          body: sessionBody,
           keepalive: true,
         }).catch(() => {});
+      }
+
+      // Messages — truncate from the front (keep newest) to fit budget
+      if (payload.messages.length > 0 && budgetLeft > 1000) {
+        let msgs = payload.messages;
+        let msgBody = JSON.stringify({ sessionId: payload.sessionId, messages: msgs });
+        // Trim oldest messages until it fits within remaining budget
+        while (msgBody.length > budgetLeft && msgs.length > 1) {
+          msgs = msgs.slice(Math.ceil(msgs.length / 4)); // drop oldest 25%
+          msgBody = JSON.stringify({ sessionId: payload.sessionId, messages: msgs });
+        }
+        if (msgBody.length <= budgetLeft) {
+          budgetLeft -= msgBody.length;
+          fetch("/api/history/messages", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: msgBody,
+            keepalive: true,
+          }).catch(() => {});
+        }
       }
     }
     pendingSyncs.clear();

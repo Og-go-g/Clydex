@@ -12,7 +12,7 @@ import { useAuth } from "@/lib/auth/context";
 import { useRealtimePrices } from "@/hooks/useRealtimePrices";
 import { useOrderExecution, isPreviewConsumed, getConfirmedPosition } from "@/hooks/useOrderExecution";
 import { useToast } from "@/components/alerts/ToastProvider";
-import { useChartPanel } from "@/lib/chat/chart-panel-context";
+import { useChartPanel, useChartPanelSafe } from "@/lib/chat/chart-panel-context";
 
 const PriceChart = lazy(() =>
   import("@/components/charts/PriceChart").then((m) => ({ default: m.PriceChart }))
@@ -79,8 +79,8 @@ function baseAssetFrom(sym: string): string { return sym.replace(/USD$/, ""); }
 
 // ─── Chart panel toggle button (inline in chat input area) ──────
 function ChartToggleButton() {
-  let panelCtx: ReturnType<typeof useChartPanel> | null = null;
-  try { panelCtx = useChartPanel(); } catch { /* not inside provider — hide button */ }
+  // useChartPanelSafe returns null outside provider — no throw, no hook violation
+  const panelCtx = useChartPanelSafe();
   if (!panelCtx) return null;
   const { isOpen, toggle } = panelCtx;
   return (
@@ -116,14 +116,18 @@ function useStatusToast(
 ) {
   const { addToast } = useToast();
   const prevStatus = useRef<ExecStatus>("idle");
+  const toastsRef = useRef(toasts);
+  toastsRef.current = toasts;
 
   useEffect(() => {
     const prev = prevStatus.current;
     prevStatus.current = status;
     if (prev === status) return; // no change
 
-    if (status === "confirmed" && toasts.confirmed) {
-      addToast({ type: "success", ...toasts.confirmed, duration: 5000 });
+    const t = toastsRef.current;
+
+    if (status === "confirmed" && t.confirmed) {
+      addToast({ type: "success", ...t.confirmed, duration: 5000 });
     }
 
     if (status === "error") {
@@ -131,10 +135,10 @@ function useStatusToast(
       if (isUserReject) {
         addToast({ type: "warning", title: "Transaction Cancelled", message: "You rejected the transaction in your wallet.", duration: 3000 });
       } else {
-        addToast({ type: "error", title: toasts.error?.title ?? "Action Failed", message: error ?? undefined, duration: 6000 });
+        addToast({ type: "error", title: t.error?.title ?? "Action Failed", message: error ?? undefined, duration: 6000 });
       }
     }
-  }, [status, error, toasts, addToast]);
+  }, [status, error, addToast]);
 }
 
 // ─── Main Page ───────────────────────────────────────────────────
@@ -590,9 +594,71 @@ function PositionsCard({
   closedSymbols?: Set<string>;
   onSendMessage?: (msg: string) => void;
 }) {
-  const positions = (data.positions as PosData[]) ?? [];
-  const totalValue = data.totalValue as number | undefined;
-  const availableMargin = data.availableMargin as number | undefined;
+  // Auto-refresh: tool result may be stale (user returned to old chat)
+  const [liveData, setLiveData] = useState<Record<string, unknown> | null>(null);
+  const fetchedRef = useRef(false);
+  useEffect(() => {
+    if (fetchedRef.current) return;
+    fetchedRef.current = true;
+    let active = true;
+    fetch(`/api/account?_t=${Date.now()}`, { cache: "no-store" }).then(r => {
+      if (r.status === 401 && active) {
+        setLiveData({ positions: [], totalValue: 0, availableMargin: 0 });
+        return null;
+      }
+      return r.ok ? r.json() : null;
+    }).then(d => {
+      if (!active || !d) return;
+      // Always rebuild from fresh API data — replaces stale tool result unconditionally
+      const newPositions = (d.positions ?? []).filter((p: Record<string, unknown>) => {
+        const perp = p.perp as Record<string, unknown> | undefined;
+        return perp && (perp.baseSize as number) !== 0;
+      });
+      const rebuilt: PosData[] = newPositions.map((p: Record<string, unknown>) => {
+        const perp = p.perp as Record<string, unknown>;
+        const isLong = perp.isLong as boolean;
+        const absSize = Math.abs(perp.baseSize as number);
+        const entryPrice = (perp.price as number) ?? 0;
+        const markPrice = (p.markPrice as number) ?? entryPrice;
+        const symbol = (p.symbol as string).replace("/", "");
+        const marketImf = (p.marketImf as number) ?? 0.1;
+        const apiPnl = (perp.sizePricePnl as number) ?? 0;
+        const fundingPnl = (perp.fundingPaymentPnl as number) ?? 0;
+        return {
+          symbol,
+          baseAsset: symbol.replace("USD", ""),
+          side: isLong ? "Long" : "Short",
+          size: isLong ? absSize : -absSize,
+          absSize,
+          entryPrice,
+          markPrice,
+          unrealizedPnl: apiPnl,
+          pnlPercent: 0,
+          fundingPnl,
+          usedMargin: absSize * entryPrice * marketImf,
+          maxLeverage: Math.max(1, Math.floor(1 / marketImf)),
+          positionValue: absSize * markPrice,
+          liqPrice: (p as Record<string, unknown>).liqPrice as number ?? 0,
+        };
+      });
+      setLiveData({ ...d, positions: rebuilt, totalValue: d.margins?.omf, availableMargin: (d.margins?.omf ?? 0) - rebuilt.reduce((s: number, p: PosData) => s + p.usedMargin, 0) });
+    }).catch(() => {});
+    return () => { active = false; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const effectiveData = liveData ?? data;
+  const positions = (effectiveData.positions as PosData[]) ?? [];
+  const totalValue = effectiveData.totalValue as number | undefined;
+  const availableMargin = effectiveData.availableMargin as number | undefined;
+
+  // If no positions after refresh — show empty state
+  if (positions.length === 0) {
+    return (
+      <div className="my-2 w-full max-w-lg overflow-hidden rounded-xl border border-border bg-background">
+        <div className="px-4 py-3 text-center text-sm text-muted">No open positions</div>
+      </div>
+    );
+  }
 
   return (
     <div className="my-2 w-full max-w-lg overflow-hidden rounded-xl border border-border bg-background">
@@ -606,14 +672,18 @@ function PositionsCard({
       {positions.map((pos, i) => {
         const wsKey = pos.symbol;
         const isClosed = closedSymbols?.has(wsKey) ?? false;
-        const liveMarkPrice = realtimePrices?.[wsKey] ?? pos.markPrice;
-        const priceDiff = liveMarkPrice - pos.entryPrice;
-        const livePnl = pos.side === "Long" ? priceDiff * pos.absSize : -priceDiff * pos.absSize;
+        const isLong = pos.side === "Long";
+        const baseAsset = pos.baseAsset || baseAssetFrom(pos.symbol);
+        // Hybrid PnL: API baseline (unrealizedPnl = sizePricePnl from 01) + WS delta
+        const wsPrice = realtimePrices?.[wsKey];
+        const liveMarkPrice = wsPrice ?? pos.markPrice;
+        const wsDelta = wsPrice
+          ? (isLong ? 1 : -1) * (wsPrice - pos.markPrice) * pos.absSize
+          : 0;
+        const livePnl = (pos.unrealizedPnl ?? 0) + wsDelta;
         const livePnlFunding = livePnl + pos.fundingPnl;
         const livePnlPct = pos.usedMargin > 0 ? (livePnlFunding / pos.usedMargin) * 100 : 0;
         const isProfit = livePnlFunding >= 0;
-        const isLong = pos.side === "Long";
-        const baseAsset = pos.baseAsset || baseAssetFrom(pos.symbol);
 
         return (
           <div key={i} className={`border-b border-border/50 px-4 py-3 ${i === positions.length - 1 ? "border-b-0" : ""} ${isClosed ? "opacity-40 pointer-events-none" : ""}`}>
@@ -720,7 +790,32 @@ function OpenOrdersCard({
   onSendMessage?: (msg: string) => void;
 }) {
   const { addToast } = useToast();
-  const initialOrders = (data.openOrders as Array<{
+
+  // Auto-refresh: tool result orders may be stale (user returned to old chat)
+  const [freshOrders, setFreshOrders] = useState<Array<{
+    orderId: number; symbol: string; baseAsset: string;
+    side: string; size: number; price: number; orderValue: number;
+  }> | null>(null);
+  const orderFetchedRef = useRef(false);
+  useEffect(() => {
+    if (orderFetchedRef.current) return;
+    orderFetchedRef.current = true;
+    let active = true;
+    fetch(`/api/account?_t=${Date.now()}`, { cache: "no-store" }).then(r => {
+      if (r.status === 401 && active) {
+        setFreshOrders([]);
+        return null;
+      }
+      return r.ok ? r.json() : null;
+    }).then(d => {
+      if (!active || !d) return;
+      // Always use fresh orders — unconditionally replace stale tool result
+      setFreshOrders(d.openOrders ?? []);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const initialOrders = freshOrders ?? (data.openOrders as Array<{
     orderId: number; symbol: string; baseAsset: string;
     side: string; size: number; price: number; orderValue: number;
   }>) ?? [];
@@ -848,7 +943,8 @@ function OpenOrdersCard({
         // Mark verified on first successful poll
         setVerified(true);
 
-        let allResolved = true;
+        // Compute allResolved BEFORE setState — don't rely on side effects inside updater
+        const allResolvedRef_local = { value: true };
         setLiveOrders(prev => {
           const updated = prev.map(order => {
             if (order.status !== "active") return order;
@@ -856,7 +952,7 @@ function OpenOrdersCard({
             const found = currentOrders.find((co: any) => co.orderId === order.orderId);
 
             if (found) {
-              allResolved = false; // still active
+              allResolvedRef_local.value = false; // still active
               const origSize = initialSizesRef.current[order.orderId] ?? order.size;
               const remaining = Math.abs(found.size ?? order.size);
               const filled = Math.max(0, origSize - remaining);
@@ -900,8 +996,8 @@ function OpenOrdersCard({
           return updated;
         });
 
-        // Stop polling if all tracked orders resolved (checked via `allResolved` flag set inside map)
-        if (allResolved) { active = false; return; }
+        // Stop polling if all tracked orders resolved
+        if (allResolvedRef_local.value) { active = false; return; }
       } catch {
         failCount++;
         if (failCount >= 5) setVerified(true);
@@ -1114,6 +1210,7 @@ function LivePositionCard({ initialPos, txHash, realtimePrices, onSendMessage }:
   onSendMessage?: (msg: string) => void;
 }) {
   const [closed, setClosed] = useState(false);
+  const closedRef = useRef(false);
   // Live position data from polling (updates entry price, PnL after partial close etc.)
   const [livePos, setLivePos] = useState(initialPos);
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -1124,17 +1221,15 @@ function LivePositionCard({ initialPos, txHash, realtimePrices, onSendMessage }:
   // Track entry price dynamically — updates as partial fills shift average entry
   const trackedEntryRef = useRef(initialPos.entryPrice as number);
 
-  // Poll /api/account to detect external close + update live data (max 5 min)
+  // Poll /api/account to detect external close + update live data
+  // Aggressive first check (1s), then every 5s for 2 min, then every 30s indefinitely
+  // Also checks immediately on tab visibility change
   useEffect(() => {
     let active = true;
     let pollCount = 0;
-    const MAX_POLLS = 30; // 30 × 10s = 5 minutes
+
     const check = async () => {
       pollCount++;
-      if (pollCount > MAX_POLLS) {
-        if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
-        return;
-      }
       try {
         const res = await fetch(`/api/account?_t=${Date.now()}`);
         if (!res.ok) return;
@@ -1147,10 +1242,8 @@ function LivePositionCard({ initialPos, txHash, realtimePrices, onSendMessage }:
           const pSym = (p.symbol ?? "").toUpperCase();
           if (pSym !== symUp && !pSym.startsWith(baseAsset.toUpperCase())) return false;
           if (Math.abs(p.perp?.baseSize ?? 0) < MIN_POS_SIZE) return false;
-          // Match side
           const pSide = p.perp?.isLong ? "Long" : "Short";
           if (pSide !== initSide) return false;
-          // Match entry price within 1% (tight enough to avoid false matches, allows for minor drift from partial fills)
           const pEntry = p.perp?.price ?? 0;
           const refEntry = trackedEntryRef.current;
           if (refEntry > 0 && pEntry > 0 && Math.abs(pEntry - refEntry) / refEntry > 0.01) return false;
@@ -1159,12 +1252,11 @@ function LivePositionCard({ initialPos, txHash, realtimePrices, onSendMessage }:
 
         if (!match && active) {
           setClosed(true);
+          closedRef.current = true;
           if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
         } else if (match && active) {
-          // Update tracked entry price to follow drift (partial fills shift average)
           const newEntry = match.perp?.price ?? trackedEntryRef.current;
           if (newEntry > 0) trackedEntryRef.current = newEntry;
-          // Update live position data (PnL, mark price, size after partial close)
           setLivePos({
             symbol: match.symbol ?? sym,
             baseAsset: match.baseAsset ?? baseAsset,
@@ -1181,66 +1273,127 @@ function LivePositionCard({ initialPos, txHash, realtimePrices, onSendMessage }:
             maxLeverage: match.maxLeverage ?? 1,
             pnlPercent: 0,
           });
+          // Slow down after 2 min of active polling (24 × 5s = 120s)
+          if (pollCount === 24 && pollingRef.current) {
+            clearInterval(pollingRef.current);
+            pollingRef.current = setInterval(check, 30_000);
+          }
         }
       } catch { /* silent */ }
     };
+
+    // Immediate first check after 1s (not 5s)
     const t = setTimeout(() => {
       if (!active) return;
       check();
-      pollingRef.current = setInterval(check, 10_000);
-    }, 5000);
+      pollingRef.current = setInterval(check, 5_000);
+    }, 1000);
+
+    // Re-check instantly when user returns to tab
+    const onVisibility = () => {
+      if (document.visibilityState === "visible" && active && !closedRef.current) check();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
     return () => {
       active = false;
       clearTimeout(t);
       if (pollingRef.current) clearInterval(pollingRef.current);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [sym, baseAsset, initSide]);
+  }, [sym, baseAsset, initSide]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Use livePos for dynamic data (updates from polling), WS for mark price
-  // Freeze mark price on close — stop WS updates for dead cards
-  const frozenMarkRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (closed && frozenMarkRef.current === null) {
-      frozenMarkRef.current = realtimePrices?.[sym] ?? (livePos.markPrice as number);
-    }
-  }, [closed, realtimePrices, sym, livePos.markPrice]);
-  const liveMarkPrice = closed
-    ? (frozenMarkRef.current ?? (livePos.markPrice as number))
-    : (realtimePrices?.[sym] ?? (livePos.markPrice as number));
+  // Frozen snapshot — captured once at the moment of close, never changes
+  const frozenRef = useRef<{ mark: number; pnl: number; pnlPct: number } | null>(null);
+
+  // ── Hybrid PnL: API baseline + WS interpolation ──
+  // API gives us ground-truth PnL (sizePricePnl) at poll time.
+  // Between polls, we interpolate using WS price delta from API mark price.
+  // This matches 01 Exchange PnL exactly at each poll, with smooth real-time updates between.
   const absSize = livePos.absSize as number;
   const entryP = livePos.entryPrice as number;
   const posIsLong = livePos.side === "Long";
-  const priceDiff = liveMarkPrice - entryP;
-  const livePnl = posIsLong ? priceDiff * absSize : -priceDiff * absSize;
-  const livePnlFunding = livePnl + ((livePos.fundingPnl as number) ?? 0);
   const usedMargin = (livePos.usedMargin as number) ?? 0;
+  const fundingPnl = (livePos.fundingPnl as number) ?? 0;
+
+  // API baseline PnL (ground truth from 01 Exchange, updated every poll)
+  const apiSizePricePnl = (livePos.unrealizedPnl as number) ?? 0;
+  const apiMarkPrice = (livePos.markPrice as number) ?? entryP;
+
+  // WS trade price (real-time, ~100ms updates)
+  const wsTradePrice = realtimePrices?.[sym];
+
+  // Interpolated PnL: start from API baseline, add delta from WS price movement since last poll
+  // Delta = (wsPrice - apiMark) × size × direction
+  // When WS unavailable or closed, use API values directly
+  const wsDelta = (wsTradePrice && !closed)
+    ? (posIsLong ? 1 : -1) * (wsTradePrice - apiMarkPrice) * absSize
+    : 0;
+  const livePnl = apiSizePricePnl + wsDelta;
+  const livePnlFunding = livePnl + fundingPnl;
+
+  // Display mark price: WS for real-time feel, frozen on close
+  const wsMarkPrice = wsTradePrice ?? apiMarkPrice;
+  const liveMarkPrice = closed ? (frozenRef.current?.mark ?? apiMarkPrice) : wsMarkPrice;
+
   const rawPnlPct = usedMargin > 0 ? (livePnlFunding / usedMargin) * 100 : 0;
   const livePnlPct = isFinite(rawPnlPct) ? rawPnlPct : 0;
-  const isProfit = livePnlFunding >= 0;
+  const isProfit = closed ? ((frozenRef.current?.pnl ?? livePnlFunding) >= 0) : livePnlFunding >= 0;
 
-  // Freeze PnL at time of close so the closed card shows the final result
-  const frozenPnlRef = useRef<number | null>(null);
+  // Freeze all values the instant we detect close + persist for reload
   useEffect(() => {
-    if (closed && frozenPnlRef.current === null) {
-      frozenPnlRef.current = livePnlFunding;
+    if (closed && !frozenRef.current) {
+      const snapshot = { mark: wsMarkPrice, pnl: livePnlFunding, pnlPct: livePnlPct };
+      frozenRef.current = snapshot;
+      // Persist to localStorage so reload can show "Position Closed" with PnL
+      try {
+        const key = `__pos_closed_${sym}_${initSide}`;
+        localStorage.setItem(key, JSON.stringify({
+          ...snapshot, symbol: sym, baseAsset, side: initSide,
+          absSize, entryPrice: entryP, usedMargin, ts: Date.now(),
+        }));
+      } catch { /* quota exceeded — non-critical */ }
     }
-  }, [closed, livePnlFunding]);
+  }, [closed, wsMarkPrice, livePnlFunding, livePnlPct, sym, initSide, baseAsset, absSize, entryP, usedMargin]);
 
   if (closed) {
+    const fp = frozenRef.current;
+    const closedPnl = fp?.pnl ?? livePnlFunding;
+    const closedPct = fp?.pnlPct ?? livePnlPct;
+    const closedMark = fp?.mark ?? liveMarkPrice;
+    const closedProfit = closedPnl >= 0;
     return (
-      <div className="my-2 w-full max-w-lg overflow-hidden rounded-xl border border-white/10 bg-background opacity-40">
+      <div className={`my-2 w-full max-w-lg overflow-hidden rounded-xl border ${closedProfit ? "border-green-500/20" : "border-red-500/20"} bg-background`}>
         <div className="border-b border-border px-4 py-2 flex items-center gap-2">
           <span className="text-muted">—</span>
           <span className="text-sm font-semibold text-muted">Position Closed</span>
         </div>
-        <div className="px-4 py-3">
+        <div className="px-4 py-3 space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-sm text-muted">{baseAsset}/USD {String(initialPos.side)} {absSize.toFixed(4)} @ {fmtPrice(entryP)}</span>
-            {frozenPnlRef.current != null && (
-              <span className={`text-xs font-medium ${frozenPnlRef.current >= 0 ? "text-green-400" : "text-red-400"}`}>
-                PnL: {formatUsd(frozenPnlRef.current)}
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold text-foreground/60">{baseAsset}/USD</span>
+              <span className={`rounded-md px-1.5 py-0.5 text-[10px] font-bold ${posIsLong ? "bg-green-500/10 text-green-400/60" : "bg-red-500/10 text-red-400/60"}`}>
+                {String(initialPos.side)}
               </span>
-            )}
+              <span className="text-xs font-mono text-muted">{absSize < 0.01 ? absSize.toFixed(6) : absSize.toFixed(4)}</span>
+            </div>
+            <span className={`text-sm font-bold ${closedProfit ? "text-green-400" : "text-red-400"}`}>
+              {closedProfit ? "+" : ""}{formatUsd(closedPnl)} ({closedProfit ? "+" : ""}{closedPct.toFixed(2)}%)
+            </span>
+          </div>
+          <div className="grid grid-cols-3 gap-2 text-[11px] text-muted">
+            <div>
+              <span>Entry</span>
+              <div className="font-mono text-foreground/50">{fmtPrice(entryP)}</div>
+            </div>
+            <div>
+              <span>Exit</span>
+              <div className="font-mono text-foreground/50">{fmtPrice(closedMark)}</div>
+            </div>
+            <div>
+              <span>Margin</span>
+              <div className="font-mono text-foreground/50">{formatUsd(usedMargin)}</div>
+            </div>
           </div>
         </div>
       </div>
@@ -1619,7 +1772,6 @@ function LiveOrderCard({ market, side, size, limitPrice, leverage, txHash, realt
           // BUT: give it one more check — fill might be settling
           await new Promise<void>((resolve) => {
             const t = setTimeout(resolve, 3000);
-            const prevCleanup = () => { clearTimeout(t); resolve(); };
             if (!active) { clearTimeout(t); resolve(); return; }
             // Store so effect cleanup can cancel
             timerRef = t as unknown as ReturnType<typeof setTimeout>;
@@ -1881,13 +2033,16 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage }: { data: Recor
   useEffect(() => {
     if (!isExecuted || reloadChecked) return;
     if (previewId && getConfirmedPosition(previewId)) { setReloadState("position"); setReloadChecked(true); return; }
+    let cancelled = false;
     // Timeout: if check takes >5s, stop loading and show static card
-    const timeout = setTimeout(() => { setReloadState("completed"); setReloadChecked(true); }, 5000);
+    const timeout = setTimeout(() => { if (cancelled) return; setReloadState("completed"); setReloadChecked(true); }, 5000);
     (async () => {
       try {
         const res = await fetch(`/api/account?_t=${Date.now()}`);
-        if (!res.ok) { clearTimeout(timeout); setReloadState("completed"); setReloadChecked(true); return; }
+        if (cancelled) return;
+        if (!res.ok) { clearTimeout(timeout); if (cancelled) return; setReloadState("completed"); setReloadChecked(true); return; }
         const acc = await res.json();
+        if (cancelled) return;
         const sym = normSym(market);
         const ba = baseAssetFrom(sym);
         // Check for position
@@ -1909,23 +2064,34 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage }: { data: Recor
             maxLeverage: pos.maxLeverage ?? 1, pnlPercent: 0,
           });
           clearTimeout(timeout);
+          if (cancelled) return;
           setReloadState("position");
           setReloadChecked(true);
           return;
         }
-        // Check for open order in this market
-        const orders = acc.orders ?? acc.openOrders ?? [];
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const hasOrder = orders.some((o: any) => {
-          const oSym = (o.symbol ?? o.marketSymbol ?? "").toUpperCase();
-          return oSym === sym || oSym.startsWith(ba);
-        });
-        clearTimeout(timeout);
-        setReloadState(hasOrder ? "order" : "completed");
-      } catch { clearTimeout(timeout); setReloadState("completed"); }
+        // For market orders: no position = already closed/completed
+        // For limit orders: check if an open order still exists
+        const isLimit = (orderType ?? "market") === "limit";
+        if (!isLimit) {
+          clearTimeout(timeout);
+          if (cancelled) return;
+          setReloadState("completed");
+        } else {
+          const orders = acc.openOrders ?? [];
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const hasOrder = orders.some((o: any) => {
+            const oSym = (o.symbol ?? o.marketSymbol ?? "").toUpperCase();
+            return oSym === sym || oSym.startsWith(ba);
+          });
+          clearTimeout(timeout);
+          if (cancelled) return;
+          setReloadState(hasOrder ? "order" : "completed");
+        }
+      } catch { clearTimeout(timeout); if (cancelled) return; setReloadState("completed"); }
+      if (cancelled) return;
       setReloadChecked(true);
     })();
-    return () => clearTimeout(timeout);
+    return () => { cancelled = true; clearTimeout(timeout); };
   }, [isExecuted, reloadChecked, previewId, market]);
 
   const handleExecute = () => {
@@ -2014,8 +2180,53 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage }: { data: Recor
       );
     }
 
-    // After reload: everything already closed → static completed card
+    // After reload: everything already closed → show frozen close data with PnL if available
     if (isExecuted && reloadState === "completed") {
+      // Try to restore frozen PnL from localStorage
+      const normSide = side === "Long" ? "Long" : "Short";
+      const closeKey = `__pos_closed_${normSym(market)}_${normSide}`;
+      let closeData: { mark: number; pnl: number; pnlPct: number; absSize: number; entryPrice: number; usedMargin: number } | null = null;
+      try {
+        const raw = localStorage.getItem(closeKey);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          // Only use if saved within last 7 days
+          if (parsed.ts && Date.now() - parsed.ts < 7 * 24 * 60 * 60 * 1000) closeData = parsed;
+        }
+      } catch { /* ignore */ }
+
+      if (closeData) {
+        const closedProfit = closeData.pnl >= 0;
+        return (
+          <div className={`my-2 w-full max-w-lg overflow-hidden rounded-xl border ${closedProfit ? "border-green-500/20" : "border-red-500/20"} bg-background`}>
+            <div className="border-b border-border px-4 py-2 flex items-center gap-2">
+              <span className="text-muted">—</span>
+              <span className="text-sm font-semibold text-muted">Position Closed</span>
+            </div>
+            <div className="px-4 py-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-semibold text-foreground/60">{baseAssetFrom(normSym(market))}/USD</span>
+                  <span className={`rounded-md px-1.5 py-0.5 text-[10px] font-bold ${normSide === "Long" ? "bg-green-500/10 text-green-400/60" : "bg-red-500/10 text-red-400/60"}`}>
+                    {normSide}
+                  </span>
+                  <span className="text-xs font-mono text-muted">{closeData.absSize < 0.01 ? closeData.absSize.toFixed(6) : closeData.absSize.toFixed(4)}</span>
+                </div>
+                <span className={`text-sm font-bold ${closedProfit ? "text-green-400" : "text-red-400"}`}>
+                  {closedProfit ? "+" : ""}{formatUsd(closeData.pnl)} ({closedProfit ? "+" : ""}{closeData.pnlPct.toFixed(2)}%)
+                </span>
+              </div>
+              <div className="grid grid-cols-3 gap-2 text-[11px] text-muted">
+                <div><span>Entry</span><div className="font-mono text-foreground/50">{fmtPrice(closeData.entryPrice)}</div></div>
+                <div><span>Exit</span><div className="font-mono text-foreground/50">{fmtPrice(closeData.mark)}</div></div>
+                <div><span>Margin</span><div className="font-mono text-foreground/50">{formatUsd(closeData.usedMargin)}</div></div>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      // No frozen data available — show simple completed card
       return (
         <div className={`my-2 w-full max-w-lg overflow-hidden rounded-xl border border-white/10 bg-background opacity-40`}>
           <div className="border-b border-border px-4 py-2 flex items-center gap-2">
@@ -2118,7 +2329,7 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage }: { data: Recor
           </div>
         ) : (
           <button
-            onClick={() => { reset(previewId); handleExecute(); }}
+            onClick={() => { reset(); handleExecute(); }}
             className="mt-3 w-full rounded-lg border border-blue-500/30 bg-blue-500/5 py-2 text-xs font-medium text-blue-400 hover:bg-blue-500/10 transition-colors"
           >
             Retry
@@ -2287,7 +2498,7 @@ function ClosePositionCard({ data }: { data: Record<string, unknown> }) {
             Check Again
           </button>
         ) : (
-          <button onClick={() => { reset(previewId); handleClose(); }}
+          <button onClick={() => { reset(); handleClose(); }}
             className="mt-2 w-full rounded-lg border border-orange-500/30 bg-orange-500/5 py-2 text-xs font-medium text-orange-400 hover:bg-orange-500/10 transition-colors">
             Retry
           </button>

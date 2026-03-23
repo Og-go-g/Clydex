@@ -97,7 +97,7 @@ export function ChartPanel() {
     };
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
-  }, [panelWidth]);
+  }, []);
 
   // WS prices for the current market
   const sym = `${baseAsset}USD`;
@@ -110,10 +110,11 @@ export function ChartPanel() {
   // Fetch all markets for selector
   useEffect(() => {
     if (!isOpen || allMarkets.length > 0) return;
+    let cancelled = false;
     fetch("/api/markets")
       .then((r) => r.ok ? r.json() : null)
       .then((d) => {
-        if (d?.markets) {
+        if (!cancelled && d?.markets) {
           setAllMarkets(
             d.markets.map((m: { marketId: number; symbol: string; baseAsset: string; change24h?: number }) => ({
               marketId: m.marketId,
@@ -125,6 +126,7 @@ export function ChartPanel() {
         }
       })
       .catch(() => {});
+    return () => { cancelled = true; };
   }, [isOpen, allMarkets.length]);
 
   const currentMarket = allMarkets.find((m) => m.marketId === marketId);

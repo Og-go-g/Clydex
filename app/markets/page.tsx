@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 
 interface MarketRow {
@@ -45,6 +45,7 @@ const TIER_COLORS: Record<number, string> = {
 
 export default function MarketsPage() {
   const [markets, setMarkets] = useState<MarketRow[]>([]);
+  const marketsEmpty = useRef(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tierFilter, setTierFilter] = useState<number | null>(null);
@@ -61,17 +62,18 @@ export default function MarketsPage() {
         const data = await res.json();
         if (!cancelled) {
           setMarkets(data.markets);
+          marketsEmpty.current = !data.markets?.length;
           setError(null);
           retries = 0;
         }
       } catch {
         if (!cancelled) {
           retries++;
-          // Only show error if we have NO data yet and retried enough
-          setMarkets((prev) => {
-            if (prev.length === 0 && retries >= 3) setError("Failed to load markets");
-            return prev;
-          });
+          // Show error only if we have no data after enough retries
+          // marketsRef tracks current state without nesting setState calls
+          if (retries >= 3 && marketsEmpty.current) {
+            setError("Failed to load markets");
+          }
         }
       } finally {
         if (!cancelled) setLoading(false);

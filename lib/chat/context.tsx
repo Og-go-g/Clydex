@@ -64,6 +64,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     initRef.current = true;
 
     let stored = getSessions();
+    // (cleanup below resets initRef so re-mounts after error boundaries work)
     const visitedThisSession = sessionStorage.getItem("clydex_visited");
 
     if (visitedThisSession) {
@@ -97,6 +98,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     }
 
     setMounted(true);
+    return () => { initRef.current = false; };
   }, []);
 
   // Reset dbSynced when user signs out so re-auth triggers a fresh sync

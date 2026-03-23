@@ -60,7 +60,7 @@ export function PriceChart({ marketId, baseAsset, currentPrice, change24h, entry
   const seriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const [loading, setLoading] = useState(true);
   const [pointCount, setPointCount] = useState(0);
-  const [interval, setInterval] = useState<Interval>("1H");
+  const [interval, setChartInterval] = useState<Interval>("1H");
   const lastDataTimeRef = useRef<number>(0);
   const dataLoadedRef = useRef(false);
 
@@ -186,11 +186,15 @@ export function PriceChart({ marketId, baseAsset, currentPrice, change24h, entry
       const cacheKey = `${marketId}:${interval}`;
       // Check in-memory cache — instant switch between pairs
       const cached = chartCache.get(cacheKey);
-      if (cached && Date.now() - cached.ts < CACHE_TTL) {
-        if (cancelled) return;
-        applyPoints(cached.points);
-        setLoading(false);
-        return;
+      if (cached) {
+        if (Date.now() - cached.ts < CACHE_TTL) {
+          if (cancelled) return;
+          applyPoints(cached.points);
+          setLoading(false);
+          return;
+        }
+        // Expired — remove stale entry before fetching fresh data
+        chartCache.delete(cacheKey);
       }
 
       try {
@@ -285,7 +289,7 @@ export function PriceChart({ marketId, baseAsset, currentPrice, change24h, entry
   }, [entryPrice, liqPrice, triggerOrders]);
 
   const handleInterval = useCallback((i: Interval) => {
-    setInterval(i);
+    setChartInterval(i);
   }, []);
 
   return (

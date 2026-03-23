@@ -63,6 +63,10 @@ export function useRealtimePrices(symbols: string[]) {
     function connect() {
       if (destroyedRef.current) return;
 
+      // Clear stale book state before reconnecting — fresh WS may send deltas
+      // that assume no prior state, and stale levels would corrupt mid-price
+      bookRef.current = {};
+
       const streams = symbols.map((s) => `deltas@${s}`).join("&");
       const url = `${WS_BASE}/${streams}`;
 

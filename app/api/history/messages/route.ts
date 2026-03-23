@@ -83,15 +83,24 @@ export async function POST(request: Request) {
         const validParts = trimmedParts.filter(
           (p: unknown) => typeof p === "object" && p !== null && typeof (p as Record<string, unknown>).type === "string"
         );
-        // Strip dangerous URI schemes from src, href, url fields
+        // Sanitize all string values — strip HTML tags and dangerous URI schemes
+        const DANGEROUS_URI = /^(javascript|data|vbscript):/i;
+        const HTML_TAGS = /<\/?[a-z][^>]*>/gi;
         for (const part of validParts) {
           const obj = part as Record<string, unknown>;
-          for (const field of ["src", "href", "url"]) {
-            if (typeof obj[field] === "string") {
-              const val = (obj[field] as string).trim().toLowerCase();
-              if (val.startsWith("javascript:") || val.startsWith("data:")) {
-                delete obj[field];
-              }
+          for (const [key, val] of Object.entries(obj)) {
+            if (typeof val !== "string") continue;
+            // Strip dangerous URI schemes from any URL-like field
+            if (["src", "href", "url", "action", "formaction"].includes(key)) {
+              if (DANGEROUS_URI.test(val.trim())) { delete obj[key]; continue; }
+            }
+            // Strip HTML tags from all string values to prevent stored XSS
+            if (HTML_TAGS.test(val)) {
+              obj[key] = val.replace(HTML_TAGS, "");
+            }
+            // Strip event handler patterns (onclick=, onerror=, etc.)
+            if (/\bon\w+\s*=/i.test(val as string)) {
+              obj[key] = (val as string).replace(/\bon\w+\s*=\s*["'][^"']*["']/gi, "");
             }
           }
         }

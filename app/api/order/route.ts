@@ -25,6 +25,10 @@ async function getIdempRedis() {
     idempRedis = new Redis({ url, token });
     return idempRedis;
   }
+  // In production, Redis is required for cross-instance idempotency
+  if (process.env.NODE_ENV === "production") {
+    console.error("[SECURITY] Redis not configured — idempotency fallback to in-memory (per-instance only)");
+  }
   return null;
 }
 
@@ -161,7 +165,7 @@ export async function POST(req: Request) {
     if (data.action === "prepare") {
       const market = resolveMarket(data.symbol);
       if (!market) {
-        return NextResponse.json({ error: `Unknown market: "${data.symbol}"` }, { status: 400 });
+        return NextResponse.json({ error: "Unknown market" }, { status: 400 });
       }
 
       const leverageError = validateLeverage(market, data.leverage);
@@ -304,17 +308,25 @@ export async function POST(req: Request) {
 
     // ─── Cancel Order ────────────────────────────────────
     if (data.action === "cancel") {
-      // Validate user has this order
       const user = await getUser(address);
       if (!user?.accountIds?.length) {
         return NextResponse.json({ error: "No account found" }, { status: 400 });
       }
+      const accountId = user.accountIds[0];
 
-      // Return the cancel action for client-side wallet execution
+      // Verify the order actually belongs to this user's account
+      const account = await getAccount(accountId);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rawOrders = (account.orders ?? []) as Array<any>;
+      const allOrderIds = new Set(rawOrders.map((o: { orderId: number }) => o.orderId));
+      if (!allOrderIds.has(Number(data.orderId))) {
+        return NextResponse.json({ error: "Order not found on your account" }, { status: 403 });
+      }
+
       const result = {
         action: "cancel" as const,
         orderId: data.orderId,
-        accountId: user.accountIds[0],
+        accountId,
         status: "awaiting_signature" as const,
       };
 

@@ -52,7 +52,7 @@ export async function GET() {
       collateral: usdcBalance,
       availableMargin: margins?.omf ?? 0,
       maintenanceMargin: margins?.mmf ?? 0,
-      marginRatio: margins?.pon ? (margins.omf / margins.pon) : null,
+      marginRatio: margins?.pon && margins.pon > 0.001 ? (isFinite(margins.omf / margins.pon) ? margins.omf / margins.pon : null) : null,
       hasPositions: positions.length > 0,
       positionCount: positions.length,
       isBankrupt: margins?.bankruptcy ?? false,

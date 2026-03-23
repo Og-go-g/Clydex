@@ -39,23 +39,26 @@ export function useCollateral() {
     success: false,
   });
   const abortRef = useRef(false);
+  const executingRef = useRef(false);
 
   const execute = useCallback(
     async (action: Action, amount: number): Promise<ExecuteResult> => {
-      if (!publicKey || !signMessage || !signTransaction) {
-        setState({ executing: false, error: "Wallet not connected or does not support signing", success: false });
-        return { ok: false, balanceBefore: null };
-      }
-
-      if (amount <= 0 || !isFinite(amount) || amount > MAX_AMOUNT) {
-        setState({ executing: false, error: "Invalid amount", success: false });
-        return { ok: false, balanceBefore: null };
-      }
-
-      abortRef.current = false;
-      setState({ executing: true, error: null, success: false });
+      if (executingRef.current) return { ok: false, balanceBefore: null };
+      executingRef.current = true;
 
       try {
+        if (!publicKey || !signMessage || !signTransaction) {
+          setState({ executing: false, error: "Wallet not connected or does not support signing", success: false });
+          return { ok: false, balanceBefore: null };
+        }
+
+        if (amount <= 0 || !isFinite(amount) || amount > MAX_AMOUNT) {
+          setState({ executing: false, error: "Invalid amount", success: false });
+          return { ok: false, balanceBefore: null };
+        }
+
+        abortRef.current = false;
+        setState({ executing: true, error: null, success: false });
         const { depositUsdc, withdrawUsdc } = await import("@/lib/n1/user-client");
         const { getOrCreateUser } = await import("@/hooks/useOrderExecution");
 
@@ -134,6 +137,8 @@ export function useCollateral() {
           success: false,
         });
         return { ok: false, balanceBefore: null };
+      } finally {
+        executingRef.current = false;
       }
     },
     [publicKey, signMessage, signTransaction]

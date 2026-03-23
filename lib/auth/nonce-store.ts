@@ -11,7 +11,11 @@ interface NonceEntry {
   createdAt: number;
 }
 
-// In-memory store keyed by nonce value for O(1) atomic consume
+// In-memory store keyed by nonce value for O(1) atomic consume.
+// NOTE: On serverless (Vercel), this is per-instance. Nonce generated on Instance A
+// may not exist on Instance B. Vercel typically routes sequential requests from the
+// same client to the same warm instance, so this works in practice. For multi-region
+// deployments, migrate to Redis (Upstash SET NX EX / GETDEL pattern).
 const nonceStore = new Map<string, NonceEntry>();
 
 /** Store a nonce. Returns the nonce string. */

@@ -64,6 +64,7 @@ export function DepositWithdrawModal({
   const [walletUsdcBalance, setWalletUsdcBalance] = useState<number | null>(null);
   const [confirmedAmount, setConfirmedAmount] = useState<number>(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const fallbackTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   // Fetch collateral info from server
   const fetchCollateralInfo = useCallback(async (signal?: AbortSignal) => {
@@ -159,9 +160,15 @@ export function DepositWithdrawModal({
   // Focus input when modal opens
   useEffect(() => {
     if (isOpen && step === "input") {
-      setTimeout(() => inputRef.current?.focus(), 100);
+      const focusTimer = setTimeout(() => inputRef.current?.focus(), 100);
+      return () => clearTimeout(focusTimer);
     }
   }, [isOpen, step]);
+
+  // Cleanup fallback timer on unmount
+  useEffect(() => {
+    return () => { clearTimeout(fallbackTimerRef.current); };
+  }, []);
 
   const parsedAmount = parseFloat(amount);
   const isValidAmount = !isNaN(parsedAmount) && parsedAmount > 0 && isFinite(parsedAmount);
@@ -243,7 +250,7 @@ export function DepositWithdrawModal({
     } else {
       // Hook will set error via state → useEffect handles transition to error step
       // Fallback if hook didn't set error
-      setTimeout(() => {
+      fallbackTimerRef.current = setTimeout(() => {
         setStep((current) => {
           if (current === "signing") {
             setErrorMsg("Transaction could not be completed. Please check your wallet.");
@@ -257,6 +264,7 @@ export function DepositWithdrawModal({
 
   // Close handler — always closeable
   const handleClose = useCallback(() => {
+    clearTimeout(fallbackTimerRef.current);
     if (executing) {
       resetCollateral();
     }

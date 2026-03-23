@@ -47,6 +47,9 @@ function saveConsumed(s: Set<string>) {
 }
 const consumedPreviews = loadConsumed();
 
+/** Per-market close lock — prevents double-close when no previewId exists */
+const closingMarkets = new Set<string>();
+
 /** Check if a preview was already consumed (for card deactivation) */
 export function isPreviewConsumed(previewId: string): boolean {
   return consumedPreviews.has(previewId);
@@ -424,12 +427,19 @@ export function useOrderExecution() {
         setState({ status: "error", error: "This close was already submitted", txHash: null });
         return;
       }
+      // Per-market close lock — prevents double-close when no previewId
+      const closeKey = `${data.market}:${data.side}`;
+      if (!data.previewId && closingMarkets.has(closeKey)) {
+        setState({ status: "error", error: "Close already in progress for this position", txHash: null });
+        return;
+      }
       if (!publicKey || !signMessage || !signTransaction) {
         setState({ status: "error", error: "Wallet not connected", txHash: null });
         return;
       }
 
       executingRef.current = true;
+      if (!data.previewId) closingMarkets.add(closeKey);
       setState({ status: "signing", error: null, txHash: null });
 
       try {
@@ -481,6 +491,9 @@ export function useOrderExecution() {
         handleError(err, "closePosition", data.market, setState);
       } finally {
         executingRef.current = false;
+        // Release per-market close lock
+        const ck = `${data.market}:${data.side}`;
+        closingMarkets.delete(ck);
       }
     },
     [publicKey, signMessage, signTransaction, withUser]
@@ -551,10 +564,10 @@ export function useOrderExecution() {
     [state.txHash]
   );
 
-  const reset = useCallback((previewId?: string) => {
+  const reset = useCallback(() => {
     executingRef.current = false;
-    // Allow retry with the same previewId
-    if (previewId) consumedPreviews.delete(previewId);
+    // Never re-enable consumed previews — server already consumed them.
+    // User must create a new preview via chat to retry.
     setState({ status: "idle", error: null, txHash: null });
   }, []);
 

@@ -3,17 +3,26 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 
 const WS_URL = "wss://zo-mainnet.n1.xyz/ws";
+const MAX_LEVELS = 200;
 
 interface OrderbookRatio {
   bidPct: number;
   askPct: number;
 }
 
+/** Cap a price-level map to MAX_LEVELS by removing the furthest entries */
+function capMap(map: Map<number, number>, side: "bids" | "asks"): void {
+  if (map.size <= MAX_LEVELS) return;
+  const sorted = [...map.keys()].sort((a, b) => side === "bids" ? b - a : a - b);
+  const toRemove = sorted.slice(MAX_LEVELS);
+  for (const key of toRemove) map.delete(key);
+}
+
 /**
  * Real-time bid-ask ratio via WS delta subscription.
  * 1. Loads full orderbook snapshot via REST
  * 2. Applies incremental deltas from WS (same source as 01 Exchange)
- * 3. Recalculates quote-volume ratio on each delta
+ * 3. Recalculates quote-volume ratio on each delta (throttled to 1s)
  */
 export function useOrderbookRatio(marketId: number, symbol: string, enabled: boolean): OrderbookRatio {
   const [ratio, setRatio] = useState<OrderbookRatio>({ bidPct: 50, askPct: 50 });
@@ -23,17 +32,36 @@ export function useOrderbookRatio(marketId: number, symbol: string, enabled: boo
   // Full orderbook state: price → size
   const bidsMap = useRef<Map<number, number>>(new Map());
   const asksMap = useRef<Map<number, number>>(new Map());
+  // Throttle: only call setRatio once per second max
+  const lastCalcRef = useRef(0);
+  const throttleTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const calcRatio = useCallback(() => {
-    let bidVol = 0, askVol = 0;
-    for (const [price, size] of bidsMap.current) bidVol += price * size;
-    for (const [price, size] of asksMap.current) askVol += price * size;
-    const total = bidVol + askVol;
-    if (total > 0) {
-      setRatio({
-        bidPct: (bidVol / total) * 100,
-        askPct: (askVol / total) * 100,
-      });
+    const now = Date.now();
+    const elapsed = now - lastCalcRef.current;
+
+    const doCalc = () => {
+      lastCalcRef.current = Date.now();
+      let bidVol = 0, askVol = 0;
+      for (const [price, size] of bidsMap.current) bidVol += price * size;
+      for (const [price, size] of asksMap.current) askVol += price * size;
+      const total = bidVol + askVol;
+      if (total > 0) {
+        setRatio({
+          bidPct: (bidVol / total) * 100,
+          askPct: (askVol / total) * 100,
+        });
+      }
+    };
+
+    if (elapsed >= 1000) {
+      clearTimeout(throttleTimer.current);
+      doCalc();
+    } else if (!throttleTimer.current) {
+      throttleTimer.current = setTimeout(() => {
+        throttleTimer.current = undefined;
+        doCalc();
+      }, 1000 - elapsed);
     }
   }, []);
 
@@ -63,6 +91,8 @@ export function useOrderbookRatio(marketId: number, symbol: string, enabled: boo
           const size = Number(a[1]);
           if (size > 0) asksMap.current.set(price, size);
         }
+        capMap(bidsMap.current, "bids");
+        capMap(asksMap.current, "asks");
         calcRatio();
       } catch { /* silent */ }
 
@@ -103,6 +133,8 @@ export function useOrderbookRatio(marketId: number, symbol: string, enabled: boo
             if (size === 0) asksMap.current.delete(price);
             else asksMap.current.set(price, size);
           }
+          capMap(bidsMap.current, "bids");
+          capMap(asksMap.current, "asks");
 
           calcRatio();
         } catch { /* ignore */ }
@@ -126,6 +158,7 @@ export function useOrderbookRatio(marketId: number, symbol: string, enabled: boo
     return () => {
       activeRef.current = false;
       clearTimeout(reconnectTimer.current);
+      clearTimeout(throttleTimer.current);
       if (wsRef.current) {
         wsRef.current.onclose = null;
         wsRef.current.close();

@@ -68,6 +68,8 @@ export async function GET() {
       return NextResponse.json({
         exists: false,
         message: "No 01 Exchange account found. Deposit USDC to create one.",
+      }, {
+        headers: { "Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache" },
       });
     }
 
@@ -175,6 +177,8 @@ export async function GET() {
       openOrders,
       triggers,
       marketSymbols,
+    }, {
+      headers: { "Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache" },
     });
   } catch (error) {
     Sentry.captureException(error, { tags: { endpoint: "account" } });

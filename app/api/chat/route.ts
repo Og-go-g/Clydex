@@ -614,8 +614,11 @@ export async function POST(req: Request) {
               const entryPrice = p.perp?.price ?? 0;
               const markPrice = markPrices[p.marketId] ?? entryPrice;
               const fundingPnl = p.perp?.fundingPaymentPnl ?? 0;
+              // Use API's sizePricePnl (ground truth from 01 Exchange) when available,
+              // fallback to manual calculation when field is missing
+              const apiSizePricePnl = p.perp?.sizePricePnl as number | undefined;
               const priceDiff = markPrice - entryPrice;
-              const sizePricePnl = isLong ? priceDiff * absSize : -priceDiff * absSize;
+              const sizePricePnl = apiSizePricePnl ?? (isLong ? priceDiff * absSize : -priceDiff * absSize);
               const totalPnl = sizePricePnl + fundingPnl;
               const marketImf = mkt ? mkt.initialMarginFraction * 2 : 0.10;
               const marketMmf = mkt ? (mkt as unknown as { mmf?: number }).mmf ?? 0.025 : 0.025;

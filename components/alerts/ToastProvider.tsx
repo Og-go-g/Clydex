@@ -5,6 +5,7 @@ import {
   useContext,
   useState,
   useCallback,
+  useEffect,
   useRef,
   type ReactNode,
 } from "react";
@@ -87,6 +88,13 @@ const MAX_TOASTS = 5;
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const timersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+
+  // Clear all timers on unmount
+  useEffect(() => {
+    return () => {
+      for (const t of timersRef.current.values()) clearTimeout(t);
+    };
+  }, []);
 
   const removeToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));

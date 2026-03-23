@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { useState, useRef, useEffect } from "react";
 import { useWallet } from "@/lib/wallet/context";
@@ -18,8 +19,9 @@ export function Header() {
   // Hydration safety
   useEffect(() => setMounted(true), []);
 
-  // Close menu on outside click
+  // Close menu on outside click — only listen when menu is open
   useEffect(() => {
+    if (!menuOpen) return;
     function handleClick(e: MouseEvent) {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         setMenuOpen(false);
@@ -27,7 +29,7 @@ export function Header() {
     }
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
-  }, []);
+  }, [menuOpen]);
 
   const shortAddress = address
     ? `${address.slice(0, 4)}...${address.slice(-4)}`
@@ -44,7 +46,7 @@ export function Header() {
       <div className="flex h-16 items-center justify-between px-6">
         <div className="flex items-center gap-8">
           <Link href="/" className="flex items-center gap-2">
-            <img
+            <Image
               src="/logo.png"
               alt="Clydex"
               width={48}
