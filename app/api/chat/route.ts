@@ -544,6 +544,7 @@ export async function POST(req: Request) {
                   const stats = await getMarketStats(m.id);
                   const perp = stats.perpStats;
                   return {
+                    marketId: m.id,
                     symbol: m.symbol,
                     fundingRate: perp?.funding_rate ?? null,
                     nextFundingTime: perp?.next_funding_time ?? null,
@@ -741,11 +742,11 @@ export async function POST(req: Request) {
           z.object({
             asset: z.string().describe("Asset name: 'BTC', 'ETH', 'SOL', etc."),
             side: z.enum(["Long", "Short"]).describe("Trade direction"),
-            size: z.number().optional().describe("Size in base asset units (e.g. 0.5 BTC)"),
-            dollarSize: z.number().optional().describe("Size in USD (e.g. 500 for $500)"),
-            leverage: z.number().default(1).describe("Leverage multiplier (default 1x)"),
+            size: z.number().positive().finite().max(1_000_000).optional().describe("Size in base asset units (e.g. 0.5 BTC)"),
+            dollarSize: z.number().positive().finite().max(10_000_000).optional().describe("Size in USD (e.g. 500 for $500)"),
+            leverage: z.number().min(1).max(200).finite().default(1).describe("Leverage multiplier (default 1x)"),
             orderType: z.enum(["market", "limit"]).default("market").describe("Order type"),
-            limitPrice: z.number().optional().describe("Limit price (required for limit orders)"),
+            limitPrice: z.number().positive().finite().optional().describe("Limit price (required for limit orders)"),
           })
         ),
         execute: async ({ asset, side, size, dollarSize, leverage, orderType, limitPrice }) => {
@@ -980,7 +981,7 @@ export async function POST(req: Request) {
         inputSchema: zodSchema(
           z.object({
             asset: z.string().describe("Asset to close position on"),
-            percentage: z.number().default(100).describe("Percentage to close (1-100, default 100 = full close)"),
+            percentage: z.number().min(1).max(100).finite().default(100).describe("Percentage to close (1-100, default 100 = full close)"),
           })
         ),
         execute: async ({ asset, percentage }) => {

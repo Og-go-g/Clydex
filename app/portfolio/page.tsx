@@ -134,7 +134,8 @@ export default function PortfolioPage() {
   const refreshingRef = useRef(false);
 
   // Real-time prices via WebSocket — subscribe to positions AND open orders
-  const wsSymbols = useMemo(() => {
+  // N1 WS limit: max ~10 streams per connection, so chunk into groups
+  const allWsSymbols = useMemo(() => {
     const syms = new Set<string>();
     if (data?.positions) {
       for (const p of data.positions) {
@@ -146,7 +147,13 @@ export default function PortfolioPage() {
     }
     return [...syms];
   }, [data?.positions, data?.openOrders]);
-  const realtimePrices = useRealtimePrices(wsSymbols);
+  const wsChunk1 = useMemo(() => allWsSymbols.slice(0, 10), [allWsSymbols]);
+  const wsChunk2 = useMemo(() => allWsSymbols.slice(10, 20), [allWsSymbols]);
+  const wsChunk3 = useMemo(() => allWsSymbols.slice(20), [allWsSymbols]);
+  const prices1 = useRealtimePrices(wsChunk1);
+  const prices2 = useRealtimePrices(wsChunk2);
+  const prices3 = useRealtimePrices(wsChunk3);
+  const realtimePrices = useMemo(() => ({ ...prices1, ...prices2, ...prices3 }), [prices1, prices2, prices3]);
 
   // Silent refresh — no spinner, skips if previous request still in flight
   const refreshAccount = useCallback(async () => {
@@ -572,8 +579,29 @@ export default function PortfolioPage() {
                 const filledAmount = Math.max(0, baseline - o.size);
                 const fillPct = baseline > 0 ? (filledAmount / baseline) * 100 : 0;
 
-                // Elapsed time from real placement time
-                const placedMs = o.placedAt ? new Date(o.placedAt).getTime() : null;
+                // Elapsed time: prefer API placedAt, fallback to first-seen time in localStorage
+                const orderTimeKey = `clydex_order_time:${o.symbol}:${o.side}:${o.price}:${o.size}`;
+                let placedMs: number | null = null;
+                if (o.placedAt) {
+                  const t = new Date(o.placedAt).getTime();
+                  if (!isNaN(t) && t > 0) {
+                    placedMs = t;
+                    try { localStorage.setItem(orderTimeKey, String(t)); } catch { /* quota */ }
+                  }
+                }
+                if (!placedMs) {
+                  try {
+                    const stored = localStorage.getItem(orderTimeKey);
+                    if (stored) {
+                      const t = Number(stored);
+                      if (t > 0 && isFinite(t)) placedMs = t;
+                    }
+                  } catch { /* ignore */ }
+                }
+                if (!placedMs) {
+                  placedMs = Date.now();
+                  try { localStorage.setItem(orderTimeKey, String(placedMs)); } catch { /* quota */ }
+                }
 
                 return (
                   <div key={o.orderId} className="overflow-hidden rounded-xl border border-border bg-card/50">
@@ -587,7 +615,7 @@ export default function PortfolioPage() {
                         <span className="text-xs font-mono text-foreground">{formatSize(o.size, 4)}</span>
                       </div>
                       <div className="flex items-center gap-2">
-                        {placedMs && !isNaN(placedMs) && <ElapsedTime since={placedMs} />}
+                        <ElapsedTime since={placedMs} />
                         <span className="text-xs font-mono text-muted">{formatUsd(o.size * o.price)}</span>
                       </div>
                     </div>

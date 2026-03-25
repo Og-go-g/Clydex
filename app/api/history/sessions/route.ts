@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+import { withRLS } from "@/lib/db/with-rls";
 import { getAuthAddress } from "@/lib/auth/session";
 import { getOrCreateUser } from "@/lib/db/helpers";
 
@@ -7,6 +8,9 @@ import { getOrCreateUser } from "@/lib/db/helpers";
  * GET  /api/history/sessions — list all chat sessions for the authenticated user
  * POST /api/history/sessions — create or sync a session
  * DELETE /api/history/sessions?id=xxx — delete a session
+ *
+ * All queries run inside withRLS() so PostgreSQL RLS policies enforce isolation.
+ * App-level `where: { userId }` is kept as defense-in-depth.
  */
 
 export async function GET() {
@@ -17,12 +21,14 @@ export async function GET() {
 
   try {
     const user = await getOrCreateUser(address);
-    const sessions = await prisma.chatSession.findMany({
-      where: { userId: user.id },
-      orderBy: { updatedAt: "desc" },
-      take: 100,
-      select: { id: true, title: true, createdAt: true, updatedAt: true },
-    });
+    const sessions = await withRLS(user.id, (tx) =>
+      tx.chatSession.findMany({
+        where: { userId: user.id },
+        orderBy: { updatedAt: "desc" },
+        take: 100,
+        select: { id: true, title: true, createdAt: true, updatedAt: true },
+      })
+    );
 
     return NextResponse.json({ sessions });
   } catch (error) {
@@ -53,8 +59,8 @@ export async function POST(request: Request) {
   try {
     const user = await getOrCreateUser(address);
 
-    // Atomic ownership check + upsert in a single transaction to prevent TOCTOU race
-    const session = await prisma.$transaction(async (tx) => {
+    // Atomic ownership check + upsert inside RLS transaction
+    const session = await withRLS(user.id, async (tx) => {
       const existing = await tx.chatSession.findUnique({ where: { id } });
 
       if (existing && existing.userId !== user.id) {
@@ -94,11 +100,11 @@ export async function DELETE(request: Request) {
     const user = await getOrCreateUser(address);
     // Prisma schema has onDelete: Cascade on ChatMessage → ChatSession,
     // so messages are automatically deleted when the session is removed.
-    // Explicit message deletion here as defense-in-depth.
-    await prisma.$transaction([
-      prisma.chatMessage.deleteMany({ where: { sessionId: id, session: { userId: user.id } } }),
-      prisma.chatSession.deleteMany({ where: { id, userId: user.id } }),
-    ]);
+    // Explicit message deletion + RLS as defense-in-depth.
+    await withRLS(user.id, async (tx) => {
+      await tx.chatMessage.deleteMany({ where: { sessionId: id, session: { userId: user.id } } });
+      await tx.chatSession.deleteMany({ where: { id, userId: user.id } });
+    });
     return NextResponse.json({ ok: true });
   } catch (error) {
     console.error("[api/history/sessions] error:", error);

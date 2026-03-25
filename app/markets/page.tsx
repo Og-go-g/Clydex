@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import Link from "next/link";
+import { useRealtimePrices } from "@/hooks/useRealtimePrices";
 
 interface MarketRow {
   id: number;
@@ -9,6 +10,7 @@ interface MarketRow {
   tier: number;
   maxLeverage: number;
   markPrice: number | null;
+  indexPrice: number | null;
   change24h: number | null;
   volume24h: number | null;
   fundingRate: number | null;
@@ -21,6 +23,13 @@ function formatUsd(n: number | null): string {
   if (Math.abs(n) >= 1_000) return "$" + (n / 1_000).toFixed(1) + "K";
   if (Math.abs(n) >= 1) return "$" + n.toFixed(2);
   return "$" + n.toPrecision(4);
+}
+
+function formatPrice(n: number | null): string {
+  if (n == null || !isFinite(n)) return "—";
+  if (n >= 1000) return "$" + n.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  if (n >= 1) return "$" + n.toFixed(4);
+  return "$" + n.toFixed(6);
 }
 
 function formatPct(n: number | null): string {
@@ -50,6 +59,18 @@ export default function MarketsPage() {
   const [error, setError] = useState<string | null>(null);
   const [tierFilter, setTierFilter] = useState<number | null>(null);
   const [sortBy, setSortBy] = useState<"symbol" | "volume" | "change">("volume");
+
+  // Real-time prices via WS — chunked by 10 (N1 WS limit)
+  const allWsSymbols = useMemo(() =>
+    markets.map(m => m.symbol.replace("-PERP", "").replace("/", "")),
+  [markets]);
+  const wsC1 = useMemo(() => allWsSymbols.slice(0, 10), [allWsSymbols]);
+  const wsC2 = useMemo(() => allWsSymbols.slice(10, 20), [allWsSymbols]);
+  const wsC3 = useMemo(() => allWsSymbols.slice(20), [allWsSymbols]);
+  const p1 = useRealtimePrices(wsC1);
+  const p2 = useRealtimePrices(wsC2);
+  const p3 = useRealtimePrices(wsC3);
+  const livePrices = useMemo(() => ({ ...p1, ...p2, ...p3 }), [p1, p2, p3]);
 
   useEffect(() => {
     let cancelled = false;
@@ -144,9 +165,10 @@ export default function MarketsPage() {
               <thead>
                 <tr className="border-b border-border bg-card text-xs text-muted">
                   <th className="px-4 py-3 text-left">Market</th>
-                  <th className="px-4 py-3 text-right">Price</th>
+                  <th className="px-4 py-3 text-right">Index Price</th>
+                  <th className="hidden px-4 py-3 text-right md:table-cell">Mark Price</th>
                   <th className="px-4 py-3 text-right">24h Change</th>
-                  <th className="hidden px-4 py-3 text-right md:table-cell">Volume 24h</th>
+                  <th className="hidden px-4 py-3 text-right lg:table-cell">Volume 24h</th>
                   <th className="hidden px-4 py-3 text-right md:table-cell">Funding</th>
                   <th className="px-4 py-3 text-right">Max Leverage</th>
                 </tr>
@@ -175,9 +197,10 @@ export default function MarketsPage() {
               <thead>
                 <tr className="border-b border-border bg-card text-xs text-muted">
                   <th className="px-4 py-3 text-left">Market</th>
-                  <th className="px-4 py-3 text-right">Price</th>
+                  <th className="px-4 py-3 text-right">Index Price</th>
+                  <th className="hidden px-4 py-3 text-right md:table-cell">Mark Price</th>
                   <th className="px-4 py-3 text-right">24h Change</th>
-                  <th className="hidden px-4 py-3 text-right md:table-cell">Volume 24h</th>
+                  <th className="hidden px-4 py-3 text-right lg:table-cell">Volume 24h</th>
                   <th className="hidden px-4 py-3 text-right md:table-cell">Funding</th>
                   <th className="px-4 py-3 text-right">Max Leverage</th>
                 </tr>
@@ -195,14 +218,17 @@ export default function MarketsPage() {
                       </Link>
                     </td>
                     <td className="px-4 py-3 text-right font-mono text-foreground">
-                      {formatUsd(m.markPrice)}
+                      {formatPrice(m.indexPrice ?? m.markPrice)}
+                    </td>
+                    <td className="hidden px-4 py-3 text-right font-mono text-muted md:table-cell">
+                      {formatPrice(livePrices[m.symbol.replace("-PERP", "").replace("/", "")] ?? m.markPrice)}
                     </td>
                     <td className={`px-4 py-3 text-right font-mono ${
                       (m.change24h ?? 0) >= 0 ? "text-green-400" : "text-red-400"
                     }`}>
                       {formatPct(m.change24h)}
                     </td>
-                    <td className="hidden px-4 py-3 text-right font-mono text-muted md:table-cell">
+                    <td className="hidden px-4 py-3 text-right font-mono text-muted lg:table-cell">
                       {formatUsd(m.volume24h)}
                     </td>
                     <td className={`hidden px-4 py-3 text-right font-mono md:table-cell ${

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+import { withRLS } from "@/lib/db/with-rls";
 import { getAuthAddress } from "@/lib/auth/session";
 import { getOrCreateUser } from "@/lib/db/helpers";
 
@@ -22,20 +23,22 @@ export async function GET(request: Request) {
 
   try {
     const user = await getOrCreateUser(address);
-    const session = await prisma.chatSession.findFirst({
-      where: { id: sessionId, userId: user.id },
-    });
-    if (!session) {
-      return NextResponse.json({ messages: [] });
-    }
+    const { session, messages } = await withRLS(user.id, async (tx) => {
+      const s = await tx.chatSession.findFirst({
+        where: { id: sessionId, userId: user.id },
+      });
+      if (!s) return { session: null, messages: [] };
 
-    const messages = await prisma.chatMessage.findMany({
-      where: { sessionId },
-      orderBy: { createdAt: "asc" },
-      take: MAX_MESSAGES,
-      select: { id: true, role: true, content: true, parts: true, createdAt: true },
+      const msgs = await tx.chatMessage.findMany({
+        where: { sessionId },
+        orderBy: { createdAt: "asc" },
+        take: MAX_MESSAGES,
+        select: { id: true, role: true, content: true, parts: true, createdAt: true },
+      });
+      return { session: s, messages: msgs };
     });
 
+    if (!session) return NextResponse.json({ messages: [] });
     return NextResponse.json({ messages });
   } catch (error) {
     console.error("[api/history/messages] GET error:", error);
@@ -65,7 +68,7 @@ export async function POST(request: Request) {
   }
 
   // Validate each message
-  const validated = [];
+  const validated: { id: string; role: string; content: string; parts: undefined; sessionId: string; createdAt: Date }[] = [];
   for (const m of messages) {
     if (typeof m.id !== "string" || !m.id || m.id.length > 50) continue;
     if (!VALID_ROLES.has(m.role)) continue;
@@ -85,7 +88,6 @@ export async function POST(request: Request) {
         );
         // Sanitize all string values — strip HTML tags and dangerous URI schemes
         const DANGEROUS_URI = /^(javascript|data|vbscript):/i;
-        const HTML_TAGS = /<\/?[a-z][^>]*>/gi;
         for (const part of validParts) {
           const obj = part as Record<string, unknown>;
           for (const [key, val] of Object.entries(obj)) {
@@ -95,9 +97,8 @@ export async function POST(request: Request) {
               if (DANGEROUS_URI.test(val.trim())) { delete obj[key]; continue; }
             }
             // Strip HTML tags from all string values to prevent stored XSS
-            if (HTML_TAGS.test(val)) {
-              obj[key] = val.replace(HTML_TAGS, "");
-            }
+            // Always replace without .test() first — regex `g` flag has stateful lastIndex
+            obj[key] = (val as string).replace(/<\/?[a-z][^>]*>/gi, "");
             // Strip event handler patterns (onclick=, onerror=, etc.)
             if (/\bon\w+\s*=/i.test(val as string)) {
               obj[key] = (val as string).replace(/\bon\w+\s*=\s*["'][^"']*["']/gi, "");
@@ -130,37 +131,38 @@ export async function POST(request: Request) {
 
   try {
     const user = await getOrCreateUser(address);
-    const session = await prisma.chatSession.findFirst({
-      where: { id: sessionId, userId: user.id },
+    const result = await withRLS(user.id, async (tx) => {
+      const s = await tx.chatSession.findFirst({
+        where: { id: sessionId, userId: user.id },
+      });
+      if (!s) return { error: "not_found" as const };
+
+      // Optimistic concurrency: only sync if no other tab synced in the last 1s.
+      const now = new Date();
+      const lockResult = await tx.chatSession.updateMany({
+        where: {
+          id: sessionId,
+          userId: user.id,
+          updatedAt: { lt: new Date(now.getTime() - 1000) },
+        },
+        data: { updatedAt: now },
+      });
+
+      if (lockResult.count === 0) {
+        return { skipped: true as const };
+      }
+
+      // Safe to proceed — delete old + write new inside RLS transaction
+      // Filter by session ownership as defense-in-depth (RLS also enforces)
+      await tx.chatMessage.deleteMany({ where: { sessionId, session: { userId: user.id } } });
+      await tx.chatMessage.createMany({ data: validated });
+      return { ok: true as const };
     });
-    if (!session) {
+
+    if ("error" in result) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
-
-    // Optimistic concurrency: only sync if no other tab synced in the last 1s.
-    // This prevents two tabs from overwriting each other's messages.
-    const now = new Date();
-    const lockResult = await prisma.chatSession.updateMany({
-      where: {
-        id: sessionId,
-        userId: user.id,
-        updatedAt: { lt: new Date(now.getTime() - 1000) },
-      },
-      data: { updatedAt: now },
-    });
-
-    if (lockResult.count === 0) {
-      // Another tab synced very recently — skip to avoid data loss
-      return NextResponse.json({ ok: true, skipped: true });
-    }
-
-    // Safe to proceed — delete old + write new in one transaction
-    await prisma.$transaction([
-      prisma.chatMessage.deleteMany({ where: { sessionId } }),
-      prisma.chatMessage.createMany({ data: validated }),
-    ]);
-
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true, skipped: "skipped" in result });
   } catch (error) {
     console.error("[api/history/messages] POST error:", error);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });

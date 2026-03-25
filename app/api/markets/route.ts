@@ -62,12 +62,13 @@ export async function GET() {
       }
       const stats = result.value;
       const markPrice = stats.perpStats?.mark_price ?? stats.indexPrice ?? null;
+      const indexPrice = stats.indexPrice ?? null;
       const close = stats.close24h;
       const prev = stats.prevClose24h;
       const change24h = close && prev ? ((close - prev) / prev) * 100 : null;
       const volume24h = stats.volumeQuote24h ?? null;
       const fundingRate = stats.perpStats?.funding_rate ?? null;
-      return { ...m, markPrice, change24h, volume24h, fundingRate };
+      return { ...m, markPrice, indexPrice, change24h, volume24h, fundingRate };
     });
 
     const responseData = {

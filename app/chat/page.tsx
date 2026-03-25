@@ -212,6 +212,8 @@ function ChatContent({ chatId }: { chatId: string }) {
           const oo = part.output.openOrders as Array<{ symbol?: string }> | undefined;
           if (oo) for (const o of oo) { if (o.symbol) syms.add(o.symbol); }
         }
+        // Funding rates: NOT added to main priceSymbols — FundingRatesCard
+        // manages its own useRealtimePrices to avoid reconnect storm on the main WS
       }
     }
     return [...syms];
@@ -559,9 +561,143 @@ function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage }: { pa
   if (toolName === "closePosition") return <ClosePositionCard data={result} />;
   if (toolName === "setTrigger") return <TriggerCard data={result} />;
   if (toolName === "cancelOrder") return <CancelOrderCard data={result} />;
+  if (toolName === "getFundingRates" && (result.rates as unknown[])?.length > 0) {
+    return <FundingRatesCard data={result} />;
+  }
 
   // Default: don't render a card for info tools — the AI formats the response
   return null;
+}
+
+// ─── Funding Rates Card ──────────────────────────────────────────
+
+function FundingCountdown({ nextTime }: { nextTime: number | string }) {
+  const [remaining, setRemaining] = useState("");
+  useEffect(() => {
+    // nextTime can be unix ms, unix seconds, or ISO string
+    const ms = typeof nextTime === "string"
+      ? new Date(nextTime).getTime()
+      : nextTime < 1e12 ? nextTime * 1000 : nextTime; // auto-detect seconds vs ms
+    if (!isFinite(ms)) { setRemaining("—"); return; }
+    const tick = () => {
+      const diff = Math.max(0, ms - Date.now());
+      const m = Math.floor(diff / 60_000);
+      const s = Math.floor((diff % 60_000) / 1000);
+      setRemaining(`${m}:${String(s).padStart(2, "0")}`);
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [nextTime]);
+  return <span className="font-mono">{remaining}</span>;
+}
+
+function FundingRatesCard({ data }: {
+  data: Record<string, unknown>;
+}) {
+  // Stable key for memoization — data.rates is a new ref every render
+  const ratesKey = useMemo(() => {
+    const r = (data.rates as Array<{ symbol?: string }>) ?? [];
+    return r.map(x => x.symbol).join(",");
+  }, [data.rates]);
+
+  // Sort by market ID (same order as on 01 Exchange)
+  const sorted = useMemo(() => {
+    const rates = (data.rates as Array<{
+      marketId?: number;
+      symbol: string;
+      fundingRate: number | null;
+      nextFundingTime: string | number | null;
+      markPrice: number | null;
+    }>) ?? [];
+    return [...rates]
+      .filter(r => r.fundingRate != null)
+      .sort((a, b) => (a.marketId ?? 999) - (b.marketId ?? 999));
+  }, [ratesKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Own WS connections for funding symbols — split into chunks of 10
+  // (N1 WS limit: max ~10 streams per connection)
+  const allWsSymbols = useMemo(() =>
+    sorted.map(r => {
+      const cleaned = r.symbol.replace("-PERP", "").replace("/", "");
+      return cleaned.endsWith("USD") ? cleaned : cleaned + "USD";
+    }),
+  [sorted]);
+  const chunk1 = useMemo(() => allWsSymbols.slice(0, 10), [allWsSymbols]);
+  const chunk2 = useMemo(() => allWsSymbols.slice(10, 20), [allWsSymbols]);
+  const chunk3 = useMemo(() => allWsSymbols.slice(20), [allWsSymbols]);
+  const prices1 = useRealtimePrices(chunk1);
+  const prices2 = useRealtimePrices(chunk2);
+  const prices3 = useRealtimePrices(chunk3);
+  const livePrices = useMemo(() => ({ ...prices1, ...prices2, ...prices3 }), [prices1, prices2, prices3]);
+
+  if (sorted.length === 0) return null;
+
+  return (
+    <div className="my-2 w-full max-w-lg overflow-hidden rounded-xl border border-border bg-background">
+      {/* Header */}
+      <div className="flex items-center justify-between border-b border-border px-4 py-2">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold text-foreground">Funding Rates</span>
+          <span className="rounded-full bg-accent/20 px-1.5 py-0.5 text-[10px] font-bold text-accent">
+            {sorted.length}
+          </span>
+        </div>
+        {/* Global next funding countdown from first item */}
+        {sorted[0]?.nextFundingTime && (
+          <div className="flex items-center gap-1 text-[10px] text-muted">
+            <span>Next:</span>
+            <FundingCountdown nextTime={sorted[0].nextFundingTime} />
+          </div>
+        )}
+      </div>
+
+      {/* Column headers */}
+      <div className="grid grid-cols-4 gap-1 border-b border-border/50 px-4 py-1.5 text-[10px] text-muted">
+        <span>Market</span>
+        <span className="text-right">Rate (1h)</span>
+        <span className="text-right hidden sm:block">Annualized</span>
+        <span className="text-right sm:hidden">APR</span>
+        <span className="text-right">Mark Price</span>
+      </div>
+
+      {/* Rows */}
+      <div className="max-h-[400px] overflow-y-auto">
+        {sorted.map((r) => {
+          const rate = r.fundingRate ?? 0;
+          const ratePct = rate * 100;
+          const annualized = rate * 24 * 365 * 100;
+          const isPositive = rate > 0;
+          const isNeutral = Math.abs(rate) < 0.000001;
+          const rateColor = isNeutral ? "text-muted" : isPositive ? "text-green-400" : "text-red-400";
+          const cleaned = r.symbol.replace("-PERP", "").replace("/", "");
+          const baseAsset = cleaned.replace("USD", "");
+          const wsKey = cleaned.endsWith("USD") ? cleaned : cleaned + "USD";
+          const livePrice = livePrices[wsKey] ?? r.markPrice;
+
+          return (
+            <div key={r.symbol} className="grid grid-cols-4 gap-1 border-b border-border/30 px-4 py-2 text-xs last:border-0 hover:bg-white/[0.02] transition-colors">
+              <span className="font-medium text-foreground">{baseAsset}/USD</span>
+              <span className={`text-right font-mono ${rateColor}`}>
+                {ratePct >= 0 ? "+" : ""}{ratePct.toFixed(4)}%
+              </span>
+              <span className={`text-right font-mono ${rateColor}`}>
+                {annualized >= 0 ? "+" : ""}{annualized.toFixed(1)}%
+              </span>
+              <span className="text-right font-mono text-foreground">
+                {fmtPrice(livePrice)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Footer — legend */}
+      <div className="border-t border-border px-4 py-1.5 text-[10px] text-muted">
+        <span className="text-green-400">+</span> longs pay shorts · <span className="text-red-400">−</span> shorts pay longs
+      </div>
+    </div>
+  );
 }
 
 // ─── Positions Card (live PnL + close button) ───────────────────
@@ -1477,21 +1613,25 @@ function LiveOrderCard({ market, side, size, limitPrice, leverage, txHash, realt
   const posSnapshotRef = useRef<number | null>(null);
   const prevOrderState = useRef(orderState);
 
-  // ── Real open time: persisted in sessionStorage, survives remounts ──
-  // Key: market+side+price+txHash for uniqueness (txHash distinguishes identical orders)
-  const orderTimeKey = `order_time:${market}:${side}:${limitPrice}:${txHash ?? size}`;
+  // ── Real open time: persisted in localStorage (survives tab close + remounts) ──
+  // Key: market+side+price+size for uniqueness
+  const orderTimeKey = `clydex_order_time:${market}:${side}:${limitPrice}:${size}`;
   const [openedAt] = useState<number>(() => {
     try {
-      const stored = sessionStorage.getItem(orderTimeKey);
-      if (stored) return Number(stored);
+      const stored = localStorage.getItem(orderTimeKey);
+      if (stored) {
+        const t = Number(stored);
+        if (t > 0 && isFinite(t)) return t;
+      }
     } catch { /* ignore */ }
-    // First mount — record current time
+    // First mount — record current time as fallback
     const now = Date.now();
-    try { sessionStorage.setItem(orderTimeKey, String(now)); } catch { /* quota */ }
+    try { localStorage.setItem(orderTimeKey, String(now)); } catch { /* quota */ }
     return now;
   });
   // Update openedAt from real API placedAt when discovered during polling
   const [realPlacedAt, setRealPlacedAt] = useState<number | null>(null);
+  const realPlacedAtRef = useRef<number | null>(null);
   const effectiveOpenTime = realPlacedAt ?? openedAt;
 
   const sym = normSym(market);
@@ -1690,11 +1830,12 @@ function LiveOrderCard({ market, side, size, limitPrice, leverage, txHash, realt
             trackedOrderIdRef.current = ourOrder.orderId ?? ourOrder.id ?? "matched";
             posSnapshotRef.current = currentPosSize;
             // Capture real placement time from API (if available)
-            if (ourOrder.placedAt) {
+            if (ourOrder.placedAt && !realPlacedAtRef.current) {
               const apiTime = new Date(ourOrder.placedAt).getTime();
               if (!isNaN(apiTime) && apiTime > 0) {
-                setRealPlacedAt(apiTime);
-                try { sessionStorage.setItem(orderTimeKey, String(apiTime)); } catch { /* quota */ }
+                realPlacedAtRef.current = apiTime;
+                if (active) setRealPlacedAt(apiTime);
+                try { localStorage.setItem(orderTimeKey, String(apiTime)); } catch { /* quota */ }
               }
             }
             scheduleNext();
@@ -1735,6 +1876,16 @@ function LiveOrderCard({ market, side, size, limitPrice, leverage, txHash, realt
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             : orders.find((o: any) => (o.orderId ?? o.id) === trackedId);
           const remainingSize = ourOrder ? Math.abs(ourOrder.size ?? size) : size;
+
+          // Always extract real placedAt when available (not just in Phase 1)
+          if (ourOrder?.placedAt && !realPlacedAtRef.current) {
+            const apiTime = new Date(ourOrder.placedAt).getTime();
+            if (!isNaN(apiTime) && apiTime > 0) {
+              realPlacedAtRef.current = apiTime;
+              if (active) setRealPlacedAt(apiTime);
+              try { localStorage.setItem(orderTimeKey, String(apiTime)); } catch { /* quota */ }
+            }
+          }
           const filledAmount = Math.max(0, size - remainingSize);
           const fillPct = size > 0 ? (filledAmount / size) * 100 : 0;
 
