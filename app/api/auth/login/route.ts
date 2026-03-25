@@ -69,7 +69,7 @@ export async function POST(req: Request) {
 
     // Atomically consume nonce server-side AFTER signature is verified
     // (prevents nonce exhaustion via forged signatures)
-    if (!consumeNonce(fields.nonce)) {
+    if (!(await consumeNonce(fields.nonce))) {
       return NextResponse.json({ error: "Authentication failed" }, { status: 401 });
     }
     // Also clean up session nonce

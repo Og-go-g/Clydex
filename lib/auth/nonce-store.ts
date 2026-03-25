@@ -1,50 +1,72 @@
 /**
- * Server-side nonce store with atomic consume.
- * Prevents race condition where two concurrent login requests
- * can both read the same nonce from a cookie-based session.
+ * Nonce store backed by Upstash Redis for cross-instance consistency.
+ * Falls back to in-memory Map when Redis is unavailable (dev mode).
+ *
+ * Redis commands used:
+ *   storeNonce  → SET nonce:{value} 1 EX 300 NX  (1 command)
+ *   consumeNonce → GETDEL nonce:{value}           (1 command)
+ *
+ * Total: 2 Redis commands per login flow.
  */
 
-const NONCE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+import { Redis } from "@upstash/redis";
 
-interface NonceEntry {
-  nonce: string;
-  createdAt: number;
+const NONCE_TTL_S = 300; // 5 minutes
+const REDIS_PREFIX = "nonce:";
+
+// ── Redis client ──
+const hasRedis = !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
+
+const redis = hasRedis
+  ? new Redis({
+      url: process.env.UPSTASH_REDIS_REST_URL!,
+      token: process.env.UPSTASH_REDIS_REST_TOKEN!,
+    })
+  : null;
+
+// ── In-memory fallback (dev only) ──
+const memStore = new Map<string, number>();
+
+function memCleanup() {
+  if (memStore.size < 100) return;
+  const now = Date.now();
+  for (const [k, createdAt] of memStore) {
+    if (now - createdAt > NONCE_TTL_S * 1000) memStore.delete(k);
+  }
 }
 
-// In-memory store keyed by nonce value for O(1) atomic consume.
-// NOTE: On serverless (Vercel), this is per-instance. Nonce generated on Instance A
-// may not exist on Instance B. Vercel typically routes sequential requests from the
-// same client to the same warm instance, so this works in practice. For multi-region
-// deployments, migrate to Redis (Upstash SET NX EX / GETDEL pattern).
-const nonceStore = new Map<string, NonceEntry>();
-
 /** Store a nonce. Returns the nonce string. */
-export function storeNonce(nonce: string): string {
-  // Cleanup expired nonces periodically
-  if (nonceStore.size > 500) {
-    const now = Date.now();
-    for (const [k, v] of nonceStore) {
-      if (now - v.createdAt > NONCE_TTL_MS) nonceStore.delete(k);
-    }
+export async function storeNonce(nonce: string): Promise<string> {
+  if (redis) {
+    // SET NX EX — only stores if not exists, auto-expires in 5 min
+    await redis.set(`${REDIS_PREFIX}${nonce}`, "1", { nx: true, ex: NONCE_TTL_S });
+  } else {
+    memCleanup();
+    memStore.set(nonce, Date.now());
   }
-  nonceStore.set(nonce, { nonce, createdAt: Date.now() });
   return nonce;
 }
 
 /**
- * Atomically consume a nonce. Returns true if the nonce was valid and consumed.
+ * Atomically consume a nonce. Returns true if valid and consumed.
  * After this call, the nonce cannot be used again (single-use guarantee).
+ *
+ * Redis GETDEL is atomic — even concurrent requests can't both succeed.
  */
-export function consumeNonce(nonce: string): boolean {
-  const entry = nonceStore.get(nonce);
-  if (!entry) return false;
-  // Check TTL BEFORE deleting — prevents expired nonce from passing validation
-  if (Date.now() - entry.createdAt > NONCE_TTL_MS) {
-    nonceStore.delete(nonce); // cleanup expired entry
+export async function consumeNonce(nonce: string): Promise<boolean> {
+  if (redis) {
+    // GETDEL — read and delete in one atomic operation
+    const val = await redis.getdel(`${REDIS_PREFIX}${nonce}`);
+    return val !== null;
+  }
+
+  // In-memory fallback (dev)
+  const createdAt = memStore.get(nonce);
+  if (createdAt === undefined) return false;
+  if (Date.now() - createdAt > NONCE_TTL_S * 1000) {
+    memStore.delete(nonce);
     return false;
   }
-  // Atomic delete — even if two requests arrive simultaneously in the same
-  // event loop tick, Map.delete is synchronous and the second call gets false.
-  nonceStore.delete(nonce);
+  memStore.delete(nonce);
   return true;
 }

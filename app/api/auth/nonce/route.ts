@@ -8,7 +8,7 @@ export async function GET() {
   try {
     const nonce = randomBytes(16).toString("hex");
     // Store nonce server-side for atomic consumption (prevents race condition)
-    storeNonce(nonce);
+    await storeNonce(nonce);
     // Also store in session for backwards compatibility
     const session = await getSession();
     session.nonce = nonce;
