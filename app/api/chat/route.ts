@@ -18,17 +18,18 @@ import { resolveMarket, getAllMarkets, validateLeverage, getCachedMarkets, ensur
 import { storePreview, consumePreview } from "@/lib/n1/preview-store";
 
 /** Sanitize external data before passing to AI context to prevent prompt injection */
-function sanitize(val: unknown): unknown {
+function sanitize(val: unknown, depth = 0): unknown {
+  if (depth > 10) return "[truncated]"; // Prevent DoS via deeply nested JSON
   if (val == null || typeof val === "number" || typeof val === "boolean") return val;
   if (typeof val === "string") {
-    // Strip control chars, zero-width characters, and direction overrides
     return val.replace(/[\x00-\x1f\u200B-\u200D\u2060\u2061-\u2064\u206A-\u206F\uFEFF]/g, "").slice(0, 500);
   }
-  if (Array.isArray(val)) return val.map(sanitize);
+  if (Array.isArray(val)) return val.slice(0, 100).map(v => sanitize(v, depth + 1));
   if (typeof val === "object") {
     const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
-      out[k.replace(/[^a-zA-Z0-9_]/g, "")] = sanitize(v);
+    const entries = Object.entries(val as Record<string, unknown>);
+    for (const [k, v] of entries.slice(0, 50)) {
+      out[k.replace(/[^a-zA-Z0-9_]/g, "")] = sanitize(v, depth + 1);
     }
     return out;
   }
@@ -662,6 +663,7 @@ export async function POST(req: Request) {
               totalValue: margins?.omf ?? usdcBalance,
               availableMargin: (margins?.omf ?? 0) - positions.reduce((s: number, p: { usedMargin: number }) => s + p.usedMargin, 0),
               positions,
+              ...(positions.length === 0 ? { message: "No open positions." } : {}),
             };
           } catch {
             return { error: "Failed to fetch positions" };
@@ -743,13 +745,14 @@ export async function POST(req: Request) {
             asset: z.string().describe("Asset name: 'BTC', 'ETH', 'SOL', etc."),
             side: z.enum(["Long", "Short"]).describe("Trade direction"),
             size: z.number().positive().finite().max(1_000_000).optional().describe("Size in base asset units (e.g. 0.5 BTC)"),
-            dollarSize: z.number().positive().finite().max(10_000_000).optional().describe("Size in USD (e.g. 500 for $500)"),
+            dollarSize: z.number().positive().finite().max(10_000_000).optional().describe("Margin amount in USD (e.g. 10 for $10 margin). The notional is dollarSize * leverage. NEVER divide by leverage — pass the raw dollar amount the user specified."),
             leverage: z.number().min(1).max(200).finite().default(1).describe("Leverage multiplier (default 1x)"),
             orderType: z.enum(["market", "limit"]).default("market").describe("Order type"),
             limitPrice: z.number().positive().finite().optional().describe("Limit price (required for limit orders)"),
           })
         ),
         execute: async ({ asset, side, size, dollarSize, leverage, orderType, limitPrice }) => {
+          console.log("[prepareOrder] AI params:", { asset, side, size, dollarSize, leverage, orderType, limitPrice });
           const resolved = resolveAsset(asset);
           if (!resolved) {
             return { error: `Unknown asset: "${asset}". Available: ${getAllMarkets().map(m => m.baseAsset).join(", ")}` };
@@ -777,10 +780,15 @@ export async function POST(req: Request) {
           }
           const entryPrice = orderType === "limit" && limitPrice ? limitPrice : markPrice;
 
-          // Calculate size from dollar amount if needed
-          let orderSize = size;
-          if (!orderSize && dollarSize) {
-            orderSize = dollarSize / entryPrice;
+          // Calculate size: dollarSize (margin $) takes priority over size (base units)
+          // because users typically think in dollars, not coins.
+          // dollarSize = margin amount → notional = dollarSize * leverage → size = notional / price
+          let orderSize: number | undefined;
+          if (dollarSize) {
+            const notional = dollarSize * leverage;
+            orderSize = notional / entryPrice;
+          } else if (size) {
+            orderSize = size;
           }
           if (!orderSize || orderSize <= 0) {
             return { error: "Please specify a valid size (in base asset or USD)." };

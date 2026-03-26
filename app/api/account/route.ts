@@ -80,12 +80,15 @@ export async function GET() {
       getCachedMarketsInfo(),
     ]);
 
+    console.log("[/api/account] accountId:", accountId, "triggers count:", (triggers ?? []).length, "raw:", JSON.stringify((triggers ?? []).slice(0, 2)));
+
     // Build market lookups from live API
     const marketSymbols: Record<number, string> = {};
     const marketImfs: Record<number, number> = {};
     const marketMmfs: Record<number, number> = {};
     const marketCmfs: Record<number, number> = {};
     const marketMaxLev: Record<number, number> = {};
+    const marketPriceDecimals: Record<number, number> = {};
     for (const m of marketsInfo.markets) {
       marketSymbols[m.marketId] = m.symbol;
       // SDK per-market imf is half the actual trading IMF (empirically verified)
@@ -97,6 +100,8 @@ export async function GET() {
       marketCmfs[m.marketId] = (m.cmf ?? m.mmf) * 2;
       // Max leverage from per-market IMF (NOT doubled — per-market imf is correct)
       marketMaxLev[m.marketId] = Math.max(1, Math.floor(1 / m.imf));
+      // priceDecimals — needed to descale trigger prices from API (returned as scaled integers)
+      marketPriceDecimals[m.marketId] = (m as Record<string, unknown>).priceDecimals as number ?? 4;
     }
 
     // Open orders from account state, enriched with timestamps from order history
@@ -175,7 +180,19 @@ export async function GET() {
       balances: account.balances ?? [],
       margins: account.margins,
       openOrders,
-      triggers,
+      // Descale trigger prices — API returns scaled integers (e.g., 9500 for $0.95 with priceDecimals=4)
+      // Always divide by 10^priceDecimals — no heuristics, no guessing
+      triggers: (triggers ?? []).map((t: Record<string, unknown>) => {
+        const mktId = t.marketId as number;
+        const pd = marketPriceDecimals[mktId] ?? 4;
+        const scale = Math.pow(10, pd);
+        return {
+          ...t,
+          triggerPrice: typeof t.triggerPrice === "number" ? t.triggerPrice / scale : t.triggerPrice,
+          ...(typeof t.limitPrice === "number" ? { limitPrice: t.limitPrice / scale } : {}),
+          ...(typeof t.price === "number" ? { price: t.price / scale } : {}),
+        };
+      }),
       marketSymbols,
     }, {
       headers: { "Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache" },

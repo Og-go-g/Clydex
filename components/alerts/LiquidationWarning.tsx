@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/lib/auth/context";
 import type { AlertLevel } from "@/lib/n1/alerts";
 
@@ -41,6 +41,8 @@ export function LiquidationWarning() {
   const [alert, setAlert] = useState<LiquidationAlert | null>(null);
   const [dismissed, setDismissed] = useState(false);
   const [emergencyDismissed, setEmergencyDismissed] = useState(false);
+  // Track which position set was dismissed — only re-show if positions change
+  const dismissedForRef = useRef<string | null>(null);
 
   // Poll account margins every 15s when authenticated
   useEffect(() => {
@@ -50,37 +52,48 @@ export function LiquidationWarning() {
     }
 
     async function checkMargins() {
+      // Skip fetch if already dismissed for current positions
+      if (dismissedForRef.current) return;
       try {
         const res = await fetch("/api/collateral");
         if (!res.ok) return;
         const data = await res.json();
         if (!data.exists || !data.marginRatio) {
           setAlert(null);
+          dismissedForRef.current = null;
           return;
         }
 
-        // Replicate the threshold logic from lib/n1/alerts.ts (client-side)
+        // Fingerprint of current positions — if positions change, re-show alert
+        const posFingerprint = JSON.stringify(
+          ((data.positions as Array<{ symbol: string; side: string }>) ?? [])
+            .map(p => `${p.symbol}_${p.side}`).sort()
+        );
+        currentFingerprintRef.current = posFingerprint;
+
         const ratio = data.marginRatio as number;
-        if (data.isBankrupt) {
-          setAlert({
-            level: "emergency",
-            marginRatio: 0,
-            message: "Account is bankrupt. Positions may be liquidated immediately.",
-          });
-        } else if (ratio <= 0.05) {
+        if (!isFinite(ratio) || ratio <= 0) {
+          setAlert(null);
+          return;
+        }
+
+        if (ratio <= 0.05) {
+          // Emergency: only re-show if positions changed since last dismiss
+          if (dismissedForRef.current === posFingerprint) return;
           setAlert({
             level: "emergency",
             marginRatio: ratio,
             message: `EMERGENCY: Margin ratio at ${(ratio * 100).toFixed(1)}%. Liquidation is imminent. Add collateral or close positions NOW.`,
           });
-          setEmergencyDismissed(false); // Re-show on new emergency
         } else if (ratio <= 0.10) {
+          if (dismissedForRef.current === posFingerprint) return;
           setAlert({
             level: "critical",
             marginRatio: ratio,
             message: `CRITICAL: Margin ratio at ${(ratio * 100).toFixed(1)}%. High risk of liquidation. Consider adding collateral.`,
           });
         } else if (ratio <= 0.15) {
+          if (dismissedForRef.current === posFingerprint) return;
           setAlert({
             level: "warning",
             marginRatio: ratio,
@@ -88,7 +101,7 @@ export function LiquidationWarning() {
           });
         } else {
           setAlert(null);
-          setDismissed(false);
+          dismissedForRef.current = null; // Reset when safe — new risky position will trigger fresh alert
         }
       } catch {
         // Non-critical — silently fail
@@ -100,12 +113,19 @@ export function LiquidationWarning() {
     return () => clearInterval(interval);
   }, [isAuthenticated]);
 
+  // Fingerprint of current positions for dismiss tracking
+  const currentFingerprintRef = useRef<string | null>(null);
+
   const handleDismiss = useCallback(() => {
     setDismissed(true);
+    setAlert(null);
+    dismissedForRef.current = currentFingerprintRef.current;
   }, []);
 
   const handleEmergencyDismiss = useCallback(() => {
     setEmergencyDismissed(true);
+    setAlert(null);
+    dismissedForRef.current = currentFingerprintRef.current;
   }, []);
 
   if (!alert) return null;

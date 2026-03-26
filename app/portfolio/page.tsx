@@ -5,6 +5,7 @@ import { useWallet } from "@/lib/wallet/context";
 import { useAuth } from "@/lib/auth/context";
 import { DepositWithdrawModal } from "@/components/collateral/DepositWithdrawModal";
 import { useRealtimePrices } from "@/hooks/useRealtimePrices";
+import { usePageActive } from "@/hooks/usePageActive";
 
 // Minimum position size threshold — positions below this are treated as dust/zero
 const MIN_POS_SIZE = 1e-12;
@@ -87,11 +88,11 @@ function formatUsd(n: number | null | undefined, decimals = 2): string {
   return sign + "$" + abs.toFixed(decimals);
 }
 
-/** Format price with appropriate precision (3 decimals for prices under $100) */
+/** Format price with appropriate precision, strip trailing zeros */
 function formatPrice(n: number | null | undefined): string {
   if (n == null || !isFinite(n)) return "$0.00";
   const decimals = Math.abs(n) < 1 ? 6 : Math.abs(n) < 100 ? 3 : 2;
-  return "$" + n.toFixed(decimals);
+  return "$" + n.toFixed(decimals).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 function formatSize(n: number | null | undefined, decimals = 2): string {
@@ -147,9 +148,12 @@ export default function PortfolioPage() {
     }
     return [...syms];
   }, [data?.positions, data?.openOrders]);
-  const wsChunk1 = useMemo(() => allWsSymbols.slice(0, 10), [allWsSymbols]);
-  const wsChunk2 = useMemo(() => allWsSymbols.slice(10, 20), [allWsSymbols]);
-  const wsChunk3 = useMemo(() => allWsSymbols.slice(20), [allWsSymbols]);
+  // Pause WS when tab is hidden (portfolio = visibility only, no idle timeout)
+  const pageVisible = usePageActive(0);
+  const activeSymbols = pageVisible ? allWsSymbols : [];
+  const wsChunk1 = useMemo(() => activeSymbols.slice(0, 10), [activeSymbols]);
+  const wsChunk2 = useMemo(() => activeSymbols.slice(10, 20), [activeSymbols]);
+  const wsChunk3 = useMemo(() => activeSymbols.slice(20), [activeSymbols]);
   const prices1 = useRealtimePrices(wsChunk1);
   const prices2 = useRealtimePrices(wsChunk2);
   const prices3 = useRealtimePrices(wsChunk3);
@@ -219,8 +223,8 @@ export default function PortfolioPage() {
     }
     fetchAccount();
 
-    // REST refresh every 10s for margins + mark prices (WS supplements with live trades)
-    const id = setInterval(refreshAccount, 10_000);
+    // REST refresh every 10s — but only when tab is visible (pageVisible from usePageActive)
+    const id = setInterval(() => { if (!document.hidden) refreshAccount(); }, 10_000);
     // Visibility handler: refetch immediately when user returns to tab
     const onVis = () => { if (!document.hidden) refreshAccount(); };
     document.addEventListener("visibilitychange", onVis);
@@ -243,6 +247,22 @@ export default function PortfolioPage() {
       }
     }
   }, [data?.openOrders]);
+
+  // ─── Match triggers to positions by marketId (must be before guards — hook) ──
+  // Trigger kinds from API: "stopLoss" | "takeProfit" (camelCase)
+  const triggersByMarket = useMemo(() => {
+    const trigs = data?.triggers ?? [];
+    const map = new Map<number, { stopLoss?: number; takeProfit?: number }>();
+    for (const t of trigs) {
+      const entry = map.get(t.marketId) ?? {};
+      const kind = (t.kind ?? "").toLowerCase();
+      const price = t.triggerPrice ?? t.price ?? 0;
+      if (kind === "stoploss" || kind === "stop_loss") entry.stopLoss = price;
+      else if (kind === "takeprofit" || kind === "take_profit") entry.takeProfit = price;
+      map.set(t.marketId, entry);
+    }
+    return map;
+  }, [data?.triggers]);
 
   // ─── Guards ────────────────────────────────────────────────
 
@@ -416,7 +436,8 @@ export default function PortfolioPage() {
   const marginCushion = accountMf - accountMmf; // USD buffer before liquidation
 
   const positionRowsWithLiq = positionRows.map((d) => {
-    if (d.absSize < MIN_POS_SIZE) return { ...d, liqPrice: 0 };
+    const trig = triggersByMarket.get(d.p.marketId);
+    if (d.absSize < MIN_POS_SIZE) return { ...d, liqPrice: 0, stopLoss: trig?.stopLoss ?? 0, takeProfit: trig?.takeProfit ?? 0 };
 
     // pmmf = per-market maintenance margin fraction = IMF_base / 2
     // zo-client: pmmf = baseImf / 1000 / 2 = api_imf / 2
@@ -424,13 +445,12 @@ export default function PortfolioPage() {
     const pmmf = d.p.marketMmf ?? 0.025;
 
     const divisor = d.absSize * (d.isLong ? (1 - pmmf) : (1 + pmmf));
-    if (Math.abs(divisor) < 1e-12) return { ...d, liqPrice: 0 };
+    if (Math.abs(divisor) < 1e-12) return { ...d, liqPrice: 0, stopLoss: trig?.stopLoss ?? 0, takeProfit: trig?.takeProfit ?? 0 };
 
     const liqPrice = d.isLong
       ? d.markPrice - marginCushion / divisor
       : d.markPrice + marginCushion / divisor;
-
-    return { ...d, liqPrice: isFinite(liqPrice) && liqPrice > 0 ? liqPrice : 0 };
+    return { ...d, liqPrice: isFinite(liqPrice) && liqPrice > 0 ? liqPrice : 0, stopLoss: trig?.stopLoss ?? 0, takeProfit: trig?.takeProfit ?? 0 };
   });
 
   return (
@@ -506,6 +526,7 @@ export default function PortfolioPage() {
                     <th className="whitespace-nowrap px-3 py-3 text-right">Mark Price</th>
                     <th className="whitespace-nowrap px-3 py-3 text-right">Unrealized PnL</th>
                     <th className="whitespace-nowrap px-3 py-3 text-right">Liq. Price</th>
+                    <th className="whitespace-nowrap px-3 py-3 text-right">TP / SL</th>
                     <th className="whitespace-nowrap px-3 py-3 text-right">Funding</th>
                     <th className="whitespace-nowrap px-3 py-3 text-right">Used Margin</th>
                   </tr>
@@ -541,6 +562,16 @@ export default function PortfolioPage() {
                       </td>
                       <td className="whitespace-nowrap px-3 py-3 text-right font-mono text-foreground">
                         {d.liqPrice > 0 ? formatPrice(d.liqPrice) : "—"}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-3 text-right font-mono">
+                        {d.takeProfit > 0 || d.stopLoss > 0 ? (
+                          <div className="flex flex-col items-end gap-0.5">
+                            {d.takeProfit > 0 && <span className="text-green-400">{formatPrice(d.takeProfit)}</span>}
+                            {d.stopLoss > 0 && <span className="text-red-400">{formatPrice(d.stopLoss)}</span>}
+                          </div>
+                        ) : (
+                          <span className="text-muted/40">—</span>
+                        )}
                       </td>
                       <td className={`whitespace-nowrap px-3 py-3 text-right font-mono ${d.fundingPnl >= 0 ? "text-green-400" : "text-red-400"}`}>
                         {formatUsd(d.fundingPnl, 6)}
@@ -667,9 +698,10 @@ export default function PortfolioPage() {
         )}
 
         {/* Active Triggers */}
-        {triggers.length > 0 && (
+        {/* Orphan triggers — triggers without a matching open position */}
+        {triggers.filter(t => !positions.some(p => p.marketId === t.marketId)).length > 0 && (
           <div>
-            <h2 className="mb-3 text-lg font-semibold text-foreground">Active Triggers ({triggers.length})</h2>
+            <h2 className="mb-3 text-lg font-semibold text-foreground">Pending Triggers</h2>
             <div className="overflow-hidden rounded-xl border border-border">
               <table className="w-full text-sm">
                 <thead>
@@ -680,19 +712,23 @@ export default function PortfolioPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {triggers.map((t, i) => (
-                    <tr key={i} className="border-b border-border">
-                      <td className="px-4 py-3 text-foreground">
-                        {data.marketSymbols?.[String(t.marketId)] ?? `Market-${t.marketId}`}
-                      </td>
-                      <td className={`px-4 py-3 ${t.kind === "StopLoss" ? "text-red-400" : "text-green-400"}`}>
-                        {t.kind === "StopLoss" ? "Stop-Loss" : "Take-Profit"}
-                      </td>
-                      <td className="px-4 py-3 text-right font-mono text-foreground">
-                        {formatUsd(t.triggerPrice ?? t.price)}
-                      </td>
-                    </tr>
-                  ))}
+                  {triggers.filter(t => !positions.some(p => p.marketId === t.marketId)).map((t, i) => {
+                    const kind = (t.kind ?? "").toLowerCase();
+                    const isSL = kind === "stoploss" || kind === "stop_loss";
+                    return (
+                      <tr key={i} className="border-b border-border">
+                        <td className="px-4 py-3 text-foreground">
+                          {data.marketSymbols?.[String(t.marketId)] ?? `Market-${t.marketId}`}
+                        </td>
+                        <td className={`px-4 py-3 ${isSL ? "text-red-400" : "text-green-400"}`}>
+                          {isSL ? "Stop-Loss" : "Take-Profit"}
+                        </td>
+                        <td className="px-4 py-3 text-right font-mono text-foreground">
+                          {formatPrice(t.triggerPrice ?? t.price)}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -700,7 +736,7 @@ export default function PortfolioPage() {
         )}
 
         {/* Empty state — no positions, orders, or triggers */}
-        {positions.length === 0 && openOrders.length === 0 && triggers.length === 0 && (
+        {positions.length === 0 && openOrders.length === 0 && (
           <div className="rounded-xl border border-border bg-card p-8 text-center">
             <h3 className="text-lg font-semibold text-foreground">No Activity Yet</h3>
             <p className="mt-2 text-sm text-muted">

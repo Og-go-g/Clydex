@@ -10,8 +10,9 @@ import { getMessages, saveMessages } from "@/lib/chat/store";
 import { syncSessionToDb } from "@/lib/chat/sync";
 import { useAuth } from "@/lib/auth/context";
 import { useRealtimePrices } from "@/hooks/useRealtimePrices";
-import { useOrderExecution, isPreviewConsumed, getConfirmedPosition } from "@/hooks/useOrderExecution";
+import { useOrderExecution, isPreviewConsumed, isPreviewFailed, getConfirmedPosition } from "@/hooks/useOrderExecution";
 import { useToast } from "@/components/alerts/ToastProvider";
+import { usePageActive } from "@/hooks/usePageActive";
 import { useChartPanel, useChartPanelSafe } from "@/lib/chat/chart-panel-context";
 
 const PriceChart = lazy(() =>
@@ -55,12 +56,14 @@ function formatUsd(n: number | null | undefined): string {
   return sign + "$" + abs.toPrecision(4);
 }
 
-/** Format price with auto-precision (used across all cards) */
+/** Format price with auto-precision, strip trailing zeros (used across all cards) */
 function fmtPrice(n: number | null | undefined): string {
   if (n == null || !isFinite(n as number)) return "—";
   if (n >= 1000) return "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  if (n >= 1) return "$" + n.toFixed(3);
-  return "$" + n.toFixed(6);
+  if (n >= 1) return "$" + n.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+  // For prices < $1: use enough precision but strip trailing zeros
+  // $0.950000 → $0.95, $0.001234 → $0.001234
+  return "$" + n.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 /** Format size with consistent precision: .toFixed(4) for sizes >= 0.01, .toFixed(6) for smaller */
@@ -76,6 +79,85 @@ function normSym(s: string): string { return s.replace(/\//, "").toUpperCase(); 
 /** Extract base asset from symbol (e.g. "SOLUSD" → "SOL") */
 function baseAssetFrom(sym: string): string { return sym.replace(/USD$/, ""); }
 
+
+// ─── Collapsible card wrapper ────────────────────────────────────
+// Wraps any chat card with a collapse/expand toggle. State persisted in localStorage.
+// When collapsed, children are NOT rendered → hooks unmount → WS/polling stop automatically.
+// When expanded, children remount fresh → hooks reconnect → data updates in real-time.
+const COLLAPSE_PREFIX = "__card_collapsed_";
+
+function CollapsibleCard({
+  cardKey,
+  label,
+  badge,
+  badgeColor,
+  children,
+  descriptionText,
+  beforeText,
+}: {
+  cardKey: string; // unique key for localStorage persistence
+  label: string;   // shown when collapsed, e.g. "Position — SUI/USD Short"
+  badge?: string;  // optional badge text (e.g. "Closed", "Filled")
+  badgeColor?: string; // badge color class (e.g. "text-red-400")
+  children: React.ReactNode;
+  descriptionText?: string; // AI description text after card — hidden when collapsed
+  beforeText?: string; // AI description text before card — hidden when collapsed
+}) {
+  const storageKey = COLLAPSE_PREFIX + cardKey;
+  const [collapsed, setCollapsed] = useState(() => {
+    try { return localStorage.getItem(storageKey) === "1"; } catch { return false; }
+  });
+
+  const toggle = useCallback(() => {
+    setCollapsed((prev) => {
+      const next = !prev;
+      try { if (next) localStorage.setItem(storageKey, "1"); else localStorage.removeItem(storageKey); } catch { /* ignore */ }
+      return next;
+    });
+  }, [storageKey]);
+
+  if (collapsed) {
+    return (
+      <div className="my-2 flex w-full max-w-3xl items-center gap-2 rounded-lg border border-white/5 bg-background/50 px-3 py-1.5">
+        <button onClick={toggle} className="text-muted hover:text-foreground transition-colors" aria-label="Expand card">
+          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+          </svg>
+        </button>
+        <span className="text-xs text-muted truncate flex-1">{label}</span>
+        {badge && <span className={`text-[10px] font-medium ${badgeColor ?? "text-muted"}`}>{badge}</span>}
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      {beforeText && (
+        <div className="mb-1 whitespace-pre-wrap text-sm">
+          <SimpleMarkdown text={beforeText} />
+        </div>
+      )}
+      <div className="relative">
+        <button
+          onClick={toggle}
+          className="absolute top-2 right-2 z-10 rounded-md p-1 text-muted/40 hover:text-muted hover:bg-white/5 transition-colors"
+          aria-label="Collapse card"
+          title="Collapse"
+        >
+          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+          </svg>
+        </button>
+        {children}
+      </div>
+      {descriptionText && (
+        <div className="mt-1 whitespace-pre-wrap text-sm">
+          <SimpleMarkdown text={descriptionText} />
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ─── Chart panel toggle button (inline in chat input area) ──────
 function ChartToggleButton() {
@@ -218,7 +300,11 @@ function ChatContent({ chatId }: { chatId: string }) {
     }
     return [...syms];
   }, [messages]);
-  const realtimePrices = useRealtimePrices(priceSymbols);
+
+  // Pause all WS when user is idle >10min or tab hidden
+  const pageActive = usePageActive(10 * 60 * 1000);
+  const activeSymbols = pageActive ? priceSymbols : [];
+  const realtimePrices = useRealtimePrices(activeSymbols);
 
   // Collect symbols of positions/orders that have been closed/cancelled in this conversation
   const closedSymbols = useMemo(() => {
@@ -267,9 +353,16 @@ function ChatContent({ chatId }: { chatId: string }) {
     if (session?.title === "New Chat") {
       const firstUserMsg = msgs.find((m) => m.role === "user");
       if (firstUserMsg) {
-        const text = msgText(firstUserMsg as unknown as Record<string, unknown>);
+        const text = msgText(firstUserMsg as unknown as Record<string, unknown>).trim();
         if (text) {
-          title = text.slice(0, 40);
+          // Smart truncate: cut at word boundary, add ellipsis
+          if (text.length <= 35) {
+            title = text;
+          } else {
+            const cut = text.slice(0, 35);
+            const lastSpace = cut.lastIndexOf(" ");
+            title = (lastSpace > 15 ? cut.slice(0, lastSpace) : cut) + "…";
+          }
           renameChat(chatId, title);
         }
       }
@@ -342,28 +435,45 @@ function ChatContent({ chatId }: { chatId: string }) {
             </div>
           </div>
 
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-            >
+          {messages.map((msg, msgIdx) => {
+            // Check if the next user message dismisses action cards (cancel/no/etc.)
+            const nextUserMsg = messages.slice(msgIdx + 1).find(m => m.role === "user");
+            const nextUserText = nextUserMsg ? msgText(nextUserMsg as unknown as Record<string, unknown>).toLowerCase().trim() : "";
+            const DISMISS_WORDS = ["no", "нет", "cancel", "отмена", "передумал", "не надо", "стоп", "stop", "отменить", "не нужно", "forget it", "nevermind", "nah", "nope", "не хочу", "не буду", "назад", "back"];
+            // Exclude false positives: "stop loss", "stop-loss" = user wants to SET a stop, not cancel
+            const isFalsePositive = nextUserText.startsWith("stop loss") || nextUserText.startsWith("stop-loss") || nextUserText.startsWith("стоп лос");
+            const isDismissedByUser = !isFalsePositive && DISMISS_WORDS.some(w => nextUserText === w || nextUserText.startsWith(w + " ") || nextUserText.startsWith(w + ","));
+            // Also check if AI responded with "cancel" language
+            const nextAiMsg = messages.slice(msgIdx + 1).find(m => m.role === "assistant");
+            const nextAiText = nextAiMsg ? msgText(nextAiMsg as unknown as Record<string, unknown>).toLowerCase() : "";
+            const isDismissedByAi = nextAiText.includes("cancel") || nextAiText.includes("отмен");
+            const isDismissed = isDismissedByUser || isDismissedByAi;
+
+            return (
               <div
-                className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
-                  msg.role === "user"
-                    ? "bg-accent text-white"
-                    : "border border-border bg-card text-foreground"
-                }`}
+                key={msg.id}
+                className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
               >
-                <MessageContent
-                  content={msgText(msg as unknown as Record<string, unknown>)}
-                  parts={msg.parts as unknown as ToolMessagePart[]}
-                  realtimePrices={realtimePrices}
-                  closedSymbols={closedSymbols}
-                  onSendMessage={handleCardAction}
-                />
+                <div
+                  className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+                    msg.role === "user"
+                      ? "bg-accent text-white"
+                      : "border border-border bg-card text-foreground"
+                  }`}
+                >
+                  <MessageContent
+                    content={msgText(msg as unknown as Record<string, unknown>)}
+                    parts={msg.parts as unknown as ToolMessagePart[]}
+                    realtimePrices={realtimePrices}
+                    closedSymbols={closedSymbols}
+                    onSendMessage={handleCardAction}
+                    isDismissed={isDismissed}
+                    messageId={msg.id}
+                  />
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
 
           {isLoading && (
             <div className="flex justify-start">
@@ -416,29 +526,113 @@ function MessageContent({
   realtimePrices,
   closedSymbols,
   onSendMessage,
+  isDismissed,
+  messageId,
 }: {
   content: string;
   parts?: ToolMessagePart[];
   realtimePrices?: Record<string, number>;
   closedSymbols?: Set<string>;
   onSendMessage?: (msg: string) => void;
+  isDismissed?: boolean;
+  messageId?: string;
 }) {
   if (Array.isArray(parts) && parts.length > 0) {
+    // Group parts: each tool result absorbs following text parts as its description.
+    // Consecutive setTrigger tools are merged into one group (TP+SL in one collapsible).
+    type PartGroup = { tools: { part: ToolMessagePart; idx: number }[]; texts: { text: string; idx: number }[] };
+    const groups: PartGroup[] = [];
+    let currentGroup: PartGroup | null = null;
+
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      const isTool = part.type === "dynamic-tool" || part.type?.startsWith("tool-");
+      if (isTool) {
+        const rawTn = (part as ToolMessagePart).toolName || (part as ToolMessagePart).type?.replace("tool-", "") || "";
+        const tn = rawTn;
+        // Merge all setTrigger calls in same message into one group (even with text between them)
+        if (tn === "setTrigger") {
+          const existingTriggerGroup = groups.find(g => {
+            if (g.tools.length === 0) return false;
+            const t0 = g.tools[0].part as ToolMessagePart;
+            return (t0.toolName || t0.type?.replace("tool-", "")) === "setTrigger";
+          });
+          if (existingTriggerGroup) {
+            existingTriggerGroup.tools.push({ part: part as ToolMessagePart, idx: i });
+            currentGroup = existingTriggerGroup;
+          } else {
+            currentGroup = { tools: [{ part: part as ToolMessagePart, idx: i }], texts: [] };
+            groups.push(currentGroup);
+          }
+        } else {
+          currentGroup = { tools: [{ part: part as ToolMessagePart, idx: i }], texts: [] };
+          groups.push(currentGroup);
+        }
+      } else if (part.type === "text") {
+        const textPart = part as unknown as { type: "text"; text: string };
+        if (currentGroup) {
+          currentGroup.texts.push({ text: textPart.text, idx: i });
+        } else {
+          groups.push({ tools: [], texts: [{ text: textPart.text, idx: i }] });
+        }
+      }
+    }
+
+    // Merge standalone text groups into the next tool group (so "I can prepare..." + card + "Click execute" all collapse together)
+    for (let i = groups.length - 2; i >= 0; i--) {
+      if (groups[i].tools.length === 0 && groups[i + 1].tools.length > 0) {
+        groups[i + 1].texts = [...groups[i].texts, ...groups[i + 1].texts];
+        groups.splice(i, 1);
+      }
+    }
+
     return (
       <div className="space-y-2">
-        {parts.map((part, i) => {
-          if (part.type === "text") {
-            const textPart = part as unknown as { type: "text"; text: string };
-            return (
-              <div key={`part-text-${i}`} className="whitespace-pre-wrap">
-                <SimpleMarkdown text={textPart.text} />
+        {groups.map((g) => {
+          if (g.tools.length === 0) {
+            // Standalone text (no tool nearby)
+            return g.texts.map((t) => (
+              <div key={`part-text-${t.idx}`} className="whitespace-pre-wrap">
+                <SimpleMarkdown text={t.text} />
               </div>
+            ));
+          }
+          // Split texts into before-tool and after-tool for proper rendering order
+          const firstToolIdx = g.tools[0].idx;
+          const beforeTexts = g.texts.filter(t => t.idx < firstToolIdx).map(t => t.text).join("\n").trim();
+          const afterTexts = g.texts.filter(t => t.idx > firstToolIdx).map(t => t.text).join("\n").trim();
+          const allDescText = g.texts.map(t => t.text).join("\n").trim();
+
+          // Multiple triggers merged — render all inside one CollapsibleCard
+          if (g.tools.length > 1) {
+            const firstTool = g.tools[0];
+            const sym = (firstTool.part.output as Record<string, unknown>)?.market as string ?? "";
+            const cKeyMulti = `${messageId ?? "m"}_setTrigger_multi_${firstTool.idx}`;
+            return (
+              <CollapsibleCard key={`part-tool-multi-${firstTool.idx}`} cardKey={cKeyMulti} label={`TP/SL — ${sym}`} beforeText={beforeTexts} descriptionText={afterTexts}>
+                <div className="space-y-1">
+                  {g.tools.map((t) => (
+                    <TriggerCard key={`trigger-${t.idx}`} data={t.part.output as Record<string, unknown>} />
+                  ))}
+                </div>
+              </CollapsibleCard>
             );
           }
-          if (part.type === "dynamic-tool" || part.type?.startsWith("tool-")) {
-            return <ToolResult key={`part-tool-${i}`} part={part} realtimePrices={realtimePrices} closedSymbols={closedSymbols} onSendMessage={onSendMessage} />;
-          }
-          return null;
+          // Single tool
+          return (
+            <ToolResult
+              key={`part-tool-${g.tools[0].idx}`}
+              part={g.tools[0].part}
+              realtimePrices={realtimePrices}
+              closedSymbols={closedSymbols}
+              onSendMessage={onSendMessage}
+              isDismissed={isDismissed}
+              cardIndex={g.tools[0].idx}
+              messageId={messageId}
+              beforeText={beforeTexts}
+              descriptionText={afterTexts}
+            />
+          );
         })}
       </div>
     );
@@ -454,7 +648,8 @@ function MessageContent({
 // ─── Markdown ────────────────────────────────────────────────────
 
 function parseInline(text: string, keyPrefix = ""): React.ReactNode[] {
-  const tokenRe = /\*\*(.*?)\*\*|`(.*?)`|\[(.*?)\]\(((?:https?:\/\/|\/)[^\s"<>)]*)\)/g;
+  // Only allow https:// for external links and / for internal navigation (no http://)
+  const tokenRe = /\*\*(.*?)\*\*|`(.*?)`|\[(.*?)\]\(((?:https:\/\/|\/)[^\s"<>)]*)\)/g;
   const nodes: React.ReactNode[] = [];
   let lastIndex = 0;
   let match: RegExpExecArray | null;
@@ -504,10 +699,12 @@ function SimpleMarkdown({ text }: { text: string }) {
 
 // ─── Tool Result Rendering ───────────────────────────────────────
 
-function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage }: { part: ToolMessagePart; realtimePrices?: Record<string, number>; closedSymbols?: Set<string>; onSendMessage?: (msg: string) => void }) {
+function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, isDismissed, cardIndex, messageId, descriptionText, beforeText }: { part: ToolMessagePart; realtimePrices?: Record<string, number>; closedSymbols?: Set<string>; onSendMessage?: (msg: string) => void; isDismissed?: boolean; cardIndex?: number; messageId?: string; descriptionText?: string; beforeText?: string }) {
   const toolName = part.toolName || part.type?.replace("tool-", "");
   const state = part.state;
   const result = part.output;
+  // Stable key for collapsible state (messageId + toolName + index — survives reload)
+  const cKey = `${messageId ?? "m"}_${toolName}_${cardIndex ?? 0}`;
 
   if (state === "input-streaming" || state === "input-available") {
     return (
@@ -546,23 +743,70 @@ function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage }: { pa
     );
   }
 
-  // Render based on tool type
+  // Render based on tool type — each wrapped in CollapsibleCard for minimize/expand
   if (toolName === "getMarketPrice") {
     const sym = result.symbol as string | undefined;
-    return <MarketPriceCard data={result} livePrice={sym ? realtimePrices?.[sym] : undefined} />;
+    return (
+      <CollapsibleCard cardKey={cKey} label={`Price — ${sym ?? "Market"}`} beforeText={beforeText} descriptionText={descriptionText}>
+        <MarketPriceCard data={result} livePrice={sym ? realtimePrices?.[sym] : undefined} />
+      </CollapsibleCard>
+    );
   }
   if (toolName === "getPositions" && (result.positions as unknown[])?.length > 0) {
-    return <PositionsCard data={result} realtimePrices={realtimePrices} closedSymbols={closedSymbols} onSendMessage={onSendMessage} />;
+    const posCount = (result.positions as unknown[]).length;
+    return (
+      <CollapsibleCard cardKey={cKey} label={`Positions (${posCount})`} beforeText={beforeText} descriptionText={descriptionText}>
+        <PositionsCard data={result} realtimePrices={realtimePrices} closedSymbols={closedSymbols} onSendMessage={onSendMessage} />
+      </CollapsibleCard>
+    );
   }
   if (toolName === "getAccountInfo" && (result.openOrders as unknown[])?.length > 0) {
-    return <OpenOrdersCard data={result} realtimePrices={realtimePrices} closedSymbols={closedSymbols} onSendMessage={onSendMessage} />;
+    const ordCount = (result.openOrders as unknown[]).length;
+    return (
+      <CollapsibleCard cardKey={cKey} label={`Open Orders (${ordCount})`} beforeText={beforeText} descriptionText={descriptionText}>
+        <OpenOrdersCard data={result} realtimePrices={realtimePrices} closedSymbols={closedSymbols} onSendMessage={onSendMessage} />
+      </CollapsibleCard>
+    );
   }
-  if (toolName === "prepareOrder") return <OrderPreviewCard data={result} realtimePrices={realtimePrices} onSendMessage={onSendMessage} />;
-  if (toolName === "closePosition") return <ClosePositionCard data={result} />;
-  if (toolName === "setTrigger") return <TriggerCard data={result} />;
-  if (toolName === "cancelOrder") return <CancelOrderCard data={result} />;
+  if (toolName === "prepareOrder") {
+    const sym = (result.market as string) ?? "";
+    const sd = (result.side as string) ?? "";
+    return (
+      <CollapsibleCard cardKey={cKey} label={`Order — ${sym} ${sd}`} badge={isDismissed ? "Dismissed" : undefined} badgeColor="text-muted" beforeText={beforeText} descriptionText={descriptionText}>
+        <OrderPreviewCard data={result} realtimePrices={realtimePrices} onSendMessage={onSendMessage} isDismissed={isDismissed} />
+      </CollapsibleCard>
+    );
+  }
+  if (toolName === "closePosition") {
+    const sym = (result.market as string) ?? "";
+    return (
+      <CollapsibleCard cardKey={cKey} label={`Close — ${sym}`} badge={isDismissed ? "Dismissed" : undefined} badgeColor="text-muted" beforeText={beforeText} descriptionText={descriptionText}>
+        <ClosePositionCard data={result} isDismissed={isDismissed} />
+      </CollapsibleCard>
+    );
+  }
+  if (toolName === "setTrigger") {
+    const sym = (result.market as string) ?? (result.symbol as string) ?? "";
+    return (
+      <CollapsibleCard cardKey={cKey} label={`Trigger — ${sym}`} beforeText={beforeText} descriptionText={descriptionText}>
+        <TriggerCard data={result} />
+      </CollapsibleCard>
+    );
+  }
+  if (toolName === "cancelOrder") {
+    return (
+      <CollapsibleCard cardKey={cKey} label="Cancel Order" beforeText={beforeText} descriptionText={descriptionText}>
+        <CancelOrderCard data={result} />
+      </CollapsibleCard>
+    );
+  }
   if (toolName === "getFundingRates" && (result.rates as unknown[])?.length > 0) {
-    return <FundingRatesCard data={result} />;
+    const count = (result.rates as unknown[]).length;
+    return (
+      <CollapsibleCard cardKey={cKey} label={`Funding Rates (${count})`} beforeText={beforeText} descriptionText={descriptionText}>
+        <FundingRatesCard data={result} />
+      </CollapsibleCard>
+    );
   }
 
   // Default: don't render a card for info tools — the AI formats the response
@@ -634,9 +878,9 @@ function FundingRatesCard({ data }: {
   if (sorted.length === 0) return null;
 
   return (
-    <div className="my-2 w-full max-w-lg overflow-hidden rounded-xl border border-border bg-background">
+    <div className="my-2 w-full max-w-3xl overflow-hidden rounded-xl border border-border bg-background">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-border px-4 py-2">
+      <div className="flex items-center justify-between border-b border-border px-4 pr-10 py-2">
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold text-foreground">Funding Rates</span>
           <span className="rounded-full bg-accent/20 px-1.5 py-0.5 text-[10px] font-bold text-accent">
@@ -717,6 +961,8 @@ interface PosData {
   liqPrice: number;
   usedMargin: number;
   maxLeverage: number;
+  stopLoss?: number;
+  takeProfit?: number;
 }
 
 function PositionsCard({
@@ -734,11 +980,11 @@ function PositionsCard({
   const [liveData, setLiveData] = useState<Record<string, unknown> | null>(null);
   const fetchedRef = useRef(false);
   useEffect(() => {
-    if (fetchedRef.current) return;
-    fetchedRef.current = true;
     let active = true;
+    const doFetch = () => {
     fetch(`/api/account?_t=${Date.now()}`, { cache: "no-store" }).then(r => {
-      if (r.status === 401 && active) {
+      if (!active) return null;
+      if (r.status === 401) {
         setLiveData({ positions: [], totalValue: 0, availableMargin: 0 });
         return null;
       }
@@ -777,9 +1023,31 @@ function PositionsCard({
           liqPrice: (p as Record<string, unknown>).liqPrice as number ?? 0,
         };
       });
+      // Match triggers to positions
+      const trigs = (d.triggers ?? []) as Array<Record<string, unknown>>;
+      console.log("[PositionsCard] full API response keys:", Object.keys(d), "triggers field:", d.triggers, "triggers count:", trigs.length, "raw:", JSON.stringify(trigs.slice(0, 2)));
+      const trigMap = new Map<string, { stopLoss?: number; takeProfit?: number }>();
+      for (const t of trigs) {
+        const sym = ((d.marketSymbols as Record<string, string>)?.[String(t.marketId)] ?? "").replace("/", "");
+        const kind = (String(t.kind ?? "")).toLowerCase();
+        const price = (t.triggerPrice ?? t.price ?? 0) as number;
+        console.log("[PositionsCard] trigger:", { sym, kind, price });
+        const entry = trigMap.get(sym) ?? {};
+        if (kind === "stoploss" || kind === "stop_loss") entry.stopLoss = price;
+        else if (kind === "takeprofit" || kind === "take_profit") entry.takeProfit = price;
+        trigMap.set(sym, entry);
+      }
+      for (const p of rebuilt) {
+        const t = trigMap.get(p.symbol);
+        if (t) { p.stopLoss = t.stopLoss ?? 0; p.takeProfit = t.takeProfit ?? 0; }
+      }
       setLiveData({ ...d, positions: rebuilt, totalValue: d.margins?.omf, availableMargin: (d.margins?.omf ?? 0) - rebuilt.reduce((s: number, p: PosData) => s + p.usedMargin, 0) });
-    }).catch(() => {});
-    return () => { active = false; };
+    }).catch((err) => { console.warn("[PositionsCard] fetch error:", err); });
+    };
+    doFetch();
+    // Re-fetch every 10s to keep TP/SL and PnL fresh
+    const interval = window.setInterval(doFetch, 10_000);
+    return () => { active = false; clearInterval(interval); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const effectiveData = liveData ?? data;
@@ -790,14 +1058,14 @@ function PositionsCard({
   // If no positions after refresh — show empty state
   if (positions.length === 0) {
     return (
-      <div className="my-2 w-full max-w-lg overflow-hidden rounded-xl border border-border bg-background">
+      <div className="my-2 w-full max-w-3xl overflow-hidden rounded-xl border border-border bg-background">
         <div className="px-4 py-3 text-center text-sm text-muted">No open positions</div>
       </div>
     );
   }
 
   return (
-    <div className="my-2 w-full max-w-lg overflow-hidden rounded-xl border border-border bg-background">
+    <div className="my-2 w-full max-w-4xl overflow-hidden rounded-xl border border-border bg-background">
       <div className="border-b border-border px-4 py-2">
         <span className="text-sm font-semibold text-foreground">Positions</span>
         <span className="ml-2 rounded-full bg-accent/20 px-1.5 py-0.5 text-[10px] font-bold text-accent">
@@ -838,40 +1106,47 @@ function PositionsCard({
               </div>
             </div>
 
-            {/* Row 2: Prices */}
-            <div className="grid grid-cols-3 gap-2 text-xs mb-2">
+            {/* Stats: single row */}
+            <div className="grid grid-cols-6 gap-x-2 text-[11px] mb-2">
               <div>
                 <span className="text-muted">Entry</span>
-                <div className="font-mono text-foreground">{fmtPrice(pos.entryPrice)}</div>
+                <div className="font-mono text-foreground truncate">{fmtPrice(pos.entryPrice)}</div>
               </div>
               <div>
                 <span className="text-muted">Mark</span>
-                <div className="font-mono text-foreground">{fmtPrice(liveMarkPrice)}</div>
+                <div className="font-mono text-foreground truncate">{fmtPrice(liveMarkPrice)}</div>
               </div>
               <div>
                 <span className="text-muted">Value</span>
-                <div className="font-mono text-foreground">${(pos.absSize * liveMarkPrice).toFixed(2)}</div>
+                <div className="font-mono text-foreground truncate">${(pos.absSize * liveMarkPrice).toFixed(2)}</div>
               </div>
-            </div>
-
-            {/* Row 3: PnL + Liq */}
-            <div className="grid grid-cols-3 gap-2 text-xs mb-2">
               <div>
                 <span className="text-muted">PnL</span>
-                <div className={`font-mono font-semibold ${isProfit ? "text-green-400" : "text-red-400"}`}>
-                  {isProfit ? "+" : "-"}${Math.abs(livePnlFunding).toFixed(2)}
-                  <span className="ml-1 text-[10px] opacity-75">({livePnlPct >= 0 ? "+" : ""}{(livePnlPct ?? 0).toFixed(2)}%)</span>
+                <div className={`font-mono font-semibold truncate ${isProfit ? "text-green-400" : "text-red-400"}`}>
+                  {isProfit ? "+" : "-"}${Math.abs(livePnlFunding).toFixed(2)} <span className="text-[9px] opacity-75">({(livePnlPct ?? 0).toFixed(1)}%)</span>
                 </div>
               </div>
               <div>
                 <span className="text-muted">Liq Price</span>
-                <div className="font-mono text-red-400">{pos.liqPrice > 0 ? fmtPrice(pos.liqPrice) : "—"}</div>
+                <div className="font-mono text-red-400 truncate">{pos.liqPrice > 0 ? fmtPrice(pos.liqPrice) : "—"}</div>
               </div>
               <div>
-                <span className="text-muted">Used Margin</span>
-                <div className="font-mono text-foreground">{formatUsd(pos.usedMargin)}</div>
+                <span className="text-muted">Margin</span>
+                <div className="font-mono text-foreground truncate">{formatUsd(pos.usedMargin)}</div>
               </div>
             </div>
+
+            {/* TP/SL row */}
+            {((pos.takeProfit ?? 0) > 0 || (pos.stopLoss ?? 0) > 0) && (
+              <div className="flex items-center gap-3 text-xs mb-2">
+                {(pos.takeProfit ?? 0) > 0 && (
+                  <span className="text-green-400">TP {fmtPrice(pos.takeProfit!)}</span>
+                )}
+                {(pos.stopLoss ?? 0) > 0 && (
+                  <span className="text-red-400">SL {fmtPrice(pos.stopLoss!)}</span>
+                )}
+              </div>
+            )}
 
             {/* Close button */}
             {onSendMessage && (
@@ -1159,7 +1434,7 @@ function OpenOrdersCard({
   const activeCount = liveOrders.filter(o => o.status === "active").length;
 
   return (
-    <div className="my-2 w-full max-w-lg overflow-hidden rounded-xl border border-border bg-background">
+    <div className="my-2 w-full max-w-3xl overflow-hidden rounded-xl border border-border bg-background">
       <div className="border-b border-border px-4 py-2 flex items-center gap-2">
         {!verified ? (
           <span className="h-2 w-2 animate-spin rounded-full border border-muted border-t-accent" />
@@ -1284,7 +1559,7 @@ function MarketPriceCard({ data, livePrice }: { data: Record<string, unknown>; l
   };
 
   return (
-    <div className="my-2 w-full max-w-lg overflow-hidden rounded-xl border border-border bg-background">
+    <div className="my-2 w-full max-w-3xl overflow-hidden rounded-xl border border-border bg-background">
       {/* Header + Price */}
       <div className="flex items-center justify-between px-4 pt-3 pb-1">
         <div className="flex items-center gap-2">
@@ -1349,6 +1624,8 @@ function LivePositionCard({ initialPos, txHash, realtimePrices, onSendMessage }:
   const closedRef = useRef(false);
   // Live position data from polling (updates entry price, PnL after partial close etc.)
   const [livePos, setLivePos] = useState(initialPos);
+  // TP/SL from polling
+  const [liveTriggers, setLiveTriggers] = useState<{ stopLoss?: number; takeProfit?: number }>({});
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const sym = (initialPos.symbol as string) ?? "";
   const baseAsset = (initialPos.baseAsset as string) || baseAssetFrom(sym);
@@ -1385,6 +1662,21 @@ function LivePositionCard({ initialPos, txHash, realtimePrices, onSendMessage }:
           if (refEntry > 0 && pEntry > 0 && Math.abs(pEntry - refEntry) / refEntry > 0.01) return false;
           return true;
         });
+
+        // Extract triggers for this market
+        if (active && data.triggers) {
+          const trigs = data.triggers as Array<Record<string, unknown>>;
+          const mktSymbols = data.marketSymbols as Record<string, string> ?? {};
+          const tp: { stopLoss?: number; takeProfit?: number } = {};
+          for (const t of trigs) {
+            const tSym = (mktSymbols[String(t.marketId)] ?? "").replace("/", "").toUpperCase();
+            if (tSym !== sym.toUpperCase() && !tSym.startsWith(baseAsset.toUpperCase())) continue;
+            const k = String(t.kind ?? "").toLowerCase();
+            if (k === "stoploss" || k === "stop_loss") tp.stopLoss = t.triggerPrice as number;
+            else if (k === "takeprofit" || k === "take_profit") tp.takeProfit = t.triggerPrice as number;
+          }
+          setLiveTriggers(tp);
+        }
 
         if (!match && active) {
           setClosed(true);
@@ -1578,6 +1870,13 @@ function LivePositionCard({ initialPos, txHash, realtimePrices, onSendMessage }:
             <div className="font-mono text-foreground">${usedMargin.toFixed(2)}</div>
           </div>
         </div>
+        {/* TP/SL from polling */}
+        {(liveTriggers.takeProfit || liveTriggers.stopLoss) && (
+          <div className="flex items-center gap-3 text-xs mb-2">
+            {liveTriggers.takeProfit && <span className="text-green-400">TP {fmtPrice(liveTriggers.takeProfit)}</span>}
+            {liveTriggers.stopLoss && <span className="text-red-400">SL {fmtPrice(liveTriggers.stopLoss)}</span>}
+          </div>
+        )}
         {onSendMessage && (
           <button
             onClick={() => onSendMessage(`close ${baseAsset} 100%`)}
@@ -2142,7 +2441,7 @@ function LiveOrderCard({ market, side, size, limitPrice, leverage, txHash, realt
 
 // ─── Order Preview Card ──────────────────────────────────────────
 
-function OrderPreviewCard({ data, realtimePrices, onSendMessage }: { data: Record<string, unknown>; realtimePrices?: Record<string, number>; onSendMessage?: (msg: string) => void }) {
+function OrderPreviewCard({ data, realtimePrices, onSendMessage, isDismissed: propDismissed }: { data: Record<string, unknown>; realtimePrices?: Record<string, number>; onSendMessage?: (msg: string) => void; isDismissed?: boolean }) {
   const { executeOrder, status, error, txHash, reset, recheck, hasSession } = useOrderExecution();
 
   const market = data.market as string;
@@ -2156,6 +2455,17 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage }: { data: Recor
   const previewId = data.previewId as string;
   const isExecuted = previewId ? isPreviewConsumed(previewId) : false;
   const isLong = side === "Long";
+  const [manualDismiss, setManualDismiss] = useState(false);
+  const [timedOut, setTimedOut] = useState(false);
+
+  // Auto-dismiss after 3 minutes of inactivity (only in idle state)
+  useEffect(() => {
+    if (status !== "idle" || isExecuted || propDismissed || manualDismiss) return;
+    const timer = setTimeout(() => setTimedOut(true), 3 * 60 * 1000);
+    return () => clearTimeout(timer);
+  }, [status, isExecuted, propDismissed, manualDismiss]);
+
+  const isDismissed = propDismissed || manualDismiss || timedOut;
   const borderColor = isLong ? "border-green-500/30" : "border-red-500/30";
   const sideColor = isLong ? "text-green-400" : "text-red-400";
   const sideBg = isLong ? "bg-green-500/10" : "bg-red-500/10";
@@ -2221,11 +2531,24 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage }: { data: Recor
           return;
         }
         // For market orders: no position = already closed/completed
-        // For limit orders: check if an open order still exists
+        // Ensure frozen close data exists in localStorage (may be missing if closed on 01 directly)
         const isLimit = (orderType ?? "market") === "limit";
         if (!isLimit) {
           clearTimeout(timeout);
           if (cancelled) return;
+          // If no close data in localStorage, create it from tool result data
+          const normSideVal = side === "Long" ? "Long" : "Short";
+          const closeKey = `__pos_closed_${sym}_${normSideVal}`;
+          try {
+            if (!localStorage.getItem(closeKey) && size && data.estimatedEntryPrice) {
+              localStorage.setItem(closeKey, JSON.stringify({
+                mark: data.estimatedEntryPrice as number, pnl: 0, pnlPct: 0,
+                symbol: sym, baseAsset: ba, side: normSideVal,
+                absSize: size, entryPrice: data.estimatedEntryPrice as number,
+                usedMargin: (data.marginRequired as number) ?? 0, ts: Date.now(),
+              }));
+            }
+          } catch { /* ignore */ }
           setReloadState("completed");
         } else {
           const orders = acc.openOrders ?? [];
@@ -2260,6 +2583,41 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage }: { data: Recor
           </svg>
           <span className="text-sm text-muted">Loading position data...</span>
         </div>
+      </div>
+    );
+  }
+
+  // ── PRIORITY 0: Failed preview — consumed on server but SDK threw error ──
+  const isFailed = previewId ? isPreviewFailed(previewId) : false;
+  if ((isFailed && status !== "signing" && status !== "submitting" && status !== "verifying") || status === "error") {
+    const errorLower = error?.toLowerCase() ?? "";
+    const isVerifyError = errorLower.includes("not found") || errorLower.includes("still appears");
+    const isMarket = (orderType ?? "market") === "market";
+    return (
+      <div className="my-2 w-full max-w-lg overflow-hidden rounded-xl border border-red-500/30 bg-red-500/5 p-4">
+        <div className="flex items-center gap-2">
+          <span className="text-red-400">✗</span>
+          <span className="text-sm font-medium text-red-400">Order Failed</span>
+        </div>
+        <div className="mt-1 text-xs text-red-400/80">{error || "Order execution failed. Please try again."}</div>
+        <div className="mt-2 text-xs text-muted">{market} {side} {fmtSize(size)} @ {fmtEntry}</div>
+        {status === "error" && isVerifyError ? (
+          <div className="mt-3 flex gap-2">
+            <button
+              onClick={() => recheck(market, isMarket ? "position" : "order")}
+              className="flex-1 rounded-lg border border-blue-500/30 bg-blue-500/5 py-2 text-xs font-medium text-blue-400 hover:bg-blue-500/10 transition-colors"
+            >
+              Check Again
+            </button>
+          </div>
+        ) : status === "error" ? (
+          <button
+            onClick={() => { reset(); handleExecute(); }}
+            className="mt-3 w-full rounded-lg border border-blue-500/30 bg-blue-500/5 py-2 text-xs font-medium text-blue-400 hover:bg-blue-500/10 transition-colors"
+          >
+            Retry
+          </button>
+        ) : null}
       </div>
     );
   }
@@ -2454,38 +2812,15 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage }: { data: Recor
     );
   }
 
-  // ── Error state ──
-  if (status === "error") {
-    // String matching is used here because the verification API returns plain error messages
-    // (not structured error codes). Case-insensitive to handle message variations across SDK versions.
-    const errorLower = error?.toLowerCase() ?? "";
-    const isVerifyError = errorLower.includes("not found") || errorLower.includes("still appears");
-    const isMarket = (orderType ?? "market") === "market";
+  // ── Dismissed state ──
+  if (isDismissed && status === "idle" && !isExecuted) {
     return (
-      <div className={`my-2 rounded-xl border border-red-500/30 bg-red-500/5 p-4`}>
-        <div className="flex items-center gap-2">
-          <span className="text-red-400">✗</span>
-          <span className="text-sm font-medium text-red-400">Order Failed</span>
+      <div className="my-1 rounded-lg border border-border/30 bg-card/50 px-3 py-2 opacity-40">
+        <div className="flex items-center gap-2 text-xs text-muted">
+          <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${sideBg} ${sideColor}`}>{side}</span>
+          <span>{market} {leverage}x — {fmtSize(size)} @ {fmtEntry}</span>
+          <span className="text-muted/50">dismissed</span>
         </div>
-        <div className="mt-1 text-xs text-red-400/80">{error}</div>
-        <div className="mt-2 text-xs text-muted">{market} {side} {fmtSize(size)} @ {fmtEntry}</div>
-        {isVerifyError ? (
-          <div className="mt-3 flex gap-2">
-            <button
-              onClick={() => recheck(market, isMarket ? "position" : "order")}
-              className="flex-1 rounded-lg border border-blue-500/30 bg-blue-500/5 py-2 text-xs font-medium text-blue-400 hover:bg-blue-500/10 transition-colors"
-            >
-              Check Again
-            </button>
-          </div>
-        ) : (
-          <button
-            onClick={() => { reset(); handleExecute(); }}
-            className="mt-3 w-full rounded-lg border border-blue-500/30 bg-blue-500/5 py-2 text-xs font-medium text-blue-400 hover:bg-blue-500/10 transition-colors"
-          >
-            Retry
-          </button>
-        )}
       </div>
     );
   }
@@ -2501,7 +2836,18 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage }: { data: Recor
           <span className="text-sm font-semibold text-foreground">{market}</span>
           <span className="text-xs text-muted">{leverage}x</span>
         </div>
-        <span className="text-[10px] text-muted">{orderType ?? "market"}</span>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-muted">{orderType ?? "market"}</span>
+          <button
+            onClick={() => setManualDismiss(true)}
+            className="rounded-md p-1 text-muted/50 hover:text-muted hover:bg-white/5 transition-colors"
+            aria-label="Dismiss"
+          >
+            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-2 text-xs">
@@ -2551,8 +2897,10 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage }: { data: Recor
 
 // ─── Close Position Card ─────────────────────────────────────────
 
-function ClosePositionCard({ data }: { data: Record<string, unknown> }) {
+function ClosePositionCard({ data, isDismissed: propDismissed }: { data: Record<string, unknown>; isDismissed?: boolean }) {
   const { executeClose, status, error, txHash, reset, recheck, hasSession } = useOrderExecution();
+  const [manualDismiss, setManualDismiss] = useState(false);
+  const [timedOut, setTimedOut] = useState(false);
 
   const market = data.market as string;
   const side = data.side as "Long" | "Short";
@@ -2562,6 +2910,15 @@ function ClosePositionCard({ data }: { data: Record<string, unknown> }) {
   const isExecuted = previewId ? isPreviewConsumed(previewId) : false;
   const pnlColor = pnl >= 0 ? "text-green-400" : "text-red-400";
   const closeBaseAsset = baseAssetFrom(market);
+
+  // Auto-dismiss after 3 minutes of inactivity (only in idle state)
+  useEffect(() => {
+    if (status !== "idle" || isExecuted || propDismissed || manualDismiss) return;
+    const timer = setTimeout(() => setTimedOut(true), 3 * 60 * 1000);
+    return () => clearTimeout(timer);
+  }, [status, isExecuted, propDismissed, manualDismiss]);
+
+  const isDismissed = propDismissed || manualDismiss || timedOut;
 
   // Toast on status change
   const closeToasts = useMemo(() => ({
@@ -2671,12 +3028,35 @@ function ClosePositionCard({ data }: { data: Record<string, unknown> }) {
     );
   }
 
+  // ── PRIORITY 5: Dismissed (by user word, AI cancel, manual dismiss, or timeout) ──
+  if (isDismissed && status === "idle" && !isExecuted) {
+    return (
+      <div className="my-1 rounded-lg border border-border/30 bg-card/50 px-3 py-2 opacity-40">
+        <div className="flex items-center gap-2 text-xs text-muted">
+          <span>Close {market} {side} — {fmtSize(closeSize)}</span>
+          <span className="text-muted/50">dismissed</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="my-2 rounded-xl border border-orange-500/30 bg-background p-4">
-      <div className="mb-2 flex items-center gap-2">
-        <span className="text-xs font-bold text-orange-400">CLOSE</span>
-        <span className="text-sm font-semibold text-foreground">{market}</span>
-        <span className="text-xs text-muted">{side}</span>
+      <div className="mb-2 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-bold text-orange-400">CLOSE</span>
+          <span className="text-sm font-semibold text-foreground">{market}</span>
+          <span className="text-xs text-muted">{side}</span>
+        </div>
+        <button
+          onClick={() => setManualDismiss(true)}
+          className="rounded-md p-1 text-muted/50 hover:text-muted hover:bg-white/5 transition-colors"
+          aria-label="Dismiss"
+        >
+          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
       </div>
 
       <div className="grid grid-cols-2 gap-2 text-xs mb-3">
@@ -2822,98 +3202,118 @@ function TriggerCard({ data }: { data: Record<string, unknown> }) {
   const market = data.market as string;
   const side = data.side as "Long" | "Short";
   const triggerPrice = data.triggerPrice as number;
-  const kindLabel = (data.kind as string) || "Trigger"; // "Stop-Loss" or "Take-Profit"
-  // Map display label to SDK kind
+  const kindLabel = (data.kind as string) || "Trigger";
   const sdkKind = kindLabel?.includes("Stop") ? "StopLoss" : "TakeProfit";
   const isStopLoss = kindLabel?.includes("Stop");
-  const color = isStopLoss ? "border-red-500/30" : "border-green-500/30";
+  const color = isStopLoss ? "border-red-500/20" : "border-green-500/20";
   const textColor = isStopLoss ? "text-red-400" : "text-green-400";
-
   const triggerBaseAsset = baseAssetFrom(market);
 
-  // Toast on status change
+  // Check if this trigger was already set — two sources:
+  // 1. sessionStorage (survives reload even if trigger was later removed by position close)
+  // 2. Live API check (trigger still exists on account)
+  const entryPrice = data.entryPrice as number ?? 0;
+  const storageKey = `__trigger_done_${market}_${side}_${sdkKind}_${triggerPrice}_${entryPrice}`;
+  const [alreadySet, setAlreadySet] = useState(() => {
+    try { return sessionStorage.getItem(storageKey) === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    if (alreadySet) return; // Already confirmed from sessionStorage
+    let active = true;
+    fetch("/api/account").then(r => r.ok ? r.json() : null).then(d => {
+      if (!active || !d?.triggers) return;
+      const normalize = (s: string) => s.replace(/[\/\-]/g, "").replace("PERP", "").replace("USD", "").toUpperCase();
+      const myAsset = normalize(market);
+      const exists = (d.triggers as Array<Record<string, unknown>>).some(t => {
+        const k = String(t.kind ?? "").toLowerCase();
+        const matchKind = isStopLoss ? (k === "stoploss" || k === "stop_loss") : (k === "takeprofit" || k === "take_profit");
+        const sym = String((d.marketSymbols as Record<string, string>)?.[String(t.marketId)] ?? "");
+        return matchKind && normalize(sym) === myAsset;
+      });
+      if (exists) {
+        setAlreadySet(true);
+        try { sessionStorage.setItem(storageKey, "1"); } catch {}
+      }
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [market, isStopLoss, alreadySet, storageKey]);
+
   const triggerToasts = useMemo(() => ({
-    confirmed: {
-      title: `${kindLabel} Set`,
-      message: `${triggerBaseAsset} @ ${formatUsd(triggerPrice)}`,
-    },
+    confirmed: { title: `${kindLabel} Set`, message: `${triggerBaseAsset} @ ${fmtPrice(triggerPrice)}` },
     error: { title: `${kindLabel} Failed` },
   }), [kindLabel, triggerBaseAsset, triggerPrice]);
   useStatusToast(status, error, triggerToasts);
+
+  // Mark as set when confirmed via execution — persist to sessionStorage
+  useEffect(() => {
+    if (status === "confirmed") {
+      setAlreadySet(true);
+      try { sessionStorage.setItem(storageKey, "1"); } catch {}
+    }
+  }, [status, storageKey]);
 
   const handleActivate = () => {
     executeTrigger({ market, side, triggerPrice, kind: sdkKind as "StopLoss" | "TakeProfit" });
   };
 
-  // ── PRIORITY 1: Loading ──
+  // ── Loading ──
   if (status === "signing" || status === "submitting" || status === "verifying") {
     return (
-      <div className={`my-2 rounded-xl border ${color} bg-background/50 p-4`}>
-        <div className="flex items-center gap-2">
-          <svg className="h-4 w-4 animate-spin text-blue-400" viewBox="0 0 24 24" fill="none">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-          </svg>
-          <span className="text-sm font-medium text-blue-400">{status === "verifying" ? "Verifying..." : `Setting ${kindLabel}...`}</span>
-        </div>
-        <div className="mt-1 text-xs text-muted">{market} @ {formatUsd(triggerPrice)}</div>
+      <div className={`my-1 rounded-lg border ${color} bg-background/50 px-3 py-2 flex items-center gap-2`}>
+        <svg className="h-3 w-3 animate-spin text-blue-400 shrink-0" viewBox="0 0 24 24" fill="none">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+        </svg>
+        <span className="text-xs text-blue-400">{`Setting ${kindLabel}...`}</span>
+        <span className="text-xs text-muted ml-auto">{market} @ {fmtPrice(triggerPrice)}</span>
       </div>
     );
   }
 
-  // ── PRIORITY 2: Confirmed ──
-  if (status === "confirmed") {
+  // ── Confirmed (or already exists on account) ──
+  if (status === "confirmed" || alreadySet) {
     return (
-      <div className={`my-2 rounded-xl border border-green-500/30 bg-green-500/5 p-4`}>
-        <div className="flex items-center gap-2">
-          <span className="text-green-400">✓</span>
-          <span className="text-sm font-medium text-green-400">{kindLabel} Set</span>
-        </div>
-        <div className="mt-1 text-xs text-muted">{market} @ {formatUsd(triggerPrice)}</div>
-        {txHash && <div className="mt-1 text-[10px] text-muted">Tx: {formatTxHash(txHash)}</div>}
+      <div className="my-1 rounded-lg border border-green-500/20 bg-green-500/5 px-3 pr-8 py-2 flex items-center gap-2">
+        <span className="text-green-400 text-xs">✓</span>
+        <span className="text-xs font-medium text-green-400">{kindLabel} Set</span>
+        <span className="text-xs text-muted ml-auto">{market} @ {fmtPrice(triggerPrice)}</span>
       </div>
     );
   }
 
-  // ── PRIORITY 3: Error ──
+  // ── Error ──
   if (status === "error") {
     return (
-      <div className={`my-2 rounded-xl border border-red-500/30 bg-red-500/5 p-4`}>
-        <div className="text-sm font-medium text-red-400">{kindLabel} Failed</div>
-        <div className="mt-1 text-xs text-red-400/80">{error}</div>
+      <div className="my-1 rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-2">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-medium text-red-400">{kindLabel} Failed</span>
+          <span className="text-[10px] text-red-400/70 ml-auto">{error}</span>
+        </div>
         <button onClick={() => { reset(); handleActivate(); }}
-          className="mt-2 w-full rounded-lg border border-blue-500/30 bg-blue-500/5 py-2 text-xs font-medium text-blue-400 hover:bg-blue-500/10 transition-colors">
+          className="mt-1.5 w-full rounded-md border border-blue-500/20 py-1 text-[11px] font-medium text-blue-400 hover:bg-blue-500/10 transition-colors">
           Retry
         </button>
       </div>
     );
   }
 
+  // ── Idle: compact card with button ──
   return (
-    <div className={`my-2 rounded-xl border ${color} bg-background p-4`}>
-      <div className="flex items-center gap-2">
-        <span className={`text-xs font-bold ${textColor}`}>{kindLabel}</span>
-        <span className="text-sm font-semibold text-foreground">{market}</span>
-      </div>
-      <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-        <div>
-          <span className="text-muted">Trigger Price</span>
-          <div className="font-mono text-foreground">{formatUsd(triggerPrice)}</div>
+    <div className={`my-1 rounded-lg border ${color} bg-background px-3 pr-8 py-2`}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className={`text-[11px] font-bold ${textColor}`}>{kindLabel}</span>
+          <span className="text-xs font-semibold text-foreground">{market}</span>
+          <span className="text-xs font-mono text-foreground">{fmtPrice(triggerPrice)}</span>
+          <span className="text-[10px] text-muted">({data.percentFromEntry as string}%)</span>
         </div>
-        <div>
-          <span className="text-muted">Entry Price</span>
-          <div className="font-mono text-foreground">{formatUsd(data.entryPrice as number)}</div>
-        </div>
+        <button
+          onClick={handleActivate}
+          className={`rounded-md px-3 py-1 text-[11px] font-medium text-white transition-colors ${isStopLoss ? "bg-red-600 hover:bg-red-500" : "bg-green-600 hover:bg-green-500"}`}
+        >
+          {hasSession ? "Set" : "Sign & Set"}
+        </button>
       </div>
-      <div className="mt-1 text-[11px] text-muted">
-        {data.percentFromEntry as string}% from entry
-      </div>
-      <button
-        onClick={handleActivate}
-        className={`mt-3 w-full rounded-lg py-2.5 text-sm font-medium text-white transition-colors ${isStopLoss ? "bg-red-600 hover:bg-red-500" : "bg-green-600 hover:bg-green-500"}`}
-      >
-        {hasSession ? `Set ${kindLabel}` : `Sign & Set ${kindLabel}`}
-      </button>
     </div>
   );
 }

@@ -55,6 +55,33 @@ export function isPreviewConsumed(previewId: string): boolean {
   return consumedPreviews.has(previewId);
 }
 
+// ─── Failed previews (consumed but SDK execution failed) ──
+const LS_FAILED_KEY = "clydex_failed_previews";
+function loadFailed(): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = localStorage.getItem(LS_FAILED_KEY);
+    return raw ? new Set(JSON.parse(raw)) : new Set();
+  } catch { return new Set(); }
+}
+function saveFailed(s: Set<string>) {
+  if (typeof window === "undefined") return;
+  try {
+    const arr = [...s].slice(-200);
+    localStorage.setItem(LS_FAILED_KEY, JSON.stringify(arr));
+  } catch { /* quota exceeded */ }
+}
+const failedPreviews = loadFailed();
+
+export function markPreviewFailed(previewId: string) {
+  failedPreviews.add(previewId);
+  saveFailed(failedPreviews);
+}
+
+export function isPreviewFailed(previewId: string): boolean {
+  return failedPreviews.has(previewId);
+}
+
 // ─── Confirmed positions cache (module-level, survives re-renders) ──
 export const confirmedPositionsCache = new Map<string, PositionData>();
 
@@ -155,7 +182,7 @@ async function verifyExecution(
     await new Promise((r) => setTimeout(r, DELAY_MS));
     try {
       // Add cache-bust param to get fresh data
-      const res = await fetch(`/api/account?_t=${Date.now()}`);
+      const res = await fetch(`/api/account?_t=${Date.now()}`, { cache: "no-store" });
       if (!res.ok) continue;
       const data = await res.json();
       const positions = data.positions ?? [];
@@ -207,7 +234,7 @@ async function verifyExecution(
  */
 async function fetchConfirmedPosition(marketSymbol: string): Promise<PositionData> {
   try {
-    const res = await fetch(`/api/account?_t=${Date.now()}`);
+    const res = await fetch(`/api/account?_t=${Date.now()}`, { cache: "no-store" });
     if (!res.ok) return null;
     const data = await res.json();
     const sym = marketSymbol.replace(/\//, "").toUpperCase();
@@ -407,10 +434,11 @@ export function useOrderExecution() {
         } else if (verified) {
           setState({ status: "confirmed", error: null, txHash });
         } else {
-          // Tx was submitted but position not found after 40s total
-          setState({ status: "confirmed", error: "Transaction submitted. Position not yet visible — check your Portfolio.", txHash });
+          // Tx was submitted but position not found after 40s — don't show "confirmed" (misleading)
+          setState({ status: "error", error: "Transaction submitted but position not yet visible. Check your Portfolio.", txHash });
         }
       } catch (err: unknown) {
+        if (orderData.previewId) markPreviewFailed(orderData.previewId);
         handleError(err, "placeOrder", orderData.market, setState);
       } finally {
         executingRef.current = false;

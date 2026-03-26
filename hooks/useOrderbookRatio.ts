@@ -28,6 +28,7 @@ export function useOrderbookRatio(marketId: number, symbol: string, enabled: boo
   const [ratio, setRatio] = useState<OrderbookRatio>({ bidPct: 50, askPct: 50 });
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const reconnectCount = useRef(0);
   const activeRef = useRef(true);
   // Full orderbook state: price → size
   const bidsMap = useRef<Map<number, number>>(new Map());
@@ -116,6 +117,7 @@ export function useOrderbookRatio(marketId: number, symbol: string, enabled: boo
 
       ws.onmessage = (ev) => {
         if (!activeRef.current) return;
+        reconnectCount.current = 0; // Reset backoff on successful message
         try {
           const msg = JSON.parse(ev.data);
           const delta = msg.delta;
@@ -144,12 +146,14 @@ export function useOrderbookRatio(marketId: number, symbol: string, enabled: boo
 
       ws.onclose = () => {
         if (!activeRef.current) return;
+        // Exponential backoff: 3s, 6s, 12s, max 30s
+        const delay = Math.min(3000 * Math.pow(2, reconnectCount.current), 30000);
+        reconnectCount.current++;
         reconnectTimer.current = setTimeout(() => {
-          // Re-init: fresh snapshot + reconnect
           bidsMap.current.clear();
           asksMap.current.clear();
           init();
-        }, 3000);
+        }, delay);
       };
     }
 

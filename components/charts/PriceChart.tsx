@@ -53,6 +53,7 @@ interface PricePoint {
 // Entries expire after 2 minutes so live data stays fresh.
 const chartCache = new Map<string, { points: PricePoint[]; ts: number }>();
 const CACHE_TTL = 2 * 60_000;
+const MAX_CACHE_ENTRIES = 50;
 
 export function PriceChart({ marketId, baseAsset, currentPrice, change24h, entryPrice, liqPrice, isLong, triggerOrders, compact }: PriceChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -207,6 +208,12 @@ export function PriceChart({ marketId, baseAsset, currentPrice, change24h, entry
 
         // Store in cache
         chartCache.set(cacheKey, { points: data.points, ts: Date.now() });
+        // Evict oldest entries if over limit
+        if (chartCache.size > MAX_CACHE_ENTRIES) {
+          let oldestKey: string | null = null, oldestTs = Infinity;
+          for (const [k, v] of chartCache) { if (v.ts < oldestTs) { oldestTs = v.ts; oldestKey = k; } }
+          if (oldestKey) chartCache.delete(oldestKey);
+        }
         applyPoints(data.points);
       } catch {
         // silent

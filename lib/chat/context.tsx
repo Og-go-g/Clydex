@@ -97,6 +97,27 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       }
     }
 
+    // Retroactively rename "New Chat" sessions that already have messages
+    for (const s of stored) {
+      if (s.title === "New Chat") {
+        const msgs = getMessages(s.id);
+        const firstUser = msgs.find((m) => m.role === "user");
+        if (firstUser) {
+          // Content may be in .content (string) or .parts[0].text (AI SDK format)
+          let text = (typeof firstUser.content === "string" ? firstUser.content : "").trim();
+          if (!text && Array.isArray(firstUser.parts)) {
+            const textPart = (firstUser.parts as Array<{ type?: string; text?: string }>).find(p => p.type === "text" && p.text);
+            if (textPart?.text) text = textPart.text.trim();
+          }
+          if (text) {
+            const title = text.length <= 35 ? text : (text.slice(0, 35).replace(/\s+\S*$/, "") || text.slice(0, 35)) + "…";
+            s.title = title;
+            updateTitle(s.id, title);
+          }
+        }
+      }
+    }
+
     setMounted(true);
     return () => { initRef.current = false; };
   }, []);

@@ -117,12 +117,22 @@ export async function placeOrder(user: NordUser, params: PlaceOrderParams) {
     throw new Error("Limit orders require a price");
   }
 
+  // Avoid "Precision loss when converting to scaled integer" SDK error.
+  // SDK rounds size using market.sizeDecimals (e.g., 1 for SUI = min 0.1 SUI).
+  // We don't have sizeDecimals in our market cache, so round to 1 decimal (safe for all markets).
+  // Math.round avoids floating-point drift (e.g., 52.0833... → 52.1).
+  const roundedSize = Math.round(params.size * 10) / 10;
+
+  if (roundedSize <= 0) {
+    throw new Error(`Order size too small (${params.size.toFixed(4)} base units). Minimum is 0.1. Try a larger dollar amount.`);
+  }
+
   return user.placeOrder({
     marketId: market.id,
     side,
     fillMode,
     isReduceOnly,
-    size: params.size,
+    size: roundedSize,
     price: params.price,
     accountId: params.accountId,
   });
@@ -139,17 +149,41 @@ export async function cancelOrder(user: NordUser, orderId: string | number, acco
  * Add a stop-loss or take-profit trigger.
  */
 export async function setTrigger(user: NordUser, params: SetTriggerParams) {
+  const { ensureMarketCache } = await import("./constants");
+  await ensureMarketCache();
+
   const market = resolveMarket(params.symbol);
   if (!market) {
     throw new Error(`Unknown market: ${params.symbol}`);
   }
 
+  // Round trigger price to avoid precision SDK errors
+  const roundedTriggerPrice = Math.round(params.triggerPrice * 1e6) / 1e6;
+  const roundedLimitPrice = params.limitPrice ? Math.round(params.limitPrice * 1e6) / 1e6 : undefined;
+
+  console.log("[setTrigger] params:", { marketId: market.id, side: params.side, kind: params.kind, triggerPrice: roundedTriggerPrice, limitPrice: roundedLimitPrice });
+
+  // Trigger side = closing side (opposite of position side):
+  // Long position → trigger sells (Ask), Short position → trigger buys (Bid)
+  const closingSide = params.side === "Long" ? Side.Ask : Side.Bid;
+
+  // limitPrice: if user provided one, use it (rounded). Otherwise undefined = market execution.
+  // SDK handles undefined limitPrice gracefully (no limit set → executes at market when trigger fires).
+  const effectiveLimitPrice = roundedLimitPrice
+    ? Math.round(roundedLimitPrice * 1e6) / 1e6
+    : undefined;
+
+  console.log("[setTrigger] effective params:", {
+    marketId: market.id, side: closingSide, kind: params.kind,
+    triggerPrice: roundedTriggerPrice, limitPrice: effectiveLimitPrice,
+  });
+
   return user.addTrigger({
     marketId: market.id,
-    side: toSdkSide(params.side),
+    side: closingSide,
     kind: toTriggerKind(params.kind),
-    triggerPrice: params.triggerPrice,
-    limitPrice: params.limitPrice,
+    triggerPrice: roundedTriggerPrice,
+    limitPrice: effectiveLimitPrice,
     accountId: params.accountId,
   });
 }
@@ -167,14 +201,20 @@ export async function removeTrigger(
     accountId?: number;
   }
 ) {
+  const { ensureMarketCache } = await import("./constants");
+  await ensureMarketCache();
+
   const market = resolveMarket(params.symbol);
   if (!market) {
     throw new Error(`Unknown market: ${params.symbol}`);
   }
 
+  // Trigger side = closing side (opposite of position side)
+  const closingSide = params.side === "Long" ? Side.Ask : Side.Bid;
+
   return user.removeTrigger({
     marketId: market.id,
-    side: toSdkSide(params.side),
+    side: closingSide,
     kind: toTriggerKind(params.kind),
     triggerPrice: params.triggerPrice,
     accountId: params.accountId,
@@ -215,13 +255,18 @@ export async function closePosition(
   if (!market) throw new Error(`Unknown market: ${params.symbol}`);
 
   // Close = opposite side, reduce-only market order
+  // For close orders: round DOWN to avoid exceeding position size.
+  // Math.floor ensures we never close more than we have (0.05 → 0.0, not 0.1).
+  // If floor zeros out, use the original size (SDK will clamp to position size for reduce-only).
   const closeSide = params.side === "Long" ? Side.Ask : Side.Bid;
+  const flooredSize = Math.floor(params.size * 10) / 10;
+  const safeSize = flooredSize > 0 ? flooredSize : params.size;
   return user.placeOrder({
     marketId: market.id,
     side: closeSide,
     fillMode: FillMode.ImmediateOrCancel,
     isReduceOnly: true,
-    size: params.size,
+    size: safeSize,
     accountId: params.accountId,
   });
 }
