@@ -29,7 +29,7 @@ export default function Home() {
       {/* Hero */}
       <section className="flex max-w-3xl flex-col items-center gap-6 pb-20 pt-24 text-center">
         <div className="rounded-full border border-border bg-card px-4 py-1.5 text-sm text-muted">
-          Solana &middot; 01 Exchange &middot; Perpetual Futures
+          Clydex &middot; 01 Exchange &middot; Perpetual Futures
         </div>
         <h1 className="text-5xl font-bold leading-tight tracking-tight md:text-6xl">
           AI Trading
@@ -43,7 +43,7 @@ export default function Home() {
         <div className="flex gap-4 pt-4">
           <Link
             href="/chat"
-            className="rounded-xl bg-accent px-6 py-3 font-medium text-white transition-colors hover:bg-accent-hover"
+            className="rounded-xl border border-accent/30 bg-accent/15 px-6 py-3 font-medium text-accent transition-colors hover:bg-accent/25"
           >
             Start Trading
           </Link>

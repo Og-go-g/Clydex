@@ -48,6 +48,7 @@ export function Header() {
           <Link href="/" className="flex items-center gap-2">
             <Image
               src="/logo.png"
+              unoptimized
               alt="Clydex"
               width={48}
               height={48}
@@ -94,7 +95,7 @@ export function Header() {
               <button
                 onClick={connect}
                 disabled={isConnecting}
-                className="rounded-xl bg-blue-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-600 disabled:opacity-50"
+                className="rounded-xl border border-emerald-500/30 bg-emerald-500/15 px-4 py-2 text-sm font-medium text-emerald-400 transition-colors hover:bg-emerald-500/25 disabled:opacity-50"
               >
                 {isConnecting ? "Connecting..." : "Connect Wallet"}
               </button>

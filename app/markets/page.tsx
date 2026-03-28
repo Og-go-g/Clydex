@@ -46,7 +46,7 @@ function formatFunding(n: number | null): string {
 
 const TIER_COLORS: Record<number, string> = {
   1: "text-yellow-400",
-  2: "text-blue-400",
+  2: "text-emerald-400",
   3: "text-green-400",
   4: "text-orange-400",
   5: "text-red-400",
@@ -133,7 +133,7 @@ export default function MarketsPage() {
                 onClick={() => setTierFilter(tier)}
                 className={`rounded-lg px-3 py-1 text-xs transition-colors ${
                   tierFilter === tier
-                    ? "bg-accent text-white"
+                    ? "border border-accent/30 bg-accent/15 text-accent"
                     : "bg-card text-muted hover:text-foreground"
                 }`}
               >
@@ -149,7 +149,7 @@ export default function MarketsPage() {
                 onClick={() => setSortBy(s)}
                 className={`rounded-lg px-3 py-1 text-xs transition-colors ${
                   sortBy === s
-                    ? "bg-accent text-white"
+                    ? "border border-accent/30 bg-accent/15 text-accent"
                     : "bg-card text-muted hover:text-foreground"
                 }`}
               >

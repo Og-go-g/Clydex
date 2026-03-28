@@ -286,7 +286,7 @@ export default function PortfolioPage() {
           <button
             onClick={signIn}
             disabled={isSigningIn}
-            className="mt-4 rounded-xl bg-blue-500 px-6 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-600 disabled:opacity-50"
+            className="mt-4 rounded-xl border border-emerald-500/30 bg-emerald-500/15 px-6 py-2.5 text-sm font-medium text-emerald-400 transition-colors hover:bg-emerald-500/25 disabled:opacity-50"
           >
             {isSigningIn ? "Signing in…" : "Sign In"}
           </button>
@@ -310,7 +310,7 @@ export default function PortfolioPage() {
           <div className="text-red-400">{error}</div>
           <button
             onClick={() => { setError(null); fetchAccount(); }}
-            className="mt-4 rounded-xl bg-blue-500 px-6 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-600"
+            className="mt-4 rounded-xl border border-emerald-500/30 bg-emerald-500/15 px-6 py-2.5 text-sm font-medium text-emerald-400 transition-colors hover:bg-emerald-500/25"
           >
             Retry
           </button>
@@ -460,7 +460,7 @@ export default function PortfolioPage() {
           <h1 className="text-2xl font-bold text-foreground">Portfolio</h1>
           <button
             onClick={() => setCollateralModalOpen(true)}
-            className="rounded-xl bg-blue-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-blue-600"
+            className="rounded-xl border border-emerald-500/30 bg-emerald-500/15 px-4 py-2 text-sm font-medium text-emerald-400 transition-colors hover:bg-emerald-500/25"
           >
             Deposit / Withdraw
           </button>
@@ -593,7 +593,7 @@ export default function PortfolioPage() {
             <h2 className="mb-3 text-lg font-semibold text-foreground flex items-center gap-2">
               <span className="h-2 w-2 animate-pulse rounded-full bg-yellow-400" />
               Open Orders
-              <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-blue-500/20 text-xs text-blue-400">{openOrders.length}</span>
+              <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500/20 text-xs text-emerald-400">{openOrders.length}</span>
             </h2>
             <div className="space-y-2">
               {openOrders.map((o) => {

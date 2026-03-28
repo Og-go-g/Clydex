@@ -1,9 +1,13 @@
 "use client";
 
-import { useEffect, useState, useRef, useCallback, lazy, Suspense } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo, lazy, Suspense } from "react";
 import { useChartPanel } from "@/lib/chat/chart-panel-context";
 import { useRealtimePrices } from "@/hooks/useRealtimePrices";
 import { useOrderbookRatio } from "@/hooks/useOrderbookRatio";
+import { useCandleStream } from "@/hooks/useCandleStream";
+import { useAuth } from "@/lib/auth/context";
+import { INTERVAL_TO_N1, type Interval } from "@/lib/n1/candles";
+import type { PriceChartHandle, IndicatorId } from "@/components/charts/PriceChart";
 
 const MIN_WIDTH = 320;
 const MAX_WIDTH = 1200;
@@ -27,17 +31,7 @@ const PriceChart = lazy(() =>
   import("@/components/charts/PriceChart").then((m) => ({ default: m.PriceChart }))
 );
 
-// Popular markets for quick selection
-const POPULAR_MARKETS = [
-  { id: 0, symbol: "BTC" },
-  { id: 1, symbol: "ETH" },
-  { id: 2, symbol: "SOL" },
-  { id: 5, symbol: "SUI" },
-  { id: 10, symbol: "DOGE" },
-  { id: 3, symbol: "ARB" },
-  { id: 12, symbol: "LINK" },
-  { id: 9, symbol: "HYPE" },
-];
+// No hardcoded market IDs — populated dynamically from API
 
 interface MarketInfo {
   marketId: number;
@@ -51,6 +45,15 @@ export function ChartPanel() {
   const [allMarkets, setAllMarkets] = useState<MarketInfo[]>([]);
   const [showSelector, setShowSelector] = useState(false);
   const [search, setSearch] = useState("");
+
+  // Dynamic popular markets — top 8 by marketId (same order as 01 Exchange)
+  const popularMarkets = useMemo(() => {
+    if (allMarkets.length === 0) return [];
+    return [...allMarkets]
+      .sort((a, b) => a.marketId - b.marketId)
+      .slice(0, 8)
+      .map((m): { id: number; symbol: string } => ({ id: m.marketId, symbol: m.baseAsset }));
+  }, [allMarkets]);
 
   // ─── Resizable width via drag handle ───────────────────────────
   // During drag: mutate DOM directly (no React re-renders) for smooth 60fps resize.
@@ -107,6 +110,117 @@ export function ChartPanel() {
   // WS orderbook ratio — real-time, same data source as 01 Exchange
   const wsRatio = useOrderbookRatio(marketId, `${baseAsset}USD`, isOpen);
 
+  // Chart interval state (lifted so WS candle stream matches displayed interval)
+  const [chartInterval, setChartInterval] = useState<Interval>("1H");
+
+  // Chart ref for actions (screenshot, fitContent, crosshair toggle)
+  const chartHandleRef = useRef<PriceChartHandle>(null);
+
+  // Indicator & volume state
+  const [activeIndicators, setActiveIndicators] = useState<Set<IndicatorId>>(new Set());
+  const [showVolume, setShowVolume] = useState(true);
+  const [showIndicatorMenu, setShowIndicatorMenu] = useState(false);
+  const [crosshairOn, setCrosshairOn] = useState(true); // on by default, matching chart init
+
+  const toggleIndicator = useCallback((id: IndicatorId) => {
+    setActiveIndicators((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  // Close indicator menu on any outside click
+  useEffect(() => {
+    if (!showIndicatorMenu) return;
+    function handleClick() { setShowIndicatorMenu(false); }
+    // Delay to avoid closing from the same click that opened it
+    const id = window.setTimeout(() => document.addEventListener("click", handleClick), 0);
+    return () => { clearTimeout(id); document.removeEventListener("click", handleClick); };
+  }, [showIndicatorMenu]);
+
+  // WS candle stream — real-time OHLCV updates from N1
+  const n1Resolution = INTERVAL_TO_N1[chartInterval];
+  const candleUpdate = useCandleStream(sym, n1Resolution, isOpen);
+
+  // ─── Position overlay (entry, liq, TP/SL) matched by marketId ──
+  const { isAuthenticated } = useAuth();
+
+  interface PositionOverlay {
+    entryPrice: number;
+    liqPrice: number;
+    isLong: boolean;
+    triggerOrders: Array<{ price: number; kind: string }>;
+  }
+
+  const overlayCache = useRef<Map<number, PositionOverlay>>(new Map());
+  const [positionOverlay, setPositionOverlay] = useState<PositionOverlay | null>(null);
+
+  // Instantly show cached overlay when switching markets
+  useEffect(() => {
+    setPositionOverlay(overlayCache.current.get(marketId) ?? null);
+  }, [marketId]);
+
+  useEffect(() => {
+    if (!isOpen || !isAuthenticated) { setPositionOverlay(null); return; }
+    let cancelled = false;
+
+    async function fetchOverlay() {
+      try {
+        const res = await fetch("/api/account");
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!data.exists || cancelled) { setPositionOverlay(null); return; }
+
+        // Find position for the CURRENT marketId
+        const pos = (data.positions ?? []).find(
+          (p: { marketId: number; perp?: { baseSize: number } }) =>
+            p.marketId === marketId && p.perp && p.perp.baseSize !== 0
+        );
+
+        if (!pos) {
+          overlayCache.current.delete(marketId);
+          if (!cancelled) setPositionOverlay(null);
+          return;
+        }
+
+        const isLong = pos.perp.isLong ?? true;
+        const absSize = Math.abs(pos.perp.baseSize);
+        const entryPrice = pos.perp.price ?? 0;
+        const pmmf = pos.marketMmf ?? 0.025;
+        const mf = data.margins?.mf ?? data.margins?.omf ?? 0;
+        const mmf = data.margins?.mmf ?? 0;
+        const cushion = mf - mmf;
+        const divisor = absSize * (isLong ? (1 - pmmf) : (1 + pmmf));
+        const markP = pos.markPrice ?? entryPrice;
+        const liqPrice = Math.abs(divisor) > 1e-12
+          ? (isLong ? markP - cushion / divisor : markP + cushion / divisor)
+          : 0;
+
+        // Find trigger orders (TP/SL) for this market
+        const triggers = (data.triggers ?? [])
+          .filter((t: { marketId: number }) => t.marketId === marketId)
+          .map((t: { triggerPrice?: number; price?: number; kind: string }) => ({
+            price: t.triggerPrice ?? t.price ?? 0,
+            kind: t.kind,
+          }));
+
+        const overlay: PositionOverlay = {
+          entryPrice,
+          liqPrice: liqPrice > 0 && isFinite(liqPrice) ? liqPrice : 0,
+          isLong,
+          triggerOrders: triggers,
+        };
+        overlayCache.current.set(marketId, overlay);
+        if (!cancelled) setPositionOverlay(overlay);
+      } catch { /* silent */ }
+    }
+
+    fetchOverlay();
+    const iv = window.setInterval(fetchOverlay, 30_000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [isOpen, isAuthenticated, marketId]);
+
   // Fetch all markets for selector
   useEffect(() => {
     if (!isOpen || allMarkets.length > 0) return;
@@ -116,8 +230,8 @@ export function ChartPanel() {
       .then((d) => {
         if (!cancelled && d?.markets) {
           setAllMarkets(
-            d.markets.map((m: { marketId: number; symbol: string; baseAsset: string; change24h?: number }) => ({
-              marketId: m.marketId,
+            d.markets.map((m: { id: number; marketId?: number; symbol: string; baseAsset: string; change24h?: number }) => ({
+              marketId: m.id ?? m.marketId ?? 0,
               symbol: m.symbol,
               baseAsset: m.baseAsset,
               change24h: m.change24h,
@@ -270,7 +384,7 @@ export function ChartPanel() {
             {showSelector && (
               <div className="border-b border-[#262626] bg-[#0a0a0a]">
                 <div className="flex flex-wrap gap-1.5 px-3 pt-2.5 pb-1.5">
-                  {POPULAR_MARKETS.map((m) => (
+                  {popularMarkets.map((m) => (
                     <button
                       key={m.id}
                       onClick={() => { setMarket(m.id, m.symbol); setShowSelector(false); }}
@@ -368,24 +482,145 @@ export function ChartPanel() {
             <div className="flex-1 min-h-0">
               <Suspense fallback={<div className="flex h-full items-center justify-center"><div className="h-6 w-6 animate-spin rounded-full border-2 border-accent border-t-transparent" /></div>}>
                 <PriceChart
+                  ref={chartHandleRef}
                   marketId={marketId}
                   baseAsset={baseAsset}
                   currentPrice={livePrice}
                   change24h={change24h}
+                  candleUpdate={candleUpdate}
+                  interval={chartInterval}
+                  onIntervalChange={setChartInterval}
+                  entryPrice={positionOverlay?.entryPrice}
+                  liqPrice={positionOverlay?.liqPrice}
+                  isLong={positionOverlay?.isLong}
+                  triggerOrders={positionOverlay?.triggerOrders}
+                  indicators={activeIndicators}
+                  showVolume={showVolume}
                 />
               </Suspense>
             </div>
 
-            {/* Bottom toolbar — reserved for future drawing tools, markers, indicators */}
-            <div className="flex items-center gap-2 border-t border-[#262626] px-3 py-2">
-              <span className="text-[11px] text-[#555] select-none">Tools</span>
+            {/* Chart tools toolbar — height must complement spacer to equal input bar (79px) */}
+            <div className="flex items-center gap-1 border-t border-[#262626] px-3 py-2 relative">
+              {/* Crosshair toggle */}
+              <button
+                onClick={() => { const on = chartHandleRef.current?.toggleCrosshair(); setCrosshairOn(on ?? true); }}
+                className={`rounded p-1.5 transition-colors ${crosshairOn ? "bg-white/10 text-white" : "text-[#555] hover:text-[#999]"}`}
+                title="Crosshair"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <circle cx="12" cy="12" r="10" /><line x1="12" y1="2" x2="12" y2="6" /><line x1="12" y1="18" x2="12" y2="22" /><line x1="2" y1="12" x2="6" y2="12" /><line x1="18" y1="12" x2="22" y2="12" />
+                </svg>
+              </button>
+
+              {/* Indicators dropdown */}
+              <div className="relative">
+                <button
+                  onClick={() => setShowIndicatorMenu((v) => !v)}
+                  className={`rounded p-1.5 transition-colors ${activeIndicators.size > 0 ? "bg-white/10 text-white" : "text-[#555] hover:text-[#999]"}`}
+                  title="Indicators"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+                  </svg>
+                </button>
+                {showIndicatorMenu && (
+                  <div className="absolute bottom-full left-0 mb-1 w-40 rounded-lg border border-[#262626] bg-[#111] py-1 shadow-xl z-20">
+                    {(["MA7", "MA25", "MA99", "EMA20"] as IndicatorId[]).map((id) => (
+                      <button
+                        key={id}
+                        onClick={() => toggleIndicator(id)}
+                        className="flex w-full items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/5 transition-colors"
+                      >
+                        <span className={`h-2 w-2 rounded-full ${activeIndicators.has(id) ? "" : "opacity-30"}`}
+                          style={{ backgroundColor: id === "MA7" ? "#f59e0b" : id === "MA25" ? "#6366f1" : id === "MA99" ? "#ec4899" : "#06b6d4" }}
+                        />
+                        <span className={activeIndicators.has(id) ? "text-white" : "text-[#888]"}>{id}</span>
+                        {activeIndicators.has(id) && (
+                          <svg className="ml-auto h-3 w-3 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                        )}
+                      </button>
+                    ))}
+                    <div className="border-t border-[#262626] mt-1 pt-1">
+                      <button
+                        onClick={() => setShowVolume((v) => !v)}
+                        className="flex w-full items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/5 transition-colors"
+                      >
+                        <span className={`h-2 w-2 rounded-full ${showVolume ? "bg-[#6366f1]" : "bg-[#6366f1] opacity-30"}`} />
+                        <span className={showVolume ? "text-white" : "text-[#888]"}>Volume</span>
+                        {showVolume && (
+                          <svg className="ml-auto h-3 w-3 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="h-3 w-px bg-[#262626] mx-0.5" />
+
+              {/* Fit content / reset zoom */}
+              <button
+                onClick={() => chartHandleRef.current?.fitContent()}
+                className="rounded p-1.5 text-[#555] hover:text-[#999] transition-colors"
+                title="Fit to screen"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M15 3h6v6" /><path d="M9 21H3v-6" /><path d="M21 3l-7 7" /><path d="M3 21l7-7" />
+                </svg>
+              </button>
+
+              {/* Screenshot */}
+              <button
+                onClick={() => {
+                  const dataUrl = chartHandleRef.current?.screenshot();
+                  if (!dataUrl) return;
+                  const a = document.createElement("a");
+                  a.href = dataUrl;
+                  a.download = `${baseAsset}-${chartInterval}.png`;
+                  a.click();
+                }}
+                className="rounded p-1.5 text-[#555] hover:text-[#999] transition-colors"
+                title="Screenshot"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" /><circle cx="12" cy="13" r="4" />
+                </svg>
+              </button>
+
+              {/* Fullscreen */}
+              <button
+                onClick={() => {
+                  const el = innerRef.current;
+                  if (!el) return;
+                  if (document.fullscreenElement) document.exitFullscreen();
+                  else el.requestFullscreen().catch(() => {});
+                }}
+                className="rounded p-1.5 text-[#555] hover:text-[#999] transition-colors"
+                title="Fullscreen"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M8 3H5a2 2 0 00-2 2v3" /><path d="M21 8V5a2 2 0 00-2-2h-3" /><path d="M3 16v3a2 2 0 002 2h3" /><path d="M16 21h3a2 2 0 002-2v-3" />
+                </svg>
+              </button>
+
               <div className="flex-1" />
-              <span className="text-[11px] text-[#444] select-none">{baseAsset}/USD</span>
+
+              {/* Active indicator badges */}
+              {activeIndicators.size > 0 && (
+                <div className="flex items-center gap-1">
+                  {[...activeIndicators].map((id) => (
+                    <span key={id} className="rounded px-1.5 py-0.5 text-[9px] font-mono"
+                      style={{ backgroundColor: (id === "MA7" ? "#f59e0b" : id === "MA25" ? "#6366f1" : id === "MA99" ? "#ec4899" : "#06b6d4") + "20", color: id === "MA7" ? "#f59e0b" : id === "MA25" ? "#6366f1" : id === "MA99" ? "#ec4899" : "#06b6d4" }}
+                    >{id}</span>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>
-        {/* Spacer matching input area height — border-t continues the horizontal line (mirrors ChatSidebar) */}
-        <div className="h-[79px] shrink-0 border-t border-border" />
+        {/* Bottom spacer — matches input area height (border-t aligns with chat input border) */}
+        <div className="h-[78px] mt-px shrink-0 border-t border-border" />
       </div>
 
       {/* Mobile: full-screen overlay */}
@@ -413,7 +648,7 @@ export function ChartPanel() {
           {showSelector && (
             <div className="border-b border-border bg-card px-3 py-2">
               <div className="flex flex-wrap gap-2">
-                {POPULAR_MARKETS.map((m) => (
+                {popularMarkets.map((m) => (
                   <button
                     key={m.id}
                     onClick={() => { setMarket(m.id, m.symbol); setShowSelector(false); }}
@@ -436,6 +671,15 @@ export function ChartPanel() {
                 baseAsset={baseAsset}
                 currentPrice={livePrice}
                 change24h={change24h}
+                candleUpdate={candleUpdate}
+                interval={chartInterval}
+                onIntervalChange={setChartInterval}
+                entryPrice={positionOverlay?.entryPrice}
+                liqPrice={positionOverlay?.liqPrice}
+                isLong={positionOverlay?.isLong}
+                triggerOrders={positionOverlay?.triggerOrders}
+                indicators={activeIndicators}
+                showVolume={showVolume}
               />
             </Suspense>
           </div>

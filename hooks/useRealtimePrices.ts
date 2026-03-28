@@ -174,9 +174,8 @@ export function useRealtimePrices(symbols: string[]) {
               });
             }
           }
-        } catch (err) {
-          const raw = typeof event.data === "string" ? event.data.slice(0, 100) : String(event.data).slice(0, 100);
-          console.warn("[useRealtimePrices] Failed to parse WS message:", raw, err);
+        } catch {
+          // Malformed WS message — ignore silently
         }
       };
 

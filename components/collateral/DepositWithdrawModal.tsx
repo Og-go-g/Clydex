@@ -307,7 +307,7 @@ export function DepositWithdrawModal({
               disabled={step === "signing"}
               className={`flex-1 py-3 text-sm font-medium transition-colors ${
                 tab === t
-                  ? "border-b-2 border-blue-500 text-white"
+                  ? "border-b-2 border-emerald-500 text-white"
                   : "text-gray-500 hover:text-gray-300"
               }`}
             >
@@ -353,7 +353,7 @@ export function DepositWithdrawModal({
                     value={amount}
                     onChange={handleAmountChange}
                     placeholder="0.00"
-                    className="w-full rounded-xl border border-[#262626] bg-[#141414] py-3 pl-7 pr-16 text-lg font-mono text-white placeholder-gray-600 outline-none transition-colors focus:border-blue-500/50"
+                    className="w-full rounded-xl border border-[#262626] bg-[#141414] py-3 pl-7 pr-16 text-lg font-mono text-white placeholder-gray-600 outline-none transition-colors focus:border-emerald-500/50"
                   />
                   <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-gray-500">
                     USDC
@@ -374,7 +374,7 @@ export function DepositWithdrawModal({
                       }
                     }}
                     disabled={walletUsdcBalance <= 0}
-                    className="rounded-lg border border-[#262626] bg-[#141414] px-3 py-1 text-xs font-medium text-blue-400 transition-colors hover:border-blue-500/30 hover:text-blue-300 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="rounded-lg border border-[#262626] bg-[#141414] px-3 py-1 text-xs font-medium text-emerald-400 transition-colors hover:border-emerald-500/30 hover:text-emerald-300 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     Max
                   </button>
@@ -388,7 +388,7 @@ export function DepositWithdrawModal({
                     <button
                       key={pct}
                       onClick={() => setPercentage(pct)}
-                      className="flex-1 rounded-lg border border-[#262626] bg-[#141414] py-1.5 text-xs text-gray-400 transition-colors hover:border-blue-500/30 hover:text-white"
+                      className="flex-1 rounded-lg border border-[#262626] bg-[#141414] py-1.5 text-xs text-gray-400 transition-colors hover:border-emerald-500/30 hover:text-white"
                     >
                       {pct}%
                     </button>
@@ -405,7 +405,7 @@ export function DepositWithdrawModal({
               <button
                 onClick={handleContinue}
                 disabled={!isValidAmount || loading}
-                className="w-full rounded-xl bg-blue-500 py-3 text-sm font-semibold text-white transition-colors hover:bg-blue-600 disabled:cursor-not-allowed disabled:opacity-50"
+                className="w-full rounded-xl border border-emerald-500/30 bg-emerald-500/15 py-3 text-sm font-semibold text-emerald-400 transition-colors hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {loading ? "Checking..." : "Continue"}
               </button>
@@ -454,10 +454,10 @@ export function DepositWithdrawModal({
                 <button
                   onClick={handleExecute}
                   disabled={executing}
-                  className={`flex-1 rounded-xl py-3 text-sm font-semibold text-white transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                  className={`flex-1 rounded-xl border py-3 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
                     tab === "withdraw"
-                      ? "bg-orange-500 hover:bg-orange-600"
-                      : "bg-blue-500 hover:bg-blue-600"
+                      ? "border-orange-500/30 bg-orange-500/15 text-orange-400 hover:bg-orange-500/25"
+                      : "border-emerald-500/30 bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25"
                   }`}
                 >
                   {tab === "deposit" ? "Confirm Deposit" : "Confirm Withdrawal"}
@@ -469,7 +469,7 @@ export function DepositWithdrawModal({
           {/* Signing step — wallet interaction in progress */}
           {step === "signing" && (
             <div className="flex flex-col items-center py-8">
-              <div className="mb-4 h-10 w-10 animate-spin rounded-full border-2 border-blue-500 border-t-transparent" />
+              <div className="mb-4 h-10 w-10 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
               <div className="text-sm text-gray-300">
                 {tab === "deposit"
                   ? "Depositing USDC..."

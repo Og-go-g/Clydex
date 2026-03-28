@@ -42,7 +42,7 @@ export default function GlobalError({
             </p>
             <button
               onClick={reset}
-              className="rounded-xl bg-blue-600 px-6 py-3 text-sm font-medium text-white transition-colors hover:bg-blue-500"
+              className="rounded-xl border border-emerald-500/30 bg-emerald-500/15 px-6 py-3 text-sm font-medium text-emerald-400 transition-colors hover:bg-emerald-500/25"
             >
               Try again
             </button>

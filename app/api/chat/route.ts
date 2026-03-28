@@ -752,7 +752,6 @@ export async function POST(req: Request) {
           })
         ),
         execute: async ({ asset, side, size, dollarSize, leverage, orderType, limitPrice }) => {
-          console.log("[prepareOrder] AI params:", { asset, side, size, dollarSize, leverage, orderType, limitPrice });
           const resolved = resolveAsset(asset);
           if (!resolved) {
             return { error: `Unknown asset: "${asset}". Available: ${getAllMarkets().map(m => m.baseAsset).join(", ")}` };

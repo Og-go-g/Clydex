@@ -226,7 +226,29 @@ function useStatusToast(
 // ─── Main Page ───────────────────────────────────────────────────
 
 export default function ChatPage() {
-  const { activeId } = useChatSessions();
+  const { activeId, createChat } = useChatSessions();
+  const { setChatId } = useChartPanel();
+
+  // "Trade X" from markets: if pending exists and current chat has messages → create new chat
+  const didCreateRef = useRef(false);
+  useEffect(() => {
+    if (didCreateRef.current) return;
+    try {
+      const hasPending = !!sessionStorage.getItem("chart-pending-open");
+      if (!hasPending || !activeId) return;
+      const hasMessages = getMessages(activeId).length > 0;
+      if (hasMessages) {
+        didCreateRef.current = true;
+        createChat();
+      }
+    } catch { /* ignore */ }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Sync chart panel with active chat (handles pending + saved state)
+  useEffect(() => {
+    setChatId(activeId);
+  }, [activeId, setChatId]);
+
   if (!activeId) return null;
   return <ChatContent key={activeId} chatId={activeId} />;
 }
@@ -257,6 +279,21 @@ function ChatContent({ chatId }: { chatId: string }) {
   });
 
   const [input, setInput] = useState("");
+
+  // Pick up prefill from "Trade X" button on markets page
+  useEffect(() => {
+    // Small delay to let createChat() run first if new-chat flag is pending
+    const t = setTimeout(() => {
+      try {
+        const prefill = sessionStorage.getItem("chart-prefill");
+        if (prefill) {
+          sessionStorage.removeItem("chart-prefill");
+          setInput(prefill);
+        }
+      } catch { /* ignore */ }
+    }, 50);
+    return () => clearTimeout(t);
+  }, [chatId]);
   const isLoading = status === "submitted" || status === "streaming";
   const showWelcome = messages.length === 0;
 
@@ -457,7 +494,7 @@ function ChatContent({ chatId }: { chatId: string }) {
                 <div
                   className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
                     msg.role === "user"
-                      ? "bg-accent text-white"
+                      ? "border border-accent/30 bg-accent/10 text-foreground"
                       : "border border-border bg-card text-foreground"
                   }`}
                 >
@@ -507,7 +544,7 @@ function ChatContent({ chatId }: { chatId: string }) {
           <button
             type="submit"
             disabled={!input.trim() || isLoading}
-            className="rounded-xl bg-accent px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50"
+            className="rounded-xl border border-accent/30 bg-accent/15 px-5 py-3 text-sm font-medium text-accent transition-colors hover:bg-accent/25 disabled:opacity-50"
           >
             Send
           </button>
@@ -1025,13 +1062,11 @@ function PositionsCard({
       });
       // Match triggers to positions
       const trigs = (d.triggers ?? []) as Array<Record<string, unknown>>;
-      console.log("[PositionsCard] full API response keys:", Object.keys(d), "triggers field:", d.triggers, "triggers count:", trigs.length, "raw:", JSON.stringify(trigs.slice(0, 2)));
       const trigMap = new Map<string, { stopLoss?: number; takeProfit?: number }>();
       for (const t of trigs) {
         const sym = ((d.marketSymbols as Record<string, string>)?.[String(t.marketId)] ?? "").replace("/", "");
         const kind = (String(t.kind ?? "")).toLowerCase();
         const price = (t.triggerPrice ?? t.price ?? 0) as number;
-        console.log("[PositionsCard] trigger:", { sym, kind, price });
         const entry = trigMap.get(sym) ?? {};
         if (kind === "stoploss" || kind === "stop_loss") entry.stopLoss = price;
         else if (kind === "takeprofit" || kind === "take_profit") entry.takeProfit = price;
@@ -1042,7 +1077,7 @@ function PositionsCard({
         if (t) { p.stopLoss = t.stopLoss ?? 0; p.takeProfit = t.takeProfit ?? 0; }
       }
       setLiveData({ ...d, positions: rebuilt, totalValue: d.margins?.omf, availableMargin: (d.margins?.omf ?? 0) - rebuilt.reduce((s: number, p: PosData) => s + p.usedMargin, 0) });
-    }).catch((err) => { console.warn("[PositionsCard] fetch error:", err); });
+    }).catch(() => { /* silent */ });
     };
     doFetch();
     // Re-fetch every 10s to keep TP/SL and PnL fresh
@@ -1065,7 +1100,7 @@ function PositionsCard({
   }
 
   return (
-    <div className="my-2 w-full max-w-4xl overflow-hidden rounded-xl border border-border bg-background">
+    <div className="my-2 w-full overflow-hidden rounded-xl border border-border bg-background">
       <div className="border-b border-border px-4 py-2">
         <span className="text-sm font-semibold text-foreground">Positions</span>
         <span className="ml-2 rounded-full bg-accent/20 px-1.5 py-0.5 text-[10px] font-bold text-accent">
@@ -1107,7 +1142,7 @@ function PositionsCard({
             </div>
 
             {/* Stats: single row */}
-            <div className="grid grid-cols-6 gap-x-2 text-[11px] mb-2">
+            <div className="grid grid-cols-6 gap-x-4 text-[11px] mb-2">
               <div>
                 <span className="text-muted">Entry</span>
                 <div className="font-mono text-foreground truncate">{fmtPrice(pos.entryPrice)}</div>
@@ -1122,8 +1157,11 @@ function PositionsCard({
               </div>
               <div>
                 <span className="text-muted">PnL</span>
-                <div className={`font-mono font-semibold truncate ${isProfit ? "text-green-400" : "text-red-400"}`}>
-                  {isProfit ? "+" : "-"}${Math.abs(livePnlFunding).toFixed(2)} <span className="text-[9px] opacity-75">({(livePnlPct ?? 0).toFixed(1)}%)</span>
+                <div className={`font-mono font-semibold ${isProfit ? "text-green-400" : "text-red-400"}`}>
+                  {isProfit ? "+" : "-"}${Math.abs(livePnlFunding).toFixed(2)}
+                </div>
+                <div className={`font-mono text-[9px] ${isProfit ? "text-green-400/70" : "text-red-400/70"}`}>
+                  {isProfit ? "+" : ""}{(livePnlPct ?? 0).toFixed(2)}%
                 </div>
               </div>
               <div>
@@ -2605,7 +2643,7 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage, isDismissed: pr
           <div className="mt-3 flex gap-2">
             <button
               onClick={() => recheck(market, isMarket ? "position" : "order")}
-              className="flex-1 rounded-lg border border-blue-500/30 bg-blue-500/5 py-2 text-xs font-medium text-blue-400 hover:bg-blue-500/10 transition-colors"
+              className="flex-1 rounded-lg border border-emerald-500/30 bg-emerald-500/5 py-2 text-xs font-medium text-emerald-400 hover:bg-emerald-500/10 transition-colors"
             >
               Check Again
             </button>
@@ -2613,7 +2651,7 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage, isDismissed: pr
         ) : status === "error" ? (
           <button
             onClick={() => { reset(); handleExecute(); }}
-            className="mt-3 w-full rounded-lg border border-blue-500/30 bg-blue-500/5 py-2 text-xs font-medium text-blue-400 hover:bg-blue-500/10 transition-colors"
+            className="mt-3 w-full rounded-lg border border-emerald-500/30 bg-emerald-500/5 py-2 text-xs font-medium text-emerald-400 hover:bg-emerald-500/10 transition-colors"
           >
             Retry
           </button>
@@ -2638,11 +2676,11 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage, isDismissed: pr
     return (
       <div className={`my-2 w-full max-w-lg overflow-hidden rounded-xl border ${borderColor} bg-background`}>
         <div className="border-b border-border px-4 py-2.5 flex items-center gap-2.5">
-          <svg className="h-4 w-4 animate-spin text-blue-400" viewBox="0 0 24 24" fill="none">
+          <svg className="h-4 w-4 animate-spin text-emerald-400" viewBox="0 0 24 24" fill="none">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
           </svg>
-          <span className="text-sm font-semibold text-blue-400">{headerText}</span>
+          <span className="text-sm font-semibold text-emerald-400">{headerText}</span>
         </div>
         <div className="px-4 py-3">
           <div className="flex items-center justify-between mb-3">
@@ -2661,11 +2699,11 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage, isDismissed: pr
           <div className="flex items-center gap-1.5 mb-2">
             {[0, 1, 2].map((i) => (
               <div key={i} className={`h-1 flex-1 rounded-full transition-all duration-500 ${
-                i < stepIndex ? "bg-blue-400" : i === stepIndex ? "bg-blue-400 animate-pulse" : "bg-white/10"
+                i < stepIndex ? "bg-emerald-400" : i === stepIndex ? "bg-emerald-400 animate-pulse" : "bg-white/10"
               }`} />
             ))}
           </div>
-          <div className="text-xs text-blue-400">{stepLabel}</div>
+          <div className="text-xs text-emerald-400">{stepLabel}</div>
           {txHash && <div className="mt-1 text-[10px] text-muted">Tx: {formatTxHash(txHash)}</div>}
         </div>
       </div>
@@ -3002,7 +3040,7 @@ function ClosePositionCard({ data, isDismissed: propDismissed }: { data: Record<
         <div className="mt-1 text-xs text-red-400/80">{error}</div>
         {isVerifyError ? (
           <button onClick={() => recheck(market, "close")}
-            className="mt-2 w-full rounded-lg border border-blue-500/30 bg-blue-500/5 py-2 text-xs font-medium text-blue-400 hover:bg-blue-500/10 transition-colors">
+            className="mt-2 w-full rounded-lg border border-emerald-500/30 bg-emerald-500/5 py-2 text-xs font-medium text-emerald-400 hover:bg-emerald-500/10 transition-colors">
             Check Again
           </button>
         ) : (
@@ -3260,11 +3298,11 @@ function TriggerCard({ data }: { data: Record<string, unknown> }) {
   if (status === "signing" || status === "submitting" || status === "verifying") {
     return (
       <div className={`my-1 rounded-lg border ${color} bg-background/50 px-3 py-2 flex items-center gap-2`}>
-        <svg className="h-3 w-3 animate-spin text-blue-400 shrink-0" viewBox="0 0 24 24" fill="none">
+        <svg className="h-3 w-3 animate-spin text-emerald-400 shrink-0" viewBox="0 0 24 24" fill="none">
           <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
           <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
         </svg>
-        <span className="text-xs text-blue-400">{`Setting ${kindLabel}...`}</span>
+        <span className="text-xs text-emerald-400">{`Setting ${kindLabel}...`}</span>
         <span className="text-xs text-muted ml-auto">{market} @ {fmtPrice(triggerPrice)}</span>
       </div>
     );
@@ -3290,7 +3328,7 @@ function TriggerCard({ data }: { data: Record<string, unknown> }) {
           <span className="text-[10px] text-red-400/70 ml-auto">{error}</span>
         </div>
         <button onClick={() => { reset(); handleActivate(); }}
-          className="mt-1.5 w-full rounded-md border border-blue-500/20 py-1 text-[11px] font-medium text-blue-400 hover:bg-blue-500/10 transition-colors">
+          className="mt-1.5 w-full rounded-md border border-emerald-500/20 py-1 text-[11px] font-medium text-emerald-400 hover:bg-emerald-500/10 transition-colors">
           Retry
         </button>
       </div>

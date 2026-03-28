@@ -5,6 +5,9 @@ import Link from "next/link";
 import { TIERS } from "@/lib/n1/constants";
 import { useAuth } from "@/lib/auth/context";
 import { useRealtimePrices } from "@/hooks/useRealtimePrices";
+import { useCandleStream } from "@/hooks/useCandleStream";
+import { INTERVAL_TO_N1, type Interval } from "@/lib/n1/candles";
+import { setPendingChartOpen } from "@/lib/chat/chart-panel-context";
 
 const PriceChart = lazy(() =>
   import("@/components/charts/PriceChart").then((m) => ({
@@ -165,7 +168,7 @@ export default function MarketDetailPage({
 
     let cancelled = false;
     let attempt = 0;
-    let retryTimer: ReturnType<typeof setTimeout>;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
     async function fetchMarketInfo() {
       try {
@@ -287,6 +290,15 @@ export default function MarketDetailPage({
   const realtimePrices = useRealtimePrices(wsSymbol);
   const livePrice = market ? realtimePrices[market.symbol] : undefined;
 
+  // Chart interval + real-time candle stream from N1 WS
+  const [chartInterval, setChartInterval] = useState<Interval>("1H");
+  const n1Resolution = INTERVAL_TO_N1[chartInterval];
+  const candleUpdate = useCandleStream(
+    market?.symbol ?? "",
+    n1Resolution,
+    !!market
+  );
+
   // Funding countdown
   useEffect(() => {
     if (!stats?.perpStats?.next_funding_time) return;
@@ -374,7 +386,8 @@ export default function MarketDetailPage({
           </div>
           <Link
             href="/chat"
-            className="inline-flex h-10 items-center rounded-xl bg-accent px-5 text-sm font-medium text-white transition-colors hover:bg-accent-hover"
+            onClick={() => setPendingChartOpen(market.id, market.baseAsset, `long ${market.baseAsset} `)}
+            className="inline-flex h-10 items-center rounded-xl border border-accent/30 bg-accent/15 px-5 text-sm font-medium text-accent transition-colors hover:bg-accent/25"
           >
             Trade {market.baseAsset}
           </Link>
@@ -392,6 +405,9 @@ export default function MarketDetailPage({
               liqPrice={positionOverlay?.liqPrice}
               isLong={positionOverlay?.isLong}
               triggerOrders={positionOverlay?.triggerOrders}
+              candleUpdate={candleUpdate}
+              interval={chartInterval}
+              onIntervalChange={setChartInterval}
             />
           </Suspense>
         </div>

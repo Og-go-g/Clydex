@@ -161,7 +161,6 @@ export async function setTrigger(user: NordUser, params: SetTriggerParams) {
   const roundedTriggerPrice = Math.round(params.triggerPrice * 1e6) / 1e6;
   const roundedLimitPrice = params.limitPrice ? Math.round(params.limitPrice * 1e6) / 1e6 : undefined;
 
-  console.log("[setTrigger] params:", { marketId: market.id, side: params.side, kind: params.kind, triggerPrice: roundedTriggerPrice, limitPrice: roundedLimitPrice });
 
   // Trigger side = closing side (opposite of position side):
   // Long position → trigger sells (Ask), Short position → trigger buys (Bid)
@@ -172,11 +171,6 @@ export async function setTrigger(user: NordUser, params: SetTriggerParams) {
   const effectiveLimitPrice = roundedLimitPrice
     ? Math.round(roundedLimitPrice * 1e6) / 1e6
     : undefined;
-
-  console.log("[setTrigger] effective params:", {
-    marketId: market.id, side: closingSide, kind: params.kind,
-    triggerPrice: roundedTriggerPrice, limitPrice: effectiveLimitPrice,
-  });
 
   return user.addTrigger({
     marketId: market.id,

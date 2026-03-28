@@ -104,8 +104,8 @@ export function ChatSidebar() {
             {sessionList}
           </div>
         </div>
-        {/* Spacer matching input area height — border-t continues the horizontal line */}
-        <div className="h-[79px] shrink-0 border-t border-border" />
+        {/* Spacer matching input area height (border-t aligns with chat input border) */}
+        <div className="h-[78px] mt-px shrink-0 border-t border-border" />
       </div>
 
       {/* Desktop: expand button when collapsed */}

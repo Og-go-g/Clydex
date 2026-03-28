@@ -23,7 +23,7 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
-    console.error("[ErrorBoundary] Caught error:", error, errorInfo);
+    if (process.env.NODE_ENV === "development") console.error("[ErrorBoundary]", error, errorInfo);
 
     // Report to Sentry if available
     if (typeof window !== "undefined" && "Sentry" in window) {
@@ -74,7 +74,7 @@ export class ErrorBoundary extends Component<Props, State> {
             <div className="flex flex-col gap-3">
               <button
                 onClick={this.handleReset}
-                className="rounded-xl bg-blue-600 px-6 py-3 text-sm font-medium text-white transition-colors hover:bg-blue-500"
+                className="rounded-xl border border-emerald-500/30 bg-emerald-500/15 px-6 py-3 text-sm font-medium text-emerald-400 transition-colors hover:bg-emerald-500/25"
               >
                 Try again
               </button>

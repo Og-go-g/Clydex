@@ -80,7 +80,6 @@ export async function GET() {
       getCachedMarketsInfo(),
     ]);
 
-    console.log("[/api/account] accountId:", accountId, "triggers count:", (triggers ?? []).length, "raw:", JSON.stringify((triggers ?? []).slice(0, 2)));
 
     // Build market lookups from live API
     const marketSymbols: Record<number, string> = {};
