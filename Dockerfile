@@ -25,6 +25,9 @@ RUN npx prisma generate --schema prisma/schema.prisma
 ENV SESSION_SECRET=build-placeholder-secret-minimum-32-characters-long
 ENV DATABASE_URL=postgresql://dummy:dummy@localhost:5432/dummy
 ENV SIWE_SECRET=build-placeholder-secret-minimum-32-characters-long
+ENV UPSTASH_REDIS_REST_URL=https://dummy.upstash.io
+ENV UPSTASH_REDIS_REST_TOKEN=dummy-token
+ENV NEXT_PUBLIC_SENTRY_DSN=https://dummy@sentry.io/0
 RUN npm run build
 
 # ─── Stage 3: Production ──────────────────────────────────────
