@@ -123,10 +123,11 @@ function marketSymbol(marketId: number): string {
 }
 
 // ─── Sync Cursor Helpers ──────────────────────────────────────────
+// Prisma-created columns are camelCase (no @map in schema)
 
 async function getCursor(walletAddr: string, type: HistoryType): Promise<string | null> {
   const rows = await query<{ cursor: string | null }>(
-    `SELECT cursor FROM sync_cursors WHERE wallet_addr = $1 AND type = $2`,
+    `SELECT cursor FROM sync_cursors WHERE "walletAddr" = $1 AND type = $2`,
     [walletAddr, type],
   );
   return rows[0]?.cursor ?? null;
@@ -134,9 +135,9 @@ async function getCursor(walletAddr: string, type: HistoryType): Promise<string 
 
 async function setCursor(walletAddr: string, type: HistoryType, cursor: string): Promise<void> {
   await execute(
-    `INSERT INTO sync_cursors (wallet_addr, type, cursor, last_sync_at)
-     VALUES ($1, $2, $3, NOW())
-     ON CONFLICT (wallet_addr, type) DO UPDATE SET cursor = $3, last_sync_at = NOW()`,
+    `INSERT INTO sync_cursors (id, "walletAddr", type, cursor, "lastSyncAt")
+     VALUES (gen_random_uuid(), $1, $2, $3, NOW())
+     ON CONFLICT ("walletAddr", type) DO UPDATE SET cursor = $3, "lastSyncAt" = NOW()`,
     [walletAddr, type, cursor],
   );
 }
@@ -170,12 +171,13 @@ async function syncTrades(accountId: number, walletAddr: string, since?: string)
       const roles = page.data.map(() => role);
       const fees = page.data.map(() => "0");
       const times = page.data.map((t) => new Date(t.time));
+      const ids = page.data.map(() => crypto.randomUUID());
 
       const result = await historyPool.query(
-        `INSERT INTO trade_history (trade_id, account_id, wallet_addr, market_id, symbol, side, size, price, role, fee, "time")
-         SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::text[], $7::numeric[], $8::numeric[], $9::text[], $10::numeric[], $11::timestamptz[])
-         ON CONFLICT (trade_id, "time") DO NOTHING`,
-        [tradeIds, accountIds, wallets, marketIds, symbols, sides, sizes, prices, roles, fees, times],
+        `INSERT INTO trade_history (id, "tradeId", "accountId", "walletAddr", "marketId", symbol, side, size, price, role, fee, "time")
+         SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::text[], $11::numeric[], $12::timestamptz[])
+         ON CONFLICT ("tradeId") DO NOTHING`,
+        [ids, tradeIds, accountIds, wallets, marketIds, symbols, sides, sizes, prices, roles, fees, times],
       );
       totalInserted += result.rowCount ?? 0;
 
@@ -202,10 +204,11 @@ async function syncOrders(accountId: number, walletAddr: string, since?: string)
 
     const d = page.data;
     const result = await historyPool.query(
-      `INSERT INTO order_history (order_id, account_id, wallet_addr, market_id, symbol, side, placed_size, filled_size, placed_price, order_value, fill_mode, fill_status, status, is_reduce_only, added_at, updated_at)
-       SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::text[], $7::numeric[], $8::numeric[], $9::numeric[], $10::numeric[], $11::text[], $12::text[], $13::text[], $14::boolean[], $15::timestamptz[], $16::timestamptz[])
-       ON CONFLICT (order_id, added_at) DO NOTHING`,
+      `INSERT INTO order_history (id, "orderId", "accountId", "walletAddr", "marketId", symbol, side, "placedSize", "filledSize", "placedPrice", "orderValue", "fillMode", "fillStatus", status, "isReduceOnly", "addedAt", "updatedAt")
+       SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::numeric[], $11::numeric[], $12::text[], $13::text[], $14::text[], $15::boolean[], $16::timestamptz[], $17::timestamptz[])
+       ON CONFLICT ("orderId") DO NOTHING`,
       [
+        d.map(() => crypto.randomUUID()),
         d.map((o) => String(o.orderId)),
         d.map(() => accountId),
         d.map(() => walletAddr),
@@ -248,10 +251,11 @@ async function syncPnl(accountId: number, walletAddr: string, since?: string): P
 
     const d = page.data;
     const result = await historyPool.query(
-      `INSERT INTO pnl_history (account_id, wallet_addr, market_id, symbol, trading_pnl, settled_funding_pnl, position_size, "time")
-       SELECT * FROM unnest($1::int[], $2::text[], $3::int[], $4::text[], $5::numeric[], $6::numeric[], $7::numeric[], $8::timestamptz[])
-       ON CONFLICT (wallet_addr, market_id, "time") DO NOTHING`,
+      `INSERT INTO pnl_history (id, "accountId", "walletAddr", "marketId", symbol, "tradingPnl", "settledFundingPnl", "positionSize", "time")
+       SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::numeric[], $7::numeric[], $8::numeric[], $9::timestamptz[])
+       ON CONFLICT ("walletAddr", "marketId", "time") DO NOTHING`,
       [
+        d.map(() => crypto.randomUUID()),
         d.map(() => accountId),
         d.map(() => walletAddr),
         d.map((p) => p.marketId),
@@ -286,10 +290,11 @@ async function syncFunding(accountId: number, walletAddr: string, since?: string
 
     const d = page.data;
     const result = await historyPool.query(
-      `INSERT INTO funding_history (account_id, wallet_addr, market_id, symbol, funding_pnl, position_size, "time")
-       SELECT * FROM unnest($1::int[], $2::text[], $3::int[], $4::text[], $5::numeric[], $6::numeric[], $7::timestamptz[])
-       ON CONFLICT (wallet_addr, market_id, "time") DO NOTHING`,
+      `INSERT INTO funding_history (id, "accountId", "walletAddr", "marketId", symbol, "fundingPnl", "positionSize", "time")
+       SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::numeric[], $7::numeric[], $8::timestamptz[])
+       ON CONFLICT ("walletAddr", "marketId", "time") DO NOTHING`,
       [
+        d.map(() => crypto.randomUUID()),
         d.map(() => accountId),
         d.map(() => walletAddr),
         d.map((f) => f.marketId),
@@ -323,10 +328,11 @@ async function syncDeposits(accountId: number, walletAddr: string, since?: strin
 
     const d = page.data;
     const result = await historyPool.query(
-      `INSERT INTO deposit_history (account_id, wallet_addr, amount, balance, token_id, "time")
-       SELECT * FROM unnest($1::int[], $2::text[], $3::numeric[], $4::numeric[], $5::int[], $6::timestamptz[])
-       ON CONFLICT (wallet_addr, "time", amount) DO NOTHING`,
+      `INSERT INTO deposit_history (id, "accountId", "walletAddr", amount, balance, "tokenId", "time")
+       SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::numeric[], $5::numeric[], $6::int[], $7::timestamptz[])
+       ON CONFLICT ("walletAddr", "time", amount) DO NOTHING`,
       [
+        d.map(() => crypto.randomUUID()),
         d.map(() => accountId),
         d.map(() => walletAddr),
         d.map((dep) => String(dep.amount ?? 0)),
@@ -359,10 +365,11 @@ async function syncWithdrawals(accountId: number, walletAddr: string, since?: st
 
     const d = page.data;
     const result = await historyPool.query(
-      `INSERT INTO withdrawal_history (account_id, wallet_addr, amount, balance, fee, dest_pubkey, "time")
-       SELECT * FROM unnest($1::int[], $2::text[], $3::numeric[], $4::numeric[], $5::numeric[], $6::text[], $7::timestamptz[])
-       ON CONFLICT (wallet_addr, "time", amount) DO NOTHING`,
+      `INSERT INTO withdrawal_history (id, "accountId", "walletAddr", amount, balance, fee, "destPubkey", "time")
+       SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::numeric[], $5::numeric[], $6::numeric[], $7::text[], $8::timestamptz[])
+       ON CONFLICT ("walletAddr", "time", amount) DO NOTHING`,
       [
+        d.map(() => crypto.randomUUID()),
         d.map(() => accountId),
         d.map(() => walletAddr),
         d.map((w) => String(w.amount ?? 0)),
@@ -396,10 +403,11 @@ async function syncLiquidations(accountId: number, walletAddr: string, since?: s
 
     const d = page.data;
     const result = await historyPool.query(
-      `INSERT INTO liquidation_history (account_id, wallet_addr, fee, liquidation_kind, margins, "time")
-       SELECT * FROM unnest($1::int[], $2::text[], $3::numeric[], $4::text[], $5::jsonb[], $6::timestamptz[])
-       ON CONFLICT (wallet_addr, "time", fee) DO NOTHING`,
+      `INSERT INTO liquidation_history (id, "accountId", "walletAddr", fee, "liquidationKind", margins, "time")
+       SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::numeric[], $5::text[], $6::jsonb[], $7::timestamptz[])
+       ON CONFLICT ("walletAddr", "time", fee) DO NOTHING`,
       [
+        d.map(() => crypto.randomUUID()),
         d.map(() => accountId),
         d.map(() => walletAddr),
         d.map((l) => String(l.fee ?? 0)),
@@ -418,6 +426,88 @@ async function syncLiquidations(accountId: number, walletAddr: string, since?: s
   }
 
   return { type: "liquidations", inserted: totalInserted, hasMore: false };
+}
+
+// ─── 01.xyz Frontend API Sync ────────────────────────────────────
+
+const FRONTEND_API = "https://01.xyz/api";
+const BROWSER_HEADERS: Record<string, string> = {
+  Accept: "application/json, text/plain, */*",
+  "Accept-Language": "en-US,en;q=0.9",
+  "User-Agent":
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  Referer: "https://01.xyz/",
+  Origin: "https://01.xyz",
+};
+
+export async function syncVolumeCalendar(accountId: number, walletAddr: string): Promise<number> {
+  try {
+    const res = await fetch(`${FRONTEND_API}/volume-calendar/${accountId}`, {
+      headers: BROWSER_HEADERS,
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) return 0;
+    const body = await res.json();
+    const days = body.days ?? {};
+    const entries = Object.entries(days) as [string, Record<string, number>][];
+    if (entries.length === 0) return 0;
+
+    const result = await historyPool.query(
+      `INSERT INTO volume_calendar (id, "accountId", "walletAddr", date, volume, "makerVolume", "takerVolume", "makerFees", "takerFees", "totalFees")
+       SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::text[], $5::numeric[], $6::numeric[], $7::numeric[], $8::numeric[], $9::numeric[], $10::numeric[])
+       ON CONFLICT ("walletAddr", date) DO UPDATE SET
+         volume = EXCLUDED.volume, "makerVolume" = EXCLUDED."makerVolume", "takerVolume" = EXCLUDED."takerVolume",
+         "makerFees" = EXCLUDED."makerFees", "takerFees" = EXCLUDED."takerFees", "totalFees" = EXCLUDED."totalFees"`,
+      [
+        entries.map(() => crypto.randomUUID()),
+        entries.map(() => accountId),
+        entries.map(() => walletAddr),
+        entries.map(([date]) => date),
+        entries.map(([, d]) => String(d.volume ?? 0)),
+        entries.map(([, d]) => String(d.makerVolume ?? 0)),
+        entries.map(([, d]) => String(d.takerVolume ?? 0)),
+        entries.map(([, d]) => String(d.makerFees ?? 0)),
+        entries.map(([, d]) => String(d.takerFees ?? 0)),
+        entries.map(([, d]) => String(d.totalFees ?? 0)),
+      ],
+    );
+    return result.rowCount ?? 0;
+  } catch (err) {
+    console.error(`[sync] volume-calendar/${accountId} failed:`, err);
+    return 0;
+  }
+}
+
+export async function syncPnlTotals(accountId: number, walletAddr: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${FRONTEND_API}/pnl-totals/${accountId}`, {
+      headers: BROWSER_HEADERS,
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) return false;
+    const body = await res.json();
+
+    await historyPool.query(
+      `INSERT INTO pnl_totals (id, "accountId", "walletAddr", "totalPnl", "totalTradingPnl", "totalFundingPnl", "fetchedAt")
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT ("walletAddr") DO UPDATE SET
+         "totalPnl" = EXCLUDED."totalPnl", "totalTradingPnl" = EXCLUDED."totalTradingPnl",
+         "totalFundingPnl" = EXCLUDED."totalFundingPnl", "fetchedAt" = EXCLUDED."fetchedAt"`,
+      [
+        crypto.randomUUID(),
+        accountId,
+        walletAddr,
+        String(body.totalPnl ?? 0),
+        String(body.totalTradingPnl ?? 0),
+        String(body.totalFundingPnl ?? 0),
+        new Date(body.fetchedAt ?? new Date().toISOString()),
+      ],
+    );
+    return true;
+  } catch (err) {
+    console.error(`[sync] pnl-totals/${accountId} failed:`, err);
+    return false;
+  }
 }
 
 // ─── Sync Dispatcher ──────────────────────────────────────────────
@@ -461,6 +551,16 @@ export async function syncAllHistory(
     onProgress?.({ total: types.length, completed: results.length, results });
   }
 
+  // Also sync 01.xyz frontend data (volume-calendar + pnl-totals)
+  try {
+    await Promise.all([
+      syncVolumeCalendar(accountId, walletAddr),
+      syncPnlTotals(accountId, walletAddr),
+    ]);
+  } catch (err) {
+    console.error(`[history/sync] frontend API sync failed for ${walletAddr}:`, err);
+  }
+
   return results;
 }
 
@@ -487,18 +587,18 @@ export async function syncHistoryType(
 
 export async function hasBeenSynced(walletAddr: string): Promise<boolean> {
   const rows = await query<{ synced: boolean }>(
-    `SELECT count(*) > 0 AS synced FROM sync_cursors WHERE wallet_addr = $1`,
+    `SELECT count(*) > 0 AS synced FROM sync_cursors WHERE "walletAddr" = $1`,
     [walletAddr],
   );
   return rows[0]?.synced ?? false;
 }
 
 export async function getLastSyncTime(walletAddr: string): Promise<Date | null> {
-  const rows = await query<{ last_sync_at: Date }>(
-    `SELECT last_sync_at FROM sync_cursors WHERE wallet_addr = $1 ORDER BY last_sync_at DESC LIMIT 1`,
+  const rows = await query<{ lastSyncAt: Date }>(
+    `SELECT "lastSyncAt" FROM sync_cursors WHERE "walletAddr" = $1 ORDER BY "lastSyncAt" DESC LIMIT 1`,
     [walletAddr],
   );
-  return rows[0]?.last_sync_at ?? null;
+  return rows[0]?.lastSyncAt ?? null;
 }
 
 export type { HistoryType, SyncResult, SyncProgress };

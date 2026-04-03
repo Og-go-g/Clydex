@@ -158,3 +158,38 @@ model SyncCursor {
   @@unique([walletAddr, type])
   @@map("sync_cursors")
 }
+
+// ---------------------------------------------------------------------------
+//  VolumeCalendar — daily volume and fee breakdown from 01.xyz frontend API
+// ---------------------------------------------------------------------------
+model VolumeCalendar {
+  id          String  @id @default(cuid())
+  accountId   Int
+  walletAddr  String
+  date        String                          // "2026-03-29"
+  volume      Decimal @db.Decimal(30, 18)
+  makerVolume Decimal @db.Decimal(30, 18)
+  takerVolume Decimal @db.Decimal(30, 18)
+  makerFees   Decimal @db.Decimal(30, 18)
+  takerFees   Decimal @db.Decimal(30, 18)
+  totalFees   Decimal @db.Decimal(30, 18)
+
+  @@unique([walletAddr, date])
+  @@index([walletAddr])
+  @@map("volume_calendar")
+}
+
+// ---------------------------------------------------------------------------
+//  PnlTotals — aggregated lifetime PnL from 01.xyz frontend API
+// ---------------------------------------------------------------------------
+model PnlTotals {
+  id              String   @id @default(cuid())
+  accountId       Int
+  walletAddr      String   @unique
+  totalPnl        Decimal  @db.Decimal(30, 18)
+  totalTradingPnl Decimal  @db.Decimal(30, 18)
+  totalFundingPnl Decimal  @db.Decimal(30, 18)
+  fetchedAt       DateTime
+
+  @@map("pnl_totals")
+}

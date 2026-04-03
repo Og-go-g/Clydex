@@ -11,17 +11,41 @@ config({ path: ".env.local" });
 config({ path: ".env" });
 
 import { Pool } from "pg";
+import { HttpsProxyAgent } from "https-proxy-agent";
+import type { Agent } from "http";
 
 // ─── Config ───────────────────────────────────────────────────────
 
 const API_BASE = "https://zo-mainnet.n1.xyz";
+const FRONTEND_API = "https://01.xyz/api";
 const MAX_ACCOUNT_ID = 12000;
 const PAGE_SIZE = 50;
-const DELAY_BETWEEN_PAGES = 150;
+const DELAY_BETWEEN_PAGES = 100;
 const MAX_RETRIES = 3;
 const RETRY_BACKOFF = 5_000;
-const CONCURRENCY = 1;
+const CONCURRENCY = Number(process.env.SYNC_CONCURRENCY || "5");
 const FORCE = process.argv.includes("--force");
+
+// ─── Proxy rotation ──────────────────────────────────────────────
+
+const PROXY_LIST = (process.env.SYNC_PROXIES || "").split(",").map((s) => s.trim()).filter(Boolean);
+let proxyIdx = 0;
+
+function getNextProxy(): Agent | undefined {
+  if (PROXY_LIST.length === 0) return undefined;
+  const raw = PROXY_LIST[proxyIdx % PROXY_LIST.length];
+  proxyIdx++;
+  const url = raw.startsWith("http") ? raw : `http://${raw}`;
+  return new HttpsProxyAgent(url) as unknown as Agent;
+}
+
+const BROWSER_HEADERS: Record<string, string> = {
+  Accept: "application/json, text/plain, */*",
+  "Accept-Language": "en-US,en;q=0.9",
+  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  Referer: "https://01.xyz/",
+  Origin: "https://01.xyz",
+};
 
 // ─── DB Pool ──────────────────────────────────────────────────────
 
@@ -50,10 +74,14 @@ function sleep(ms: number): Promise<void> {
 async function fetchWithRetry(url: string, retries = MAX_RETRIES): Promise<Response | null> {
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
-      const res = await fetch(url, {
+      const agent = getNextProxy();
+      const options: RequestInit & { agent?: Agent } = {
         headers: { Accept: "application/json" },
         signal: AbortSignal.timeout(15_000),
-      });
+      };
+      if (agent) (options as Record<string, unknown>).agent = agent;
+
+      const res = await fetch(url, options);
       if (res.status === 429) {
         const wait = RETRY_BACKOFF * (attempt + 1);
         process.stdout.write(`\r  Rate limited! Waiting ${wait / 1000}s...                          `);
@@ -128,7 +156,7 @@ async function fetchAllPages<T>(baseUrl: string): Promise<T[]> {
   return all;
 }
 
-// ─── Sync Functions (raw SQL) ─────────────────────────────────────
+// ─── Sync Functions (raw SQL, Prisma camelCase columns) ──────────
 
 type R = Record<string, unknown>;
 
@@ -140,10 +168,11 @@ async function syncTrades(pool: Pool, accountId: number, wallet: string): Promis
     if (trades.length === 0) continue;
 
     const result = await pool.query(
-      `INSERT INTO trade_history (trade_id, account_id, wallet_addr, market_id, symbol, side, size, price, role, fee, "time")
-       SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::text[], $7::numeric[], $8::numeric[], $9::text[], $10::numeric[], $11::timestamptz[])
-       ON CONFLICT (trade_id, "time") DO NOTHING`,
+      `INSERT INTO trade_history (id, "tradeId", "accountId", "walletAddr", "marketId", symbol, side, size, price, role, fee, "time")
+       SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::text[], $11::numeric[], $12::timestamptz[])
+       ON CONFLICT ("tradeId") DO NOTHING`,
       [
+        trades.map(() => crypto.randomUUID()),
         trades.map((t) => String(t.tradeId)),
         trades.map(() => accountId),
         trades.map(() => wallet),
@@ -167,10 +196,11 @@ async function syncOrders(pool: Pool, accountId: number, wallet: string): Promis
   if (orders.length === 0) return 0;
 
   const result = await pool.query(
-    `INSERT INTO order_history (order_id, account_id, wallet_addr, market_id, symbol, side, placed_size, filled_size, placed_price, order_value, fill_mode, fill_status, status, is_reduce_only, added_at, updated_at)
-     SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::text[], $7::numeric[], $8::numeric[], $9::numeric[], $10::numeric[], $11::text[], $12::text[], $13::text[], $14::boolean[], $15::timestamptz[], $16::timestamptz[])
-     ON CONFLICT (order_id, added_at) DO NOTHING`,
+    `INSERT INTO order_history (id, "orderId", "accountId", "walletAddr", "marketId", symbol, side, "placedSize", "filledSize", "placedPrice", "orderValue", "fillMode", "fillStatus", status, "isReduceOnly", "addedAt", "updatedAt")
+     SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::numeric[], $11::numeric[], $12::text[], $13::text[], $14::text[], $15::boolean[], $16::timestamptz[], $17::timestamptz[])
+     ON CONFLICT ("orderId") DO NOTHING`,
     [
+      orders.map(() => crypto.randomUUID()),
       orders.map((o) => String(o.orderId)),
       orders.map(() => accountId),
       orders.map(() => wallet),
@@ -197,10 +227,11 @@ async function syncPnl(pool: Pool, accountId: number, wallet: string): Promise<n
   if (items.length === 0) return 0;
 
   const result = await pool.query(
-    `INSERT INTO pnl_history (account_id, wallet_addr, market_id, symbol, trading_pnl, settled_funding_pnl, position_size, "time")
-     SELECT * FROM unnest($1::int[], $2::text[], $3::int[], $4::text[], $5::numeric[], $6::numeric[], $7::numeric[], $8::timestamptz[])
-     ON CONFLICT (wallet_addr, market_id, "time") DO NOTHING`,
+    `INSERT INTO pnl_history (id, "accountId", "walletAddr", "marketId", symbol, "tradingPnl", "settledFundingPnl", "positionSize", "time")
+     SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::numeric[], $7::numeric[], $8::numeric[], $9::timestamptz[])
+     ON CONFLICT ("walletAddr", "marketId", "time") DO NOTHING`,
     [
+      items.map(() => crypto.randomUUID()),
       items.map(() => accountId),
       items.map(() => wallet),
       items.map((p) => Number(p.marketId)),
@@ -219,10 +250,11 @@ async function syncFunding(pool: Pool, accountId: number, wallet: string): Promi
   if (items.length === 0) return 0;
 
   const result = await pool.query(
-    `INSERT INTO funding_history (account_id, wallet_addr, market_id, symbol, funding_pnl, position_size, "time")
-     SELECT * FROM unnest($1::int[], $2::text[], $3::int[], $4::text[], $5::numeric[], $6::numeric[], $7::timestamptz[])
-     ON CONFLICT (wallet_addr, market_id, "time") DO NOTHING`,
+    `INSERT INTO funding_history (id, "accountId", "walletAddr", "marketId", symbol, "fundingPnl", "positionSize", "time")
+     SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::numeric[], $7::numeric[], $8::timestamptz[])
+     ON CONFLICT ("walletAddr", "marketId", "time") DO NOTHING`,
     [
+      items.map(() => crypto.randomUUID()),
       items.map(() => accountId),
       items.map(() => wallet),
       items.map((f) => Number(f.marketId)),
@@ -240,10 +272,11 @@ async function syncDeposits(pool: Pool, accountId: number, wallet: string): Prom
   if (items.length === 0) return 0;
 
   const result = await pool.query(
-    `INSERT INTO deposit_history (account_id, wallet_addr, amount, balance, token_id, "time")
-     SELECT * FROM unnest($1::int[], $2::text[], $3::numeric[], $4::numeric[], $5::int[], $6::timestamptz[])
-     ON CONFLICT (wallet_addr, "time", amount) DO NOTHING`,
+    `INSERT INTO deposit_history (id, "accountId", "walletAddr", amount, balance, "tokenId", "time")
+     SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::numeric[], $5::numeric[], $6::int[], $7::timestamptz[])
+     ON CONFLICT ("walletAddr", "time", amount) DO NOTHING`,
     [
+      items.map(() => crypto.randomUUID()),
       items.map(() => accountId),
       items.map(() => wallet),
       items.map((d) => String(d.amount ?? 0)),
@@ -260,10 +293,11 @@ async function syncWithdrawals(pool: Pool, accountId: number, wallet: string): P
   if (items.length === 0) return 0;
 
   const result = await pool.query(
-    `INSERT INTO withdrawal_history (account_id, wallet_addr, amount, balance, fee, dest_pubkey, "time")
-     SELECT * FROM unnest($1::int[], $2::text[], $3::numeric[], $4::numeric[], $5::numeric[], $6::text[], $7::timestamptz[])
-     ON CONFLICT (wallet_addr, "time", amount) DO NOTHING`,
+    `INSERT INTO withdrawal_history (id, "accountId", "walletAddr", amount, balance, fee, "destPubkey", "time")
+     SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::numeric[], $5::numeric[], $6::numeric[], $7::text[], $8::timestamptz[])
+     ON CONFLICT ("walletAddr", "time", amount) DO NOTHING`,
     [
+      items.map(() => crypto.randomUUID()),
       items.map(() => accountId),
       items.map(() => wallet),
       items.map((w) => String(w.amount ?? 0)),
@@ -281,10 +315,11 @@ async function syncLiquidations(pool: Pool, accountId: number, wallet: string): 
   if (items.length === 0) return 0;
 
   const result = await pool.query(
-    `INSERT INTO liquidation_history (account_id, wallet_addr, fee, liquidation_kind, margins, "time")
-     SELECT * FROM unnest($1::int[], $2::text[], $3::numeric[], $4::text[], $5::jsonb[], $6::timestamptz[])
-     ON CONFLICT (wallet_addr, "time", fee) DO NOTHING`,
+    `INSERT INTO liquidation_history (id, "accountId", "walletAddr", fee, "liquidationKind", margins, "time")
+     SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::numeric[], $5::text[], $6::jsonb[], $7::timestamptz[])
+     ON CONFLICT ("walletAddr", "time", fee) DO NOTHING`,
     [
+      items.map(() => crypto.randomUUID()),
       items.map(() => accountId),
       items.map(() => wallet),
       items.map((l) => String(l.fee ?? 0)),
@@ -299,13 +334,68 @@ async function syncLiquidations(pool: Pool, accountId: number, wallet: string): 
   return result.rowCount ?? 0;
 }
 
+// ─── 01.xyz Frontend API Sync ─────────────────────────────────────
+
+async function syncVolumeCalendar(pool: Pool, accountId: number, wallet: string): Promise<number> {
+  try {
+    const res = await fetchWithRetry(`${FRONTEND_API}/volume-calendar/${accountId}`);
+    if (!res || !res.ok) return 0;
+    const body = await res.json();
+    const entries = Object.entries(body.days ?? {}) as [string, Record<string, number>][];
+    if (entries.length === 0) return 0;
+
+    const result = await pool.query(
+      `INSERT INTO volume_calendar (id, "accountId", "walletAddr", date, volume, "makerVolume", "takerVolume", "makerFees", "takerFees", "totalFees")
+       SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::text[], $5::numeric[], $6::numeric[], $7::numeric[], $8::numeric[], $9::numeric[], $10::numeric[])
+       ON CONFLICT ("walletAddr", date) DO UPDATE SET
+         volume = EXCLUDED.volume, "makerVolume" = EXCLUDED."makerVolume", "takerVolume" = EXCLUDED."takerVolume",
+         "makerFees" = EXCLUDED."makerFees", "takerFees" = EXCLUDED."takerFees", "totalFees" = EXCLUDED."totalFees"`,
+      [
+        entries.map(() => crypto.randomUUID()),
+        entries.map(() => accountId),
+        entries.map(() => wallet),
+        entries.map(([date]) => date),
+        entries.map(([, d]) => String(d.volume ?? 0)),
+        entries.map(([, d]) => String(d.makerVolume ?? 0)),
+        entries.map(([, d]) => String(d.takerVolume ?? 0)),
+        entries.map(([, d]) => String(d.makerFees ?? 0)),
+        entries.map(([, d]) => String(d.takerFees ?? 0)),
+        entries.map(([, d]) => String(d.totalFees ?? 0)),
+      ],
+    );
+    return result.rowCount ?? 0;
+  } catch { return 0; }
+}
+
+async function syncPnlTotals(pool: Pool, accountId: number, wallet: string): Promise<boolean> {
+  try {
+    const res = await fetchWithRetry(`${FRONTEND_API}/pnl-totals/${accountId}`);
+    if (!res || !res.ok) return false;
+    const body = await res.json();
+
+    await pool.query(
+      `INSERT INTO pnl_totals (id, "accountId", "walletAddr", "totalPnl", "totalTradingPnl", "totalFundingPnl", "fetchedAt")
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT ("walletAddr") DO UPDATE SET
+         "totalPnl" = EXCLUDED."totalPnl", "totalTradingPnl" = EXCLUDED."totalTradingPnl",
+         "totalFundingPnl" = EXCLUDED."totalFundingPnl", "fetchedAt" = EXCLUDED."fetchedAt"`,
+      [
+        crypto.randomUUID(), accountId, wallet,
+        String(body.totalPnl ?? 0), String(body.totalTradingPnl ?? 0),
+        String(body.totalFundingPnl ?? 0), new Date(body.fetchedAt ?? new Date().toISOString()),
+      ],
+    );
+    return true;
+  } catch { return false; }
+}
+
 // ─── Cursor Helpers ───────────────────────────────────────────────
 
 const ALL_TYPES = ["trades", "orders", "pnl", "funding", "deposits", "withdrawals", "liquidations"];
 
 async function isAlreadySynced(pool: Pool, wallet: string): Promise<boolean> {
   const result = await pool.query(
-    `SELECT count(*) > 0 AS synced FROM sync_cursors WHERE wallet_addr = $1`,
+    `SELECT count(*) > 0 AS synced FROM sync_cursors WHERE "walletAddr" = $1`,
     [wallet],
   );
   return result.rows[0]?.synced ?? false;
@@ -315,9 +405,9 @@ async function setCursorsToNow(pool: Pool, wallet: string): Promise<void> {
   const now = new Date().toISOString();
   for (const type of ALL_TYPES) {
     await pool.query(
-      `INSERT INTO sync_cursors (wallet_addr, type, cursor, last_sync_at)
-       VALUES ($1, $2, $3, NOW())
-       ON CONFLICT (wallet_addr, type) DO UPDATE SET cursor = $3, last_sync_at = NOW()`,
+      `INSERT INTO sync_cursors (id, "walletAddr", type, cursor, "lastSyncAt")
+       VALUES (gen_random_uuid(), $1, $2, $3, NOW())
+       ON CONFLICT ("walletAddr", type) DO UPDATE SET cursor = $3, "lastSyncAt" = NOW()`,
       [wallet, type, now],
     );
   }
@@ -328,7 +418,7 @@ async function setCursorsToNow(pool: Pool, wallet: string): Promise<void> {
 function progressBar(current: number, total: number, width = 30): string {
   const pct = current / total;
   const filled = Math.round(pct * width);
-  const bar = "█".repeat(filled) + "░".repeat(width - filled);
+  const bar = "\u2588".repeat(filled) + "\u2591".repeat(width - filled);
   return `[${bar}] ${(pct * 100).toFixed(1)}%`;
 }
 
@@ -358,19 +448,22 @@ function eta(startMs: number, current: number, total: number): string {
 // ─── Main ─────────────────────────────────────────────────────────
 
 async function main() {
-  console.log("╔══════════════════════════════════════════╗");
-  console.log("║   Clydex — 01 Exchange Full History Sync ║");
-  console.log("╚══════════════════════════════════════════╝\n");
+  console.log("\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557");
+  console.log("\u2551   Clydex \u2014 01 Exchange Full History Sync \u2551");
+  console.log("\u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d\n");
 
-  if (FORCE) console.log("  Mode: FORCE (re-syncing all accounts)\n");
-  else console.log("  Mode: RESUME (skipping already-synced accounts)\n");
+  if (FORCE) console.log("  Mode: FORCE (re-syncing all accounts)");
+  else console.log("  Mode: RESUME (skipping already-synced accounts)");
+  console.log(`  Concurrency: ${CONCURRENCY}`);
+  if (PROXY_LIST.length > 0) console.log(`  Proxies: ${PROXY_LIST.length} rotating`);
+  console.log("");
 
   const pool = createPool();
 
   console.log("[1/3] Loading markets...");
   await loadMarkets();
 
-  console.log(`[2/3] Scanning accounts 0 → ${MAX_ACCOUNT_ID} (${CONCURRENCY} parallel)...\n`);
+  console.log(`[2/3] Scanning accounts 0 \u2192 ${MAX_ACCOUNT_ID} (${CONCURRENCY} parallel)...\n`);
 
   const startTime = Date.now();
   let processed = 0;
@@ -407,7 +500,13 @@ async function main() {
       const withdrawals = await syncWithdrawals(pool, id, wallet);
       const liquidations = await syncLiquidations(pool, id, wallet);
 
-      const sum = trades + orders + pnl + funding + deposits + withdrawals + liquidations;
+      // 01.xyz frontend data
+      const [vcRows] = await Promise.all([
+        syncVolumeCalendar(pool, id, wallet),
+        syncPnlTotals(pool, id, wallet),
+      ]);
+
+      const sum = trades + orders + pnl + funding + deposits + withdrawals + liquidations + vcRows;
       totalRecords += sum;
 
       await setCursorsToNow(pool, wallet);
@@ -417,12 +516,12 @@ async function main() {
       if (sum > 0) {
         console.log(
           `  Account ${id}: +${sum} records ` +
-          `(t:${trades} o:${orders} p:${pnl} f:${funding} d:${deposits} w:${withdrawals} l:${liquidations})`
+          `(t:${trades} o:${orders} p:${pnl} f:${funding} d:${deposits} w:${withdrawals} l:${liquidations} vc:${vcRows})`
         );
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.log(`  Account ${id}: FAIL — ${msg}`);
+      console.log(`  Account ${id}: FAIL \u2014 ${msg}`);
       failed++;
       processed++;
     }
@@ -447,17 +546,17 @@ async function main() {
     `\r  ${progressBar(MAX_ACCOUNT_ID, MAX_ACCOUNT_ID)} | DONE                                                                    \n`
   );
 
-  console.log(`\n╔══════════════════════════════════════════╗`);
-  console.log(`║  Results                                 ║`);
-  console.log(`╠══════════════════════════════════════════╣`);
-  console.log(`║  Accounts found:    ${String(exists).padStart(6)}              ║`);
-  console.log(`║  Synced:            ${String(synced).padStart(6)}              ║`);
-  console.log(`║  Skipped (empty):   ${String(skippedEmpty).padStart(6)}              ║`);
-  console.log(`║  Skipped (done):    ${String(skippedDone).padStart(6)}              ║`);
-  console.log(`║  Failed:            ${String(failed).padStart(6)}              ║`);
-  console.log(`║  Total records:     ${String(totalRecords).padStart(6)}              ║`);
-  console.log(`║  Time:              ${elapsed(startTime).padStart(6)}              ║`);
-  console.log(`╚══════════════════════════════════════════╝`);
+  console.log(`\n\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557`);
+  console.log(`\u2551  Results                                 \u2551`);
+  console.log(`\u2560\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2563`);
+  console.log(`\u2551  Accounts found:    ${String(exists).padStart(6)}              \u2551`);
+  console.log(`\u2551  Synced:            ${String(synced).padStart(6)}              \u2551`);
+  console.log(`\u2551  Skipped (empty):   ${String(skippedEmpty).padStart(6)}              \u2551`);
+  console.log(`\u2551  Skipped (done):    ${String(skippedDone).padStart(6)}              \u2551`);
+  console.log(`\u2551  Failed:            ${String(failed).padStart(6)}              \u2551`);
+  console.log(`\u2551  Total records:     ${String(totalRecords).padStart(6)}              \u2551`);
+  console.log(`\u2551  Time:              ${elapsed(startTime).padStart(6)}              \u2551`);
+  console.log(`\u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d`);
 
   await pool.end();
   process.exit(0);

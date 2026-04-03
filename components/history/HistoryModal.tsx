@@ -32,6 +32,7 @@ interface TradeRow {
   price: string;
   role: string;
   fee: string;
+  closedPnl: string | null;
   time: string;
 }
 
@@ -124,7 +125,7 @@ function fmtSize(v: string | number): string {
   return n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
 }
 
-function fmtDate(iso: string): string {
+function fmtDateLocal(iso: string): string {
   const d = new Date(iso);
   const month = d.getMonth() + 1;
   const day = d.getDate();
@@ -133,6 +134,15 @@ function fmtDate(iso: string): string {
   const m = d.getMinutes().toString().padStart(2, "0");
   const s = d.getSeconds().toString().padStart(2, "0");
   return `${month}/${day}/${year} - ${h}:${m}:${s}`;
+}
+
+/** Client-only date cell — renders empty on SSR, fills on mount to get correct timezone */
+function DateCell({ iso, className }: { iso: string; className: string }) {
+  const [text, setText] = useState("");
+  useEffect(() => {
+    setText(fmtDateLocal(iso));
+  }, [iso]);
+  return <td className={className}>{text || "\u00A0"}</td>;
 }
 
 function fmtAddr(addr: string): string {
@@ -152,6 +162,17 @@ function tradeValue(price: string, size: string): number {
   const s = parseFloat(size);
   if (!isFinite(p) || !isFinite(s)) return 0;
   return Math.abs(p * s);
+}
+
+// 01 Exchange standard fee rates (verified from volume-calendar API)
+const TAKER_FEE_RATE = 0.00035;  // 0.035%
+const MAKER_FEE_RATE = 0.0001;   // 0.01%
+
+function estimateFee(tv: number, role: string, dbFee: string): number {
+  const stored = parseFloat(dbFee);
+  if (isFinite(stored) && stored !== 0) return stored;
+  if (tv <= 0) return 0;
+  return tv * (role === "taker" ? TAKER_FEE_RATE : MAKER_FEE_RATE);
 }
 
 // ─── Tab Config ───────────────────────────────────────────────────
@@ -302,7 +323,7 @@ export function HistoryModal({ isOpen, onClose }: HistoryModalProps) {
             <h2 className="text-lg font-bold text-white">History</h2>
             {syncStatus?.lastSyncAt && (
               <span className="text-xs text-muted">
-                Synced: {fmtDate(syncStatus.lastSyncAt)}
+                Synced: {fmtDateLocal(syncStatus.lastSyncAt)}
               </span>
             )}
           </div>
@@ -473,6 +494,7 @@ function TradeHistoryTable({ data }: { data: TradeRow[] }) {
           <th className={TH}>Price</th>
           <th className={TH}>Trade Value</th>
           <th className={TH}>Fee Paid</th>
+          <th className={TH}>Closed PnL</th>
           <th className={TH}>Trade Type</th>
         </tr>
       </thead>
@@ -480,17 +502,21 @@ function TradeHistoryTable({ data }: { data: TradeRow[] }) {
         {data.map((row) => {
           const tv = tradeValue(row.price, row.size);
           const sizeNum = parseFloat(row.size);
+          const fee = estimateFee(tv, row.role, row.fee);
           return (
             <tr key={row.id} className="transition hover:bg-[#111]">
-              <td className={`${TD} text-muted`}>{fmtDate(row.time)}</td>
+              <DateCell iso={row.time} className={`${TD} text-muted`} />
               <td className={`${TD} text-white`}>{row.symbol.replace("USD", "/USD")}</td>
               <td className={`${TD} ${row.side === "Long" ? "text-emerald-400" : "text-red-400"}`}>
-                {sizeNum >= 0 ? "" : "-"}{fmtSize(Math.abs(sizeNum))}
+                {row.side === "Short" ? "-" : ""}{fmtSize(Math.abs(sizeNum))}
               </td>
               <td className={`${TD} text-white`}>{fmtPrice(row.price)}</td>
               <td className={`${TD} text-white`}>{tv > 0 ? "$" + tv.toFixed(2) : "--"}</td>
-              <td className={`${TD} ${pnlColor(-parseFloat(row.fee))}`}>
-                {parseFloat(row.fee) !== 0 ? fmtUsd(-parseFloat(row.fee), 4) : "--"}
+              <td className={`${TD} text-red-400`}>
+                {fee > 0 ? fmtUsd(-fee, 3) : "--"}
+              </td>
+              <td className={`${TD} ${row.closedPnl ? pnlColor(row.closedPnl) : "text-muted"}`}>
+                {row.closedPnl && parseFloat(row.closedPnl) !== 0 ? fmtUsd(row.closedPnl) : "--"}
               </td>
               <td className={`${TD} text-muted capitalize`}>{row.role}</td>
             </tr>
@@ -525,7 +551,7 @@ function OrderHistoryTable({ data }: { data: OrderRow[] }) {
           const value = parseFloat(row.orderValue);
           return (
             <tr key={row.id} className="transition hover:bg-[#111]">
-              <td className={`${TD} text-muted`}>{fmtDate(row.addedAt)}</td>
+              <DateCell iso={row.addedAt} className={`${TD} text-muted`} />
               <td className={`${TD} ${row.side === "Long" ? "text-emerald-400" : "text-red-400"} font-medium`}>
                 {row.symbol.replace("USD", "/USD")}
               </td>
@@ -564,7 +590,7 @@ function FundingHistoryTable({ data }: { data: FundingRow[] }) {
       <tbody className="divide-y divide-[#1a1a1a]">
         {data.map((row) => (
           <tr key={row.id} className="transition hover:bg-[#111]">
-            <td className={`${TD} text-muted`}>{fmtDate(row.time)}</td>
+            <DateCell iso={row.time} className={`${TD} text-muted`} />
             <td className={`${TD} text-white`}>{row.symbol.replace("USD", "/USD")}</td>
             <td className={`${TD} text-white`}>{fmtSize(row.positionSize)}</td>
             <td className={`${TD} ${pnlColor(row.fundingPnl)}`}>
@@ -602,7 +628,7 @@ function TransferHistoryTable({ deposits, withdrawals }: { deposits: DepositRow[
       <tbody className="divide-y divide-[#1a1a1a]">
         {merged.map((row) => (
           <tr key={row.id} className="transition hover:bg-[#111]">
-            <td className={`${TD} text-muted`}>{fmtDate(row.time)}</td>
+            <DateCell iso={row.time} className={`${TD} text-muted`} />
             <td className={`${TD} ${row.type === "deposit" ? "text-emerald-400" : "text-red-400"}`}>
               {row.type === "deposit" ? "Deposit" : "Withdrawal"}
             </td>

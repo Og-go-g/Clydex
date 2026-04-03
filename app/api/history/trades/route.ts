@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthAddress } from "@/lib/auth/session";
-import { getTradeHistory } from "@/lib/history/queries";
+import { getCachedAccountId } from "@/lib/n1/account-cache";
+import { getTradeHistoryRealtime, getTradeHistoryWithPnl } from "@/lib/history/queries";
 
 export async function GET(req: NextRequest) {
   const address = await getAuthAddress();
@@ -14,7 +15,15 @@ export async function GET(req: NextRequest) {
   const offset = params.get("offset") ? Number(params.get("offset")) : undefined;
 
   try {
-    const result = await getTradeHistory({ walletAddr: address, marketId, limit, offset });
+    // Try realtime merge (DB + API gap) if we have an accountId
+    const accountId = await getCachedAccountId(address);
+    if (accountId !== null) {
+      const result = await getTradeHistoryRealtime({ walletAddr: address, accountId, marketId, limit, offset });
+      return NextResponse.json(result);
+    }
+
+    // Fallback: DB only
+    const result = await getTradeHistoryWithPnl({ walletAddr: address, marketId, limit, offset });
     return NextResponse.json(result);
   } catch (error) {
     console.error("[api/history/trades] error:", error);

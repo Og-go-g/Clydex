@@ -6,7 +6,7 @@
     },
     {
       "path": "/api/cron/sync-history",
-      "schedule": "0 3 * * 1"
+      "schedule": "0 3 * * *"
     }
   ]
 }

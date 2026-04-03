@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthAddress } from "@/lib/auth/session";
-import { getOrderHistory } from "@/lib/history/queries";
+import { getCachedAccountId } from "@/lib/n1/account-cache";
+import { getOrderHistoryRealtime, getOrderHistory } from "@/lib/history/queries";
 
 export async function GET(req: NextRequest) {
   const address = await getAuthAddress();
@@ -14,6 +15,12 @@ export async function GET(req: NextRequest) {
   const offset = params.get("offset") ? Number(params.get("offset")) : undefined;
 
   try {
+    const accountId = await getCachedAccountId(address);
+    if (accountId !== null) {
+      const result = await getOrderHistoryRealtime({ walletAddr: address, accountId, marketId, limit, offset });
+      return NextResponse.json(result);
+    }
+
     const result = await getOrderHistory({ walletAddr: address, marketId, limit, offset });
     return NextResponse.json(result);
   } catch (error) {

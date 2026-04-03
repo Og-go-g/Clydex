@@ -3,7 +3,7 @@ import { historyPool, query } from "@/lib/db-history";
 /**
  * Link bulk-synced data to a real wallet address.
  *
- * The bulk sync script stores data under "account:ID" as wallet_addr.
+ * The bulk sync script stores data under "account:ID" as walletAddr.
  * When a user first connects, this function re-labels all their
  * records to use their real Solana wallet address.
  *
@@ -15,14 +15,14 @@ export async function linkAccountToWallet(accountId: number, walletAddr: string)
 
   // Check if there's any data under the account key
   const hasAccountData = await query<{ exists: boolean }>(
-    `SELECT EXISTS (SELECT 1 FROM sync_cursors WHERE wallet_addr = $1) AS exists`,
+    `SELECT EXISTS (SELECT 1 FROM sync_cursors WHERE "walletAddr" = $1) AS exists`,
     [accountKey],
   );
   if (!hasAccountData[0]?.exists) return;
 
   // Check if already linked
   const hasWalletData = await query<{ exists: boolean }>(
-    `SELECT EXISTS (SELECT 1 FROM sync_cursors WHERE wallet_addr = $1) AS exists`,
+    `SELECT EXISTS (SELECT 1 FROM sync_cursors WHERE "walletAddr" = $1) AS exists`,
     [walletAddr],
   );
   if (hasWalletData[0]?.exists) return;
@@ -45,7 +45,7 @@ export async function linkAccountToWallet(accountId: number, walletAddr: string)
 
     for (const table of tables) {
       await client.query(
-        `UPDATE ${table} SET wallet_addr = $1 WHERE wallet_addr = $2`,
+        `UPDATE ${table} SET "walletAddr" = $1 WHERE "walletAddr" = $2`,
         [walletAddr, accountKey],
       );
     }

@@ -1,4 +1,10 @@
-import { Pool } from "pg";
+import { Pool, types } from "pg";
+
+// Force pg to parse `timestamp without time zone` (OID 1114) as UTC.
+// Prisma creates DateTime columns without timezone, but all our data is UTC.
+// Without this, pg interprets stored values using the server's local timezone,
+// which shifts times when the server is not in UTC.
+types.setTypeParser(1114, (str: string) => new Date(str + "Z"));
 
 /**
  * PostgreSQL connection pool for the history database (TimescaleDB).
