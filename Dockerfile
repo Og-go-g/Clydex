@@ -22,12 +22,16 @@ RUN npx prisma generate --schema prisma/schema.prisma
 
 # Build Next.js (standalone output)
 # Dummy env vars needed at build time (code validates on import)
-ENV SESSION_SECRET=build-placeholder-secret-minimum-32-characters-long
-ENV DATABASE_URL=postgresql://dummy:dummy@localhost:5432/dummy
-ENV SIWE_SECRET=build-placeholder-secret-minimum-32-characters-long
-ENV UPSTASH_REDIS_REST_URL=https://dummy.upstash.io
-ENV UPSTASH_REDIS_REST_TOKEN=dummy-token
-ENV NEXT_PUBLIC_SENTRY_DSN=https://dummy@sentry.io/0
+ENV SESSION_SECRET=build-placeholder-secret-minimum-32-characters-long \
+    SIWE_SECRET=build-placeholder-secret-minimum-32-characters-long \
+    DATABASE_URL=postgresql://dummy:dummy@localhost:5432/dummy \
+    HISTORY_DATABASE_URL=postgresql://dummy:dummy@localhost:5432/dummy \
+    UPSTASH_REDIS_REST_URL=https://dummy.upstash.io \
+    UPSTASH_REDIS_REST_TOKEN=dummy-token \
+    NEXT_PUBLIC_SENTRY_DSN=https://dummy@sentry.io/0 \
+    SOLANA_RPC_URL=https://api.mainnet-beta.solana.com \
+    CRON_SECRET=dummy-cron-secret \
+    OPENAI_API_KEY=sk-dummy
 RUN npm run build
 
 # ─── Stage 3: Production ──────────────────────────────────────
