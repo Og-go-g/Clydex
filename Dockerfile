@@ -21,6 +21,10 @@ COPY . .
 RUN npx prisma generate --schema prisma/schema.prisma
 
 # Build Next.js (standalone output)
+# Dummy env vars needed at build time (code validates on import)
+ENV SESSION_SECRET=build-placeholder-secret-minimum-32-characters-long
+ENV DATABASE_URL=postgresql://dummy:dummy@localhost:5432/dummy
+ENV SIWE_SECRET=build-placeholder-secret-minimum-32-characters-long
 RUN npm run build
 
 # ─── Stage 3: Production ──────────────────────────────────────
