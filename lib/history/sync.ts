@@ -1,4 +1,4 @@
-import { historyPool, query, execute } from "@/lib/db-history";
+import { historyPool, query, execute, uuid } from "@/lib/db-history";
 import { N1_MAINNET_URL } from "@/lib/n1/constants";
 import { ensureMarketCache, getCachedMarkets } from "@/lib/n1/constants";
 import type { HistoryType, SyncResult, SyncProgress } from "./types";
@@ -171,7 +171,7 @@ async function syncTrades(accountId: number, walletAddr: string, since?: string)
       const roles = page.data.map(() => role);
       const fees = page.data.map(() => "0");
       const times = page.data.map((t) => new Date(t.time));
-      const ids = page.data.map(() => crypto.randomUUID());
+      const ids = page.data.map(() => uuid());
 
       const result = await historyPool.query(
         `INSERT INTO trade_history (id, "tradeId", "accountId", "walletAddr", "marketId", symbol, side, size, price, role, fee, "time")
@@ -208,7 +208,7 @@ async function syncOrders(accountId: number, walletAddr: string, since?: string)
        SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::numeric[], $11::numeric[], $12::text[], $13::text[], $14::text[], $15::boolean[], $16::timestamptz[], $17::timestamptz[])
        ON CONFLICT ("orderId") DO NOTHING`,
       [
-        d.map(() => crypto.randomUUID()),
+        d.map(() => uuid()),
         d.map((o) => String(o.orderId)),
         d.map(() => accountId),
         d.map(() => walletAddr),
@@ -255,7 +255,7 @@ async function syncPnl(accountId: number, walletAddr: string, since?: string): P
        SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::numeric[], $7::numeric[], $8::numeric[], $9::timestamptz[])
        ON CONFLICT ("walletAddr", "marketId", "time") DO NOTHING`,
       [
-        d.map(() => crypto.randomUUID()),
+        d.map(() => uuid()),
         d.map(() => accountId),
         d.map(() => walletAddr),
         d.map((p) => p.marketId),
@@ -294,7 +294,7 @@ async function syncFunding(accountId: number, walletAddr: string, since?: string
        SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::numeric[], $7::numeric[], $8::timestamptz[])
        ON CONFLICT ("walletAddr", "marketId", "time") DO NOTHING`,
       [
-        d.map(() => crypto.randomUUID()),
+        d.map(() => uuid()),
         d.map(() => accountId),
         d.map(() => walletAddr),
         d.map((f) => f.marketId),
@@ -332,7 +332,7 @@ async function syncDeposits(accountId: number, walletAddr: string, since?: strin
        SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::numeric[], $5::numeric[], $6::int[], $7::timestamptz[])
        ON CONFLICT ("walletAddr", "time", amount) DO NOTHING`,
       [
-        d.map(() => crypto.randomUUID()),
+        d.map(() => uuid()),
         d.map(() => accountId),
         d.map(() => walletAddr),
         d.map((dep) => String(dep.amount ?? 0)),
@@ -369,7 +369,7 @@ async function syncWithdrawals(accountId: number, walletAddr: string, since?: st
        SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::numeric[], $5::numeric[], $6::numeric[], $7::text[], $8::timestamptz[])
        ON CONFLICT ("walletAddr", "time", amount) DO NOTHING`,
       [
-        d.map(() => crypto.randomUUID()),
+        d.map(() => uuid()),
         d.map(() => accountId),
         d.map(() => walletAddr),
         d.map((w) => String(w.amount ?? 0)),
@@ -407,7 +407,7 @@ async function syncLiquidations(accountId: number, walletAddr: string, since?: s
        SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::numeric[], $5::text[], $6::jsonb[], $7::timestamptz[])
        ON CONFLICT ("walletAddr", "time", fee) DO NOTHING`,
       [
-        d.map(() => crypto.randomUUID()),
+        d.map(() => uuid()),
         d.map(() => accountId),
         d.map(() => walletAddr),
         d.map((l) => String(l.fee ?? 0)),
@@ -459,7 +459,7 @@ export async function syncVolumeCalendar(accountId: number, walletAddr: string):
          volume = EXCLUDED.volume, "makerVolume" = EXCLUDED."makerVolume", "takerVolume" = EXCLUDED."takerVolume",
          "makerFees" = EXCLUDED."makerFees", "takerFees" = EXCLUDED."takerFees", "totalFees" = EXCLUDED."totalFees"`,
       [
-        entries.map(() => crypto.randomUUID()),
+        entries.map(() => uuid()),
         entries.map(() => accountId),
         entries.map(() => walletAddr),
         entries.map(([date]) => date),
@@ -494,7 +494,7 @@ export async function syncPnlTotals(accountId: number, walletAddr: string): Prom
          "totalPnl" = EXCLUDED."totalPnl", "totalTradingPnl" = EXCLUDED."totalTradingPnl",
          "totalFundingPnl" = EXCLUDED."totalFundingPnl", "fetchedAt" = EXCLUDED."fetchedAt"`,
       [
-        crypto.randomUUID(),
+        uuid(),
         accountId,
         walletAddr,
         String(body.totalPnl ?? 0),

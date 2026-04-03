@@ -392,7 +392,7 @@ export async function getFundingHistoryRealtime(params: RealtimeParams): Promise
 
 // ─── Internal: insert fresh API data into DB (mini-sync) ─────────
 
-import { historyPool } from "@/lib/db-history";
+import { historyPool, uuid } from "@/lib/db-history";
 
 async function insertFreshTrades(trades: TradeHistoryRow[]): Promise<void> {
   if (trades.length === 0) return;
@@ -401,7 +401,7 @@ async function insertFreshTrades(trades: TradeHistoryRow[]): Promise<void> {
      SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::text[], $11::numeric[], $12::timestamptz[])
      ON CONFLICT ("tradeId") DO NOTHING`,
     [
-      trades.map(() => crypto.randomUUID()),
+      trades.map(() => uuid()),
       trades.map((t) => t.tradeId),
       trades.map((t) => t.accountId),
       trades.map((t) => t.walletAddr),
@@ -424,7 +424,7 @@ async function insertFreshPnl(pnl: PnlHistoryRow[]): Promise<void> {
      SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::numeric[], $7::numeric[], $8::numeric[], $9::timestamptz[])
      ON CONFLICT ("walletAddr", "marketId", "time") DO NOTHING`,
     [
-      pnl.map(() => crypto.randomUUID()),
+      pnl.map(() => uuid()),
       pnl.map((p) => p.accountId),
       pnl.map((p) => p.walletAddr),
       pnl.map((p) => p.marketId),
@@ -444,7 +444,7 @@ async function insertFreshOrders(orders: OrderHistoryRow[]): Promise<void> {
      SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::numeric[], $11::numeric[], $12::text[], $13::text[], $14::text[], $15::boolean[], $16::timestamptz[], $17::timestamptz[])
      ON CONFLICT ("orderId") DO NOTHING`,
     [
-      orders.map(() => crypto.randomUUID()),
+      orders.map(() => uuid()),
       orders.map((o) => o.orderId),
       orders.map((o) => o.accountId),
       orders.map((o) => o.walletAddr),
@@ -472,7 +472,7 @@ async function insertFreshFunding(funding: FundingHistoryRow[]): Promise<void> {
      SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::numeric[], $7::numeric[], $8::timestamptz[])
      ON CONFLICT ("walletAddr", "marketId", "time") DO NOTHING`,
     [
-      funding.map(() => crypto.randomUUID()),
+      funding.map(() => uuid()),
       funding.map((f) => f.accountId),
       funding.map((f) => f.walletAddr),
       funding.map((f) => f.marketId),

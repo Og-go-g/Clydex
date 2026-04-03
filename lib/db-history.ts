@@ -1,4 +1,10 @@
 import { Pool, types } from "pg";
+import { randomUUID } from "crypto";
+
+/** Generate a UUID — works in all Node.js versions */
+export function uuid(): string {
+  return randomUUID();
+}
 
 // Force pg to parse `timestamp without time zone` (OID 1114) as UTC.
 // Prisma creates DateTime columns without timezone, but all our data is UTC.
