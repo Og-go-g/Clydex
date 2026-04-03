@@ -13,6 +13,7 @@ import {
   getAccount,
   getAccountOrders,
   getAccountTriggers,
+  getMarketFees,
 } from "@/lib/n1/client";
 import { resolveMarket, getAllMarkets, validateLeverage, getCachedMarkets, ensureMarketCache, TIERS } from "@/lib/n1/constants";
 import { storePreview, consumePreview } from "@/lib/n1/preview-store";
@@ -663,6 +664,7 @@ export async function POST(req: Request) {
               totalValue: margins?.omf ?? usdcBalance,
               availableMargin: (margins?.omf ?? 0) - positions.reduce((s: number, p: { usedMargin: number }) => s + p.usedMargin, 0),
               positions,
+              _timestamp: Date.now(),
               ...(positions.length === 0 ? { message: "No open positions." } : {}),
             };
           } catch {
@@ -855,8 +857,19 @@ export async function POST(req: Request) {
           // for this position size relative to account equity. Keep 0 — card shows "—".
           if (!isFinite(liquidationPrice)) liquidationPrice = 0;
 
-          // Estimate fee (assume taker fee ~0.05%)
-          const estimatedFee = notionalValue * 0.0005;
+          // Fetch real maker/taker fee rates from 01 Exchange API
+          let takerRate = 0.0005; // fallback: 0.05%
+          let makerRate = 0.0001; // fallback: 0.01%
+          if (accountId) {
+            try {
+              const fees = await getMarketFees(market.id, accountId);
+              takerRate = fees.takerRate;
+              makerRate = fees.makerRate;
+            } catch { /* fallback to defaults */ }
+          }
+          const takerFee = notionalValue * takerRate;
+          const makerFee = notionalValue * makerRate;
+          const estimatedFee = takerFee; // primary estimate uses taker (market orders)
 
           // Calculate price impact (rough estimate from orderbook spread)
           const priceImpact = notionalValue > 100_000 ? 0.1 : notionalValue > 10_000 ? 0.05 : 0.02;
@@ -891,6 +904,10 @@ export async function POST(req: Request) {
             estimatedLiquidationPrice: Math.max(0, liquidationPrice),
             marginRequired,
             estimatedFee,
+            takerFee,
+            makerFee,
+            takerRate,
+            makerRate,
             priceImpact,
             warnings,
             notionalValue,
@@ -1025,6 +1042,18 @@ export async function POST(req: Request) {
               ? (markPrice - entryPrice) * closeSize
               : (entryPrice - markPrice) * closeSize;
 
+            // Fetch real fee rates from 01 Exchange API
+            const closeNotional = closeSize * markPrice;
+            let closeTakerRate = 0.0005;
+            let closeMakerRate = 0.0001;
+            try {
+              const fees = await getMarketFees(market.id, accountId);
+              closeTakerRate = fees.takerRate;
+              closeMakerRate = fees.makerRate;
+            } catch { /* fallback to defaults */ }
+            const closeTakerFee = closeNotional * closeTakerRate;
+            const closeMakerFee = closeNotional * closeMakerRate;
+
             // Store as preview for confirmation
             const previewId = await storePreview({
               market: market.symbol,
@@ -1034,7 +1063,7 @@ export async function POST(req: Request) {
               estimatedEntryPrice: markPrice,
               estimatedLiquidationPrice: 0,
               marginRequired: 0,
-              estimatedFee: closeSize * markPrice * 0.0005,
+              estimatedFee: closeTakerFee,
               priceImpact: 0,
               warnings: [],
             }, walletAddress);
@@ -1050,7 +1079,11 @@ export async function POST(req: Request) {
               entryPrice,
               currentPrice: markPrice,
               estimatedPnl,
-              estimatedFee: closeSize * markPrice * 0.0005,
+              estimatedFee: closeTakerFee,
+              takerFee: closeTakerFee,
+              makerFee: closeMakerFee,
+              takerRate: closeTakerRate,
+              makerRate: closeMakerRate,
               status: "awaiting_confirmation",
               message: `Closing ${percentage}% of ${market.symbol} ${isLong ? "LONG" : "SHORT"} (${closeSize.toFixed(6)} ${market.baseAsset}). Estimated PnL: $${estimatedPnl.toFixed(2)}. Confirm with 'yes'.`,
             };

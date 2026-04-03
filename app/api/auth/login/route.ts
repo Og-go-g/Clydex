@@ -51,12 +51,12 @@ export async function POST(req: Request) {
       }
     }
 
-    // Check issuedAt: not in the future (1 min clock skew) and not too old (5 min)
+    // Check issuedAt: not in the future (30s clock skew) and not too old (60s)
     const issued = new Date(fields.issuedAt);
     if (
       isNaN(issued.getTime()) ||
-      issued.getTime() > Date.now() + 60_000 ||
-      Date.now() - issued.getTime() > 5 * 60 * 1000
+      issued.getTime() > Date.now() + 30_000 ||
+      Date.now() - issued.getTime() > 60_000
     ) {
       return NextResponse.json({ error: "Authentication failed" }, { status: 401 });
     }
@@ -72,12 +72,9 @@ export async function POST(req: Request) {
     if (!(await consumeNonce(fields.nonce))) {
       return NextResponse.json({ error: "Authentication failed" }, { status: 401 });
     }
-    // Also clean up session nonce
-    const session = await getSession();
-    delete session.nonce;
-    await session.save();
 
     // Session rotation: destroy old session, create new
+    const session = await getSession();
     session.destroy();
     const newSession = await getSession();
     newSession.address = fields.address; // base58 public key (case-sensitive)

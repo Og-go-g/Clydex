@@ -169,7 +169,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const data = await rpcRes.json();
+    let data: unknown;
+    try {
+      data = await rpcRes.json();
+    } catch {
+      return NextResponse.json(
+        { jsonrpc: "2.0", error: { code: -32603, message: "Invalid RPC response" }, id: requestId },
+        { status: 502 }
+      );
+    }
 
     // 6. Return with rate limit headers
     const res = NextResponse.json(data);

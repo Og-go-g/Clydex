@@ -164,6 +164,8 @@ export function useOrderbookRatio(marketId: number, symbol: string, enabled: boo
       clearTimeout(reconnectTimer.current);
       clearTimeout(throttleTimer.current);
       if (wsRef.current) {
+        wsRef.current.onmessage = null;
+        wsRef.current.onerror = null;
         wsRef.current.onclose = null;
         wsRef.current.close();
         wsRef.current = null;

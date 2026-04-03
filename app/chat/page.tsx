@@ -11,6 +11,7 @@ import { syncSessionToDb } from "@/lib/chat/sync";
 import { useAuth } from "@/lib/auth/context";
 import { useRealtimePrices } from "@/hooks/useRealtimePrices";
 import { useOrderExecution, isPreviewConsumed, isPreviewFailed, getConfirmedPosition } from "@/hooks/useOrderExecution";
+import { useOrderActions } from "@/hooks/useOrderActions";
 import { useToast } from "@/components/alerts/ToastProvider";
 import { usePageActive } from "@/hooks/usePageActive";
 import { useChartPanel, useChartPanelSafe } from "@/lib/chat/chart-panel-context";
@@ -79,6 +80,32 @@ function normSym(s: string): string { return s.replace(/\//, "").toUpperCase(); 
 /** Extract base asset from symbol (e.g. "SOLUSD" → "SOL") */
 function baseAssetFrom(sym: string): string { return sym.replace(/USD$/, ""); }
 
+
+// ─── Dismissed previews (persisted across reload/collapse) ───────
+const LS_DISMISSED_KEY = "clydex_dismissed_previews";
+function loadDismissed(): Set<string> {
+  if (typeof window === "undefined") return new Set();
+  try {
+    const raw = localStorage.getItem(LS_DISMISSED_KEY);
+    return raw ? new Set(JSON.parse(raw)) : new Set();
+  } catch { return new Set(); }
+}
+function saveDismissed(s: Set<string>) {
+  try {
+    const arr = [...s].slice(-200);
+    localStorage.setItem(LS_DISMISSED_KEY, JSON.stringify(arr));
+  } catch { /* quota exceeded */ }
+}
+const dismissedPreviews = loadDismissed();
+
+function dismissPreview(previewId: string) {
+  dismissedPreviews.add(previewId);
+  saveDismissed(dismissedPreviews);
+}
+
+function isPreviewDismissed(previewId: string): boolean {
+  return dismissedPreviews.has(previewId);
+}
 
 // ─── Collapsible card wrapper ────────────────────────────────────
 // Wraps any chat card with a collapse/expand toggle. State persisted in localStorage.
@@ -789,11 +816,22 @@ function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, isDism
       </CollapsibleCard>
     );
   }
-  if (toolName === "getPositions" && (result.positions as unknown[])?.length > 0) {
-    const posCount = (result.positions as unknown[]).length;
+  if (toolName === "getPositions") {
+    const positions = (result.positions as unknown[]) ?? [];
+    if (positions.length > 0) {
+      return (
+        <CollapsibleCard cardKey={cKey} label={`Positions (${positions.length})`} beforeText={beforeText} descriptionText={descriptionText}>
+          <PositionsCard data={result} realtimePrices={realtimePrices} closedSymbols={closedSymbols} onSendMessage={onSendMessage} />
+        </CollapsibleCard>
+      );
+    }
+    // No positions — show info card
+    const msg = (result.message as string) || "No open positions.";
     return (
-      <CollapsibleCard cardKey={cKey} label={`Positions (${posCount})`} beforeText={beforeText} descriptionText={descriptionText}>
-        <PositionsCard data={result} realtimePrices={realtimePrices} closedSymbols={closedSymbols} onSendMessage={onSendMessage} />
+      <CollapsibleCard cardKey={cKey} label="Positions (0)" beforeText={beforeText} descriptionText={descriptionText}>
+        <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted">
+          {msg}
+        </div>
       </CollapsibleCard>
     );
   }
@@ -818,7 +856,7 @@ function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, isDism
     const sym = (result.market as string) ?? "";
     return (
       <CollapsibleCard cardKey={cKey} label={`Close — ${sym}`} badge={isDismissed ? "Dismissed" : undefined} badgeColor="text-muted" beforeText={beforeText} descriptionText={descriptionText}>
-        <ClosePositionCard data={result} isDismissed={isDismissed} />
+        <ClosePositionCard data={result} isDismissed={isDismissed} realtimePrices={realtimePrices} />
       </CollapsibleCard>
     );
   }
@@ -1013,10 +1051,21 @@ function PositionsCard({
   closedSymbols?: Set<string>;
   onSendMessage?: (msg: string) => void;
 }) {
-  // Auto-refresh: tool result may be stale (user returned to old chat)
+  // Remember which positions were in the original tool result by (marketId + side).
+  // On refresh, only show positions matching these — prevents old chats from
+  // showing unrelated new positions on different markets or flipped sides.
+  const originalPosKeys = useMemo(() => {
+    const positions = (data.positions as Array<{ marketId?: number; symbol?: string; side?: string }>) ?? [];
+    return new Set(positions.map(p => {
+      const id = p.marketId ?? (p.symbol ?? "");
+      return `${id}:${p.side ?? ""}`;
+    }));
+  }, [data]);
+
   const [liveData, setLiveData] = useState<Record<string, unknown> | null>(null);
-  const fetchedRef = useRef(false);
+  const [refreshing, setRefreshing] = useState(originalPosKeys.size > 0);
   useEffect(() => {
+    if (originalPosKeys.size === 0) return; // No positions in snapshot — nothing to refresh
     let active = true;
     const doFetch = () => {
     fetch(`/api/account?_t=${Date.now()}`, { cache: "no-store" }).then(r => {
@@ -1028,10 +1077,16 @@ function PositionsCard({
       return r.ok ? r.json() : null;
     }).then(d => {
       if (!active || !d) return;
-      // Always rebuild from fresh API data — replaces stale tool result unconditionally
+      // Rebuild from fresh API data — only positions that were in the original snapshot
       const newPositions = (d.positions ?? []).filter((p: Record<string, unknown>) => {
         const perp = p.perp as Record<string, unknown> | undefined;
-        return perp && (perp.baseSize as number) !== 0;
+        if (!perp || (perp.baseSize as number) === 0) return false;
+        // Filter: only show positions that match the original snapshot by marketId + side.
+        const sym = ((p.symbol as string) ?? "").replace("/", "");
+        const sideCheck = (perp.isLong as boolean) ? "Long" : "Short";
+        const key1 = `${p.marketId}:${sideCheck}`;
+        const key2 = `${sym}:${sideCheck}`;
+        return originalPosKeys.has(key1) || originalPosKeys.has(key2);
       });
       const rebuilt: PosData[] = newPositions.map((p: Record<string, unknown>) => {
         const perp = p.perp as Record<string, unknown>;
@@ -1077,13 +1132,29 @@ function PositionsCard({
         if (t) { p.stopLoss = t.stopLoss ?? 0; p.takeProfit = t.takeProfit ?? 0; }
       }
       setLiveData({ ...d, positions: rebuilt, totalValue: d.margins?.omf, availableMargin: (d.margins?.omf ?? 0) - rebuilt.reduce((s: number, p: PosData) => s + p.usedMargin, 0) });
-    }).catch(() => { /* silent */ });
+      setRefreshing(false);
+    }).catch(() => { setRefreshing(false); });
     };
     doFetch();
     // Re-fetch every 10s to keep TP/SL and PnL fresh
     const interval = window.setInterval(doFetch, 10_000);
     return () => { active = false; clearInterval(interval); };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [originalPosKeys]);
+
+  // Show loader while first refresh is in-flight (prevents flash of stale snapshot)
+  if (refreshing) {
+    return (
+      <div className="my-2 w-full max-w-3xl overflow-hidden rounded-xl border border-border bg-background">
+        <div className="px-4 py-3 flex items-center gap-2">
+          <svg className="h-4 w-4 animate-spin text-muted" viewBox="0 0 24 24" fill="none">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+          <span className="text-sm text-muted">Loading positions...</span>
+        </div>
+      </div>
+    );
+  }
 
   const effectiveData = liveData ?? data;
   const positions = (effectiveData.positions as PosData[]) ?? [];
@@ -1094,7 +1165,7 @@ function PositionsCard({
   if (positions.length === 0) {
     return (
       <div className="my-2 w-full max-w-3xl overflow-hidden rounded-xl border border-border bg-background">
-        <div className="px-4 py-3 text-center text-sm text-muted">No open positions</div>
+        <div className="px-4 pr-8 py-3 text-center text-sm text-muted">No open positions</div>
       </div>
     );
   }
@@ -1239,6 +1310,10 @@ function OpenOrdersCard({
   onSendMessage?: (msg: string) => void;
 }) {
   const { addToast } = useToast();
+  const { cancelOrder: doCancelOrder, editOrder: doEditOrder, cancellingIds, cancelAllOrders } = useOrderActions();
+  const [editingOrderId, setEditingOrderId] = useState<number | null>(null);
+  const [editPrice, setEditPrice] = useState("");
+  const [editSize, setEditSize] = useState("");
 
   // Auto-refresh: tool result orders may be stale (user returned to old chat)
   const [freshOrders, setFreshOrders] = useState<Array<{
@@ -1504,35 +1579,66 @@ function OpenOrdersCard({
 
         return (
           <div key={o.orderId} className={`px-4 py-3 ${i < liveOrders.length - 1 ? "border-b border-border/50" : ""} ${isResolved ? "opacity-50" : ""} ${!verified && !isResolved ? "opacity-60" : ""}`}>
-            {/* Row 1: Market, Side, Size, Status */}
-            <div className="flex items-center justify-between mb-1.5">
+            {/* Header: symbol, side badge, status, cancel */}
+            <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
-                <span className="text-xs font-semibold text-foreground">{o.baseAsset}/USD</span>
+                <span className="text-sm font-semibold text-foreground">{o.baseAsset}/USD</span>
                 <span className={`rounded-md px-1.5 py-0.5 text-[10px] font-bold ${isBuy ? "bg-green-500/10 text-green-400" : "bg-red-500/10 text-red-400"}`}>
                   {o.side}
                 </span>
-                <span className="text-xs font-mono text-foreground">{o.size.toFixed(4)}</span>
                 {isFilled && <span className="rounded bg-green-500/20 px-1.5 py-0.5 text-[10px] font-bold text-green-400">FILLED</span>}
                 {isCancelled && <span className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] font-bold text-muted">CANCELLED</span>}
               </div>
-              {onSendMessage && !isResolved && verified && (
-                <button
-                  onClick={() => onSendMessage(`cancel order ${o.baseAsset}`)}
-                  className="rounded-md border border-orange-500/30 bg-orange-500/5 px-2 py-0.5 text-[10px] font-medium text-orange-400 hover:bg-orange-500/10 transition-colors"
-                >
-                  Cancel
-                </button>
+              {!isResolved && verified && (
+                <div className="flex items-center gap-1.5">
+                  {cancellingIds.has(o.orderId) ? (
+                    <svg className="h-3.5 w-3.5 animate-spin text-muted" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                  ) : (
+                    <>
+                      <button
+                        onClick={async () => {
+                          const ok = await doCancelOrder(o.orderId);
+                          if (ok) addToast({ type: "success", title: "Order Cancelled", message: `${o.baseAsset} ${o.side}`, duration: 3000 });
+                        }}
+                        className="rounded-md px-2 py-0.5 text-[10px] font-medium text-red-400 hover:bg-red-500/10 transition-colors"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={() => {
+                          setEditingOrderId(o.orderId);
+                          setEditPrice(String(o.price));
+                          setEditSize(String(o.size));
+                        }}
+                        className="rounded-md px-2 py-0.5 text-[10px] font-medium text-muted hover:bg-white/5 hover:text-foreground transition-colors"
+                      >
+                        Edit
+                      </button>
+                    </>
+                  )}
+                </div>
               )}
             </div>
 
-            {/* Row 2: Prices + Distance */}
-            <div className="grid grid-cols-3 gap-2 text-[11px] mb-1.5">
+            {/* Grid: all order details */}
+            <div className="grid grid-cols-3 gap-x-4 gap-y-1.5 text-[11px]">
               <div>
-                <span className="text-muted">Limit</span>
+                <span className="text-muted">Order Value</span>
+                <div className="font-mono text-foreground">{formatUsd(o.size * o.price)}</div>
+              </div>
+              <div>
+                <span className="text-muted">Size</span>
+                <div className="font-mono text-foreground">{fmtSize(o.size)} {o.baseAsset}</div>
+              </div>
+              <div>
+                <span className="text-muted">Limit Price</span>
                 <div className="font-mono text-foreground">{fmtPrice(o.price)}</div>
               </div>
               <div>
-                <span className="text-muted">{isResolved ? "Market (at close)" : "Market"}</span>
+                <span className="text-muted">{isResolved ? "Market (at close)" : "Market Price"}</span>
                 <div className={`font-mono ${isVeryClose ? "text-yellow-400 font-semibold" : "text-foreground"}`}>
                   {livePrice ? fmtPrice(livePrice) : "—"}
                 </div>
@@ -1543,29 +1649,84 @@ function OpenOrdersCard({
                   {distance !== null ? `${distance >= 0 ? "+" : ""}${distance.toFixed(2)}%` : "—"}
                 </div>
               </div>
+              <div>
+                <span className="text-muted">Filled</span>
+                {o.fillPct > 0 ? (
+                  <div className="flex items-center gap-1.5 mt-0.5">
+                    <div className="w-12 h-1.5 rounded-full bg-white/10 overflow-hidden">
+                      <div className={`h-full rounded-full transition-all duration-700 ${isFilled ? "bg-green-400" : "bg-green-400/70"}`} style={{ width: `${Math.min(100, o.fillPct)}%` }} />
+                    </div>
+                    <span className="text-[10px] font-mono text-green-400">{o.fillPct.toFixed(0)}%</span>
+                  </div>
+                ) : (
+                  <div className="font-mono text-muted">0%</div>
+                )}
+              </div>
             </div>
 
-            {/* Row 3: Fill progress */}
-            {!isCancelled && (
-              <div className="flex items-center justify-between mt-1">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] text-muted">Filled:</span>
-                  {o.fillPct > 0 ? (
-                    <div className="flex items-center gap-1.5">
-                      <div className="w-16 h-1.5 rounded-full bg-white/10 overflow-hidden">
-                        <div className={`h-full rounded-full transition-all duration-700 ${isFilled ? "bg-green-400" : "bg-green-400/70"}`} style={{ width: `${Math.min(100, o.fillPct)}%` }} />
-                      </div>
-                      <span className="text-[10px] font-mono text-green-400">{o.fillPct.toFixed(0)}%</span>
-                    </div>
-                  ) : (
-                    <span className="text-[10px] font-mono text-muted">0%</span>
-                  )}
+            {/* Inline edit form */}
+            {editingOrderId === o.orderId && (
+              <div className="mt-2 flex items-center gap-2 rounded-lg bg-white/5 p-2">
+                <div>
+                  <label className="text-[10px] text-muted block">Price</label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={editPrice}
+                    onChange={e => setEditPrice(e.target.value)}
+                    className="w-24 rounded-md border border-border bg-background px-2 py-1 text-xs font-mono text-foreground outline-none focus:border-accent"
+                  />
                 </div>
-                {!isResolved && (
-                  <span className={`text-[10px] ${isVeryClose ? "text-yellow-400" : isClose ? "text-yellow-400/70" : "text-muted"}`}>
-                    {isVeryClose ? "Price very close" : isClose ? "Price approaching" : "Waiting for price"}
-                  </span>
-                )}
+                <div>
+                  <label className="text-[10px] text-muted block">Size</label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={editSize}
+                    onChange={e => setEditSize(e.target.value)}
+                    className="w-24 rounded-md border border-border bg-background px-2 py-1 text-xs font-mono text-foreground outline-none focus:border-accent"
+                  />
+                </div>
+                <div className="flex items-end gap-1 pb-0.5">
+                  <button
+                    onClick={async () => {
+                      const p = parseFloat(editPrice);
+                      const s = parseFloat(editSize);
+                      if (!p || !s || p <= 0 || s <= 0) return;
+                      const isBuyEdit = o.side === "Buy";
+                      const ok = await doEditOrder({
+                        oldOrderId: o.orderId,
+                        symbol: o.symbol,
+                        side: isBuyEdit ? "Long" : "Short",
+                        size: s,
+                        price: p,
+                        leverage: 1,
+                      });
+                      if (ok) {
+                        setEditingOrderId(null);
+                        addToast({ type: "success", title: "Order Updated", message: `${o.baseAsset} ${fmtPrice(p)}`, duration: 3000 });
+                      }
+                    }}
+                    className="rounded-md bg-accent/20 px-2.5 py-1 text-[10px] font-medium text-accent hover:bg-accent/30 transition-colors"
+                  >
+                    Save
+                  </button>
+                  <button
+                    onClick={() => setEditingOrderId(null)}
+                    className="rounded-md px-2.5 py-1 text-[10px] font-medium text-muted hover:bg-white/5 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Status hint */}
+            {!isResolved && !isCancelled && editingOrderId !== o.orderId && (
+              <div className="mt-2">
+                <span className={`text-[10px] ${isVeryClose ? "text-yellow-400" : isClose ? "text-yellow-400/70" : "text-muted"}`}>
+                  {isVeryClose ? "Price very close" : isClose ? "Price approaching" : "Waiting for price"}
+                </span>
               </div>
             )}
           </div>
@@ -2493,24 +2654,55 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage, isDismissed: pr
   const previewId = data.previewId as string;
   const isExecuted = previewId ? isPreviewConsumed(previewId) : false;
   const isLong = side === "Long";
-  const [manualDismiss, setManualDismiss] = useState(false);
+  const [manualDismiss, setManualDismiss] = useState(() => previewId ? isPreviewDismissed(previewId) : false);
   const [timedOut, setTimedOut] = useState(false);
 
   // Auto-dismiss after 3 minutes of inactivity (only in idle state)
   useEffect(() => {
     if (status !== "idle" || isExecuted || propDismissed || manualDismiss) return;
-    const timer = setTimeout(() => setTimedOut(true), 3 * 60 * 1000);
+    const timer = setTimeout(() => {
+      setTimedOut(true);
+      if (previewId) dismissPreview(previewId);
+    }, 3 * 60 * 1000);
     return () => clearTimeout(timer);
-  }, [status, isExecuted, propDismissed, manualDismiss]);
+  }, [status, isExecuted, propDismissed, manualDismiss, previewId]);
+
+  const handleDismissOrder = () => {
+    setManualDismiss(true);
+    if (previewId) dismissPreview(previewId);
+  };
 
   const isDismissed = propDismissed || manualDismiss || timedOut;
   const borderColor = isLong ? "border-green-500/30" : "border-red-500/30";
   const sideColor = isLong ? "text-green-400" : "text-red-400";
   const sideBg = isLong ? "bg-green-500/10" : "bg-red-500/10";
-  const fmtEntry = entryPrice ? "$" + entryPrice.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "—";
 
   const isLimit = (orderType ?? "market") === "limit";
   const baseAssetPreview = baseAssetFrom(market);
+
+  // Realtime price for market orders — use WS price if available
+  const livePrice = realtimePrices?.[market] ?? realtimePrices?.[normSym(market)] ?? null;
+  const currentPrice = (!isLimit && livePrice) ? livePrice : entryPrice;
+  const fmtEntry = currentPrice ? fmtPrice(currentPrice) : "—";
+
+  // Recalculate derived values with live price
+  const liveNotional = size * currentPrice;
+  const liveMargin = data.marginRequired as number; // margin doesn't change with price
+  const takerRate = (data.takerRate as number) ?? 0.0005;
+  const makerRate = (data.makerRate as number) ?? 0.0001;
+  const liveTakerFee = liveNotional * takerRate;
+  const liveMakerFee = liveNotional * makerRate;
+
+  // Recalculate liq price with live entry
+  const origLeverage = leverage;
+  const pmmf = 0.025; // maintenance margin fraction
+  let liveLiqPrice = 0;
+  if (origLeverage > 0) {
+    liveLiqPrice = isLong
+      ? currentPrice * (1 - 1 / origLeverage + pmmf)
+      : currentPrice * (1 + 1 / origLeverage - pmmf);
+    if (!isFinite(liveLiqPrice) || liveLiqPrice <= 0) liveLiqPrice = 0;
+  }
 
   // Toast on status change
   const toastLabels = useMemo(() => ({
@@ -2606,8 +2798,18 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage, isDismissed: pr
     return () => { cancelled = true; clearTimeout(timeout); };
   }, [isExecuted, reloadChecked, previewId, market]);
 
+  // Slippage: 0.1% default, auto-step on slippage errors
+  const SLIPPAGE_STEPS = [0.001, 0.003, 0.005, 0.01, 0.02];
+  const [slippageIdx, setSlippageIdx] = useState(0);
+  const currentSlippage = SLIPPAGE_STEPS[slippageIdx] ?? SLIPPAGE_STEPS[SLIPPAGE_STEPS.length - 1];
+  const isMarketOrder = (orderType ?? "market") === "market";
+
   const handleExecute = () => {
-    executeOrder({ market, side, size, leverage, estimatedEntryPrice: entryPrice, orderType, price: limitPrice, previewId });
+    executeOrder({
+      market, side, size, leverage, estimatedEntryPrice: entryPrice,
+      orderType, price: limitPrice, previewId,
+      slippage: isMarketOrder ? currentSlippage : undefined,
+    });
   };
 
   // Show loading while hydrating cache on reload
@@ -2874,12 +3076,13 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage, isDismissed: pr
           <span className="text-sm font-semibold text-foreground">{market}</span>
           <span className="text-xs text-muted">{leverage}x</span>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1 mr-5">
           <span className="text-[10px] text-muted">{orderType ?? "market"}</span>
           <button
-            onClick={() => setManualDismiss(true)}
+            onClick={(e) => { e.stopPropagation(); handleDismissOrder(); }}
             className="rounded-md p-1 text-muted/50 hover:text-muted hover:bg-white/5 transition-colors"
-            aria-label="Dismiss"
+            aria-label="Dismiss order"
+            title="Dismiss"
           >
             <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -2890,30 +3093,54 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage, isDismissed: pr
 
       <div className="grid grid-cols-2 gap-2 text-xs">
         <div>
+          <span className="text-muted">Order Value</span>
+          <div className="font-mono text-foreground">{formatUsd(liveNotional)}</div>
+        </div>
+        <div>
+          <span className="text-muted">Initial Margin</span>
+          <div className="font-mono text-foreground">{formatUsd(liveMargin)}</div>
+        </div>
+        <div>
           <span className="text-muted">Size</span>
           <div className="font-mono text-foreground">{fmtSize(size)}</div>
         </div>
         <div>
-          <span className="text-muted">Notional</span>
-          <div className="font-mono text-foreground">{formatUsd(data.notionalValue as number)}</div>
-        </div>
-        <div>
-          <span className="text-muted">Entry Price</span>
+          <span className="text-muted">{isLimit ? "Limit Price" : "Entry Price"}</span>
           <div className="font-mono text-foreground">{fmtEntry}</div>
         </div>
         <div>
-          <span className="text-muted">Liq. Price</span>
-          <div className="font-mono text-red-400">{(data.estimatedLiquidationPrice as number) > 0 ? formatUsd(data.estimatedLiquidationPrice as number) : "—"}</div>
+          <span className="text-muted">Est. Liquidation Price</span>
+          <div className="font-mono text-red-400">{liveLiqPrice > 0 ? fmtPrice(liveLiqPrice) : "—"}</div>
         </div>
         <div>
-          <span className="text-muted">Margin Required</span>
-          <div className="font-mono text-foreground">{formatUsd(data.marginRequired as number)}</div>
-        </div>
-        <div>
-          <span className="text-muted">Est. Fee</span>
-          <div className="font-mono text-foreground">{formatUsd(data.estimatedFee as number)}</div>
+          <span className="text-muted">Fees</span>
+          <div className="font-mono text-foreground">
+            {formatUsd(liveTakerFee)} / {formatUsd(liveMakerFee)}
+          </div>
+          <div className="text-[10px] text-muted/60 font-mono">taker / maker</div>
         </div>
       </div>
+
+      {isMarketOrder && (
+        <div className="mt-3">
+          <div className="text-[10px] text-muted mb-1">Max Slippage</div>
+          <div className="flex gap-1">
+            {SLIPPAGE_STEPS.map((s, i) => (
+              <button
+                key={s}
+                onClick={() => setSlippageIdx(i)}
+                className={`flex-1 rounded-md py-1 text-[10px] font-mono transition-colors ${
+                  slippageIdx === i
+                    ? "bg-green-500/20 text-green-400 border border-green-500/40"
+                    : "bg-white/5 text-muted border border-transparent hover:bg-white/10"
+                }`}
+              >
+                {(s * 100).toFixed(1)}%
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {(data.warnings as string[])?.length > 0 && (
         <div className="mt-3 space-y-1">
@@ -2923,38 +3150,65 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage, isDismissed: pr
         </div>
       )}
 
-      <button
-        onClick={handleExecute}
-        className={`mt-3 w-full rounded-lg py-2.5 text-sm font-medium text-white transition-colors ${isLong ? "bg-green-600 hover:bg-green-500" : "bg-red-600 hover:bg-red-500"}`}
-      >
-        {hasSession ? "Execute Order" : "Sign & Execute Order"}
-      </button>
+      {(() => {
+        const hasInsufficientMargin = (data.warnings as string[])?.some(w => w.includes("Insufficient margin"));
+        return (
+          <button
+            onClick={handleExecute}
+            disabled={hasInsufficientMargin}
+            className={`mt-3 w-full rounded-lg py-2.5 text-sm font-medium text-white transition-colors ${
+              hasInsufficientMargin
+                ? "bg-gray-600 cursor-not-allowed opacity-50"
+                : isLong ? "bg-green-600 hover:bg-green-500" : "bg-red-600 hover:bg-red-500"
+            }`}
+          >
+            {hasInsufficientMargin ? "Insufficient Margin" : hasSession ? "Execute Order" : "Sign & Execute Order"}
+          </button>
+        );
+      })()}
     </div>
   );
 }
 
 // ─── Close Position Card ─────────────────────────────────────────
 
-function ClosePositionCard({ data, isDismissed: propDismissed }: { data: Record<string, unknown>; isDismissed?: boolean }) {
+function ClosePositionCard({ data, isDismissed: propDismissed, realtimePrices }: { data: Record<string, unknown>; isDismissed?: boolean; realtimePrices?: Record<string, number> }) {
   const { executeClose, status, error, txHash, reset, recheck, hasSession } = useOrderExecution();
-  const [manualDismiss, setManualDismiss] = useState(false);
-  const [timedOut, setTimedOut] = useState(false);
-
   const market = data.market as string;
   const side = data.side as "Long" | "Short";
   const closeSize = data.closeSize as number;
-  const pnl = data.estimatedPnl as number;
+  const entryPrice = data.entryPrice as number;
+  const staticPrice = data.currentPrice as number;
   const previewId = data.previewId as string | undefined;
   const isExecuted = previewId ? isPreviewConsumed(previewId) : false;
-  const pnlColor = pnl >= 0 ? "text-green-400" : "text-red-400";
   const closeBaseAsset = baseAssetFrom(market);
+  const isLong = side === "Long";
+
+  // Realtime price
+  const livePrice = realtimePrices?.[market] ?? realtimePrices?.[normSym(market)] ?? null;
+  const currentPrice = livePrice ?? staticPrice;
+  const pnl = isLong
+    ? (currentPrice - entryPrice) * closeSize
+    : (entryPrice - currentPrice) * closeSize;
+  const pnlColor = pnl >= 0 ? "text-green-400" : "text-red-400";
+
+  const [manualDismiss, setManualDismiss] = useState(() => previewId ? isPreviewDismissed(previewId) : false);
+  const [timedOut, setTimedOut] = useState(false);
 
   // Auto-dismiss after 3 minutes of inactivity (only in idle state)
   useEffect(() => {
     if (status !== "idle" || isExecuted || propDismissed || manualDismiss) return;
-    const timer = setTimeout(() => setTimedOut(true), 3 * 60 * 1000);
+    const timer = setTimeout(() => {
+      setTimedOut(true);
+      if (previewId) dismissPreview(previewId);
+    }, 3 * 60 * 1000);
     return () => clearTimeout(timer);
-  }, [status, isExecuted, propDismissed, manualDismiss]);
+  }, [status, isExecuted, propDismissed, manualDismiss, previewId]);
+
+  const handleDismissClose = () => {
+    setManualDismiss(true);
+    if (previewId) dismissPreview(previewId);
+  };
 
   const isDismissed = propDismissed || manualDismiss || timedOut;
 
@@ -2968,8 +3222,13 @@ function ClosePositionCard({ data, isDismissed: propDismissed }: { data: Record<
   }), [closeBaseAsset, side, closeSize, pnl]);
   useStatusToast(status, error, closeToasts);
 
+  // Slippage: 0.1% default, auto-step on errors
+  const CLOSE_SLIPPAGE_STEPS = [0.001, 0.003, 0.005, 0.01, 0.02];
+  const [closeSlippageIdx, setCloseSlippageIdx] = useState(0);
+  const closeSlippage = CLOSE_SLIPPAGE_STEPS[closeSlippageIdx] ?? CLOSE_SLIPPAGE_STEPS[CLOSE_SLIPPAGE_STEPS.length - 1];
+
   const handleClose = () => {
-    executeClose({ market, side, size: closeSize, previewId });
+    executeClose({ market, side, size: closeSize, previewId, slippage: closeSlippage });
   };
 
   // ── PRIORITY 1: Loading states always win ──
@@ -3000,7 +3259,7 @@ function ClosePositionCard({ data, isDismissed: propDismissed }: { data: Record<
           </div>
           <div className="grid grid-cols-3 gap-2 text-xs mb-3">
             <div><span className="text-muted">Close Size</span><div className="font-mono text-foreground">{fmtSize(closeSize)}</div></div>
-            <div><span className="text-muted">Price</span><div className="font-mono text-foreground">{formatUsd(data.currentPrice as number)}</div></div>
+            <div><span className="text-muted">Price</span><div className="font-mono text-foreground">{fmtPrice(currentPrice)}</div></div>
             <div><span className="text-muted">Est. PnL</span><div className={`font-mono ${pnlColor}`}>{formatUsd(pnl)}</div></div>
           </div>
           <div className="flex items-center gap-1.5 mb-2">
@@ -3086,15 +3345,18 @@ function ClosePositionCard({ data, isDismissed: propDismissed }: { data: Record<
           <span className="text-sm font-semibold text-foreground">{market}</span>
           <span className="text-xs text-muted">{side}</span>
         </div>
-        <button
-          onClick={() => setManualDismiss(true)}
-          className="rounded-md p-1 text-muted/50 hover:text-muted hover:bg-white/5 transition-colors"
-          aria-label="Dismiss"
-        >
-          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
+        <div className="mr-5">
+          <button
+            onClick={(e) => { e.stopPropagation(); handleDismissClose(); }}
+            className="rounded-md p-1 text-muted/50 hover:text-muted hover:bg-white/5 transition-colors"
+            aria-label="Dismiss"
+            title="Dismiss"
+          >
+            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-2 text-xs mb-3">
@@ -3104,15 +3366,45 @@ function ClosePositionCard({ data, isDismissed: propDismissed }: { data: Record<
         </div>
         <div>
           <span className="text-muted">Current Price</span>
-          <div className="font-mono text-foreground">{formatUsd(data.currentPrice as number)}</div>
+          <div className="font-mono text-foreground">{fmtPrice(currentPrice)}</div>
         </div>
         <div>
           <span className="text-muted">Entry Price</span>
-          <div className="font-mono text-foreground">{formatUsd(data.entryPrice as number)}</div>
+          <div className="font-mono text-foreground">{fmtPrice(entryPrice)}</div>
         </div>
         <div>
           <span className="text-muted">Est. PnL</span>
           <div className={`font-mono ${pnlColor}`}>{formatUsd(pnl)}</div>
+        </div>
+        <div>
+          <span className="text-muted">Fees</span>
+          <div className="font-mono text-foreground">
+            {(data.takerFee != null && data.makerFee != null)
+              ? `${formatUsd(data.takerFee as number)} / ${formatUsd(data.makerFee as number)}`
+              : formatUsd(data.estimatedFee as number)}
+          </div>
+          {(data.takerRate != null && data.makerRate != null) && (
+            <div className="text-[10px] text-muted/60 font-mono">taker / maker</div>
+          )}
+        </div>
+      </div>
+
+      <div className="mb-3">
+        <div className="text-[10px] text-muted mb-1">Max Slippage</div>
+        <div className="flex gap-1">
+          {CLOSE_SLIPPAGE_STEPS.map((s, i) => (
+            <button
+              key={s}
+              onClick={() => setCloseSlippageIdx(i)}
+              className={`flex-1 rounded-md py-1 text-[10px] font-mono transition-colors ${
+                closeSlippageIdx === i
+                  ? "bg-orange-500/20 text-orange-400 border border-orange-500/40"
+                  : "bg-white/5 text-muted border border-transparent hover:bg-white/10"
+              }`}
+            >
+              {(s * 100).toFixed(1)}%
+            </button>
+          ))}
         </div>
       </div>
 

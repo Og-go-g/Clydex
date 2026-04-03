@@ -1,0 +1,160 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma-history"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+//  TradeHistory — filled trades from 01 Exchange
+// ---------------------------------------------------------------------------
+model TradeHistory {
+  id          String   @id @default(cuid())
+  tradeId     String   @unique              // 01 Exchange trade ID (dedup key)
+  accountId   Int                            // N1 account ID
+  walletAddr  String                         // Solana wallet address (for lookup)
+  marketId    Int
+  symbol      String                         // "BTC-PERP"
+  side        String                         // "Long" | "Short" (takerSide)
+  size        Decimal  @db.Decimal(30, 18)   // baseSize
+  price       Decimal  @db.Decimal(30, 18)   // fill price
+  role        String                         // "taker" | "maker"
+  fee         Decimal  @db.Decimal(30, 18)   // fee paid
+  time        DateTime                       // trade timestamp from API
+
+  @@index([walletAddr, time])
+  @@index([walletAddr, marketId])
+  @@map("trade_history")
+}
+
+// ---------------------------------------------------------------------------
+//  PnlHistory — realized PnL per position close
+// ---------------------------------------------------------------------------
+model PnlHistory {
+  id                 String   @id @default(cuid())
+  accountId          Int
+  walletAddr         String
+  marketId           Int
+  symbol             String
+  tradingPnl         Decimal  @db.Decimal(30, 18)
+  settledFundingPnl  Decimal  @db.Decimal(30, 18)
+  positionSize       Decimal  @db.Decimal(30, 18)
+  time               DateTime
+
+  @@unique([walletAddr, marketId, time])
+  @@index([walletAddr, time])
+  @@map("pnl_history")
+}
+
+// ---------------------------------------------------------------------------
+//  FundingHistory — funding payments
+// ---------------------------------------------------------------------------
+model FundingHistory {
+  id            String   @id @default(cuid())
+  accountId     Int
+  walletAddr    String
+  marketId      Int
+  symbol        String
+  fundingPnl    Decimal  @db.Decimal(30, 18)
+  positionSize  Decimal  @db.Decimal(30, 18)
+  time          DateTime
+
+  @@unique([walletAddr, marketId, time])
+  @@index([walletAddr, time])
+  @@map("funding_history")
+}
+
+// ---------------------------------------------------------------------------
+//  DepositHistory — USDC deposits
+// ---------------------------------------------------------------------------
+model DepositHistory {
+  id         String   @id @default(cuid())
+  accountId  Int
+  walletAddr String
+  amount     Decimal  @db.Decimal(30, 18)
+  balance    Decimal  @db.Decimal(30, 18)   // balance after deposit
+  tokenId    Int
+  time       DateTime
+
+  @@unique([walletAddr, time, amount])
+  @@index([walletAddr, time])
+  @@map("deposit_history")
+}
+
+// ---------------------------------------------------------------------------
+//  WithdrawalHistory — USDC withdrawals
+// ---------------------------------------------------------------------------
+model WithdrawalHistory {
+  id          String   @id @default(cuid())
+  accountId   Int
+  walletAddr  String
+  amount      Decimal  @db.Decimal(30, 18)
+  balance     Decimal  @db.Decimal(30, 18)  // balance after withdrawal
+  fee         Decimal  @db.Decimal(30, 18)
+  destPubkey  String                         // destination wallet
+  time        DateTime
+
+  @@unique([walletAddr, time, amount])
+  @@index([walletAddr, time])
+  @@map("withdrawal_history")
+}
+
+// ---------------------------------------------------------------------------
+//  LiquidationHistory — liquidation events
+// ---------------------------------------------------------------------------
+model LiquidationHistory {
+  id              String   @id @default(cuid())
+  accountId       Int
+  walletAddr      String
+  fee             Decimal  @db.Decimal(30, 18)
+  liquidationKind String                     // "partial" | "full"
+  margins         Json?                      // raw margins snapshot
+  time            DateTime
+
+  @@unique([walletAddr, time, fee])
+  @@index([walletAddr, time])
+  @@map("liquidation_history")
+}
+
+// ---------------------------------------------------------------------------
+//  OrderHistory — order placement/fill/cancel history
+// ---------------------------------------------------------------------------
+model OrderHistory {
+  id                  String   @id @default(cuid())
+  orderId             String   @unique              // 01 Exchange order ID (dedup key)
+  accountId           Int
+  walletAddr          String
+  marketId            Int
+  symbol              String                         // "SOLUSD"
+  side                String                         // "Long" | "Short"
+  placedSize          Decimal  @db.Decimal(30, 18)
+  filledSize          Decimal? @db.Decimal(30, 18)   // null if unfilled
+  placedPrice         Decimal  @db.Decimal(30, 18)
+  orderValue          Decimal  @db.Decimal(30, 18)   // placedPrice * placedSize
+  fillMode            String                         // "PostOnly" | "ImmediateOrCancel" | "Limit" etc.
+  fillStatus          String                         // "Filled" | "Unfilled"
+  status              String                         // "Filled" | "Cancelled" | "Expired" etc.
+  isReduceOnly        Boolean  @default(false)
+  addedAt             DateTime                       // order placement time
+  updatedAt           DateTime                       // last status update time
+
+  @@index([walletAddr, addedAt])
+  @@index([walletAddr, marketId])
+  @@map("order_history")
+}
+
+// ---------------------------------------------------------------------------
+//  SyncCursor — tracks last synced position per wallet per history type
+// ---------------------------------------------------------------------------
+model SyncCursor {
+  id         String   @id @default(cuid())
+  walletAddr String
+  type       String                          // "trades" | "orders" | "pnl" | "funding" | "deposits" | "withdrawals" | "liquidations"
+  cursor     String?                         // API cursor or last timestamp
+  lastSyncAt DateTime @default(now())
+
+  @@unique([walletAddr, type])
+  @@map("sync_cursors")
+}

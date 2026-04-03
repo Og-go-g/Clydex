@@ -1,11 +1,13 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useWallet } from "@/lib/wallet/context";
 import { useAuth } from "@/lib/auth/context";
 import { DepositWithdrawModal } from "@/components/collateral/DepositWithdrawModal";
+import { HistoryModal } from "@/components/history/HistoryModal";
 import { useRealtimePrices } from "@/hooks/useRealtimePrices";
 import { usePageActive } from "@/hooks/usePageActive";
+import { useOrderActions } from "@/hooks/useOrderActions";
 
 // Minimum position size threshold — positions below this are treated as dust/zero
 const MIN_POS_SIZE = 1e-12;
@@ -131,6 +133,7 @@ export default function PortfolioPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [collateralModalOpen, setCollateralModalOpen] = useState(false);
+  const [historyModalOpen, setHistoryModalOpen] = useState(false);
 
   const refreshingRef = useRef(false);
 
@@ -158,6 +161,12 @@ export default function PortfolioPage() {
   const prices2 = useRealtimePrices(wsChunk2);
   const prices3 = useRealtimePrices(wsChunk3);
   const realtimePrices = useMemo(() => ({ ...prices1, ...prices2, ...prices3 }), [prices1, prices2, prices3]);
+
+  // Order actions: cancel, edit, cancel all
+  const { cancelOrder: doCancelOrder, cancelAllOrders, editOrder: doEditOrder, closePosition: doClosePosition, cancellingIds, closingSymbols, cancelAllProgress, lastError: orderActionError, clearError: clearOrderError } = useOrderActions();
+  const [editingOrderId, setEditingOrderId] = useState<number | null>(null);
+  const [editPrice, setEditPrice] = useState("");
+  const [editSize, setEditSize] = useState("");
 
   // Silent refresh — no spinner, skips if previous request still in flight
   const refreshAccount = useCallback(async () => {
@@ -458,18 +467,34 @@ export default function PortfolioPage() {
       <div className="mx-auto max-w-5xl">
         <div className="mb-6 flex items-center justify-between">
           <h1 className="text-2xl font-bold text-foreground">Portfolio</h1>
-          <button
-            onClick={() => setCollateralModalOpen(true)}
-            className="rounded-xl border border-emerald-500/30 bg-emerald-500/15 px-4 py-2 text-sm font-medium text-emerald-400 transition-colors hover:bg-emerald-500/25"
-          >
-            Deposit / Withdraw
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setHistoryModalOpen(true)}
+              className="flex items-center gap-2 rounded-xl border border-border bg-card px-4 py-2 text-sm font-medium text-foreground transition-colors hover:border-emerald-500/30 hover:bg-emerald-500/5"
+            >
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              History
+            </button>
+            <button
+              onClick={() => setCollateralModalOpen(true)}
+              className="rounded-xl border border-emerald-500/30 bg-emerald-500/15 px-4 py-2 text-sm font-medium text-emerald-400 transition-colors hover:bg-emerald-500/25"
+            >
+              Deposit / Withdraw
+            </button>
+          </div>
         </div>
 
         <DepositWithdrawModal
           isOpen={collateralModalOpen}
           onClose={() => setCollateralModalOpen(false)}
           onSuccess={fetchAccount}
+        />
+
+        <HistoryModal
+          isOpen={historyModalOpen}
+          onClose={() => setHistoryModalOpen(false)}
         />
 
         {/* Account Summary */}
@@ -507,8 +532,10 @@ export default function PortfolioPage() {
 
         {/* Positions */}
         <div className="mb-6">
-          <h2 className="mb-3 text-lg font-semibold text-foreground">
-            Positions{positions.length > 0 && <span className="ml-2 inline-flex h-5 w-5 items-center justify-center rounded-full bg-green-500/20 text-xs text-green-400">{positions.length}</span>}
+          <h2 className="mb-3 text-lg font-semibold text-foreground flex items-center gap-2">
+            {positions.length > 0 && <span className="h-2 w-2 animate-pulse rounded-full bg-green-400" />}
+            Positions
+            {positions.length > 0 && <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-green-500/20 text-xs text-green-400">{positions.length}</span>}
           </h2>
           {positions.length === 0 ? (
             <div className="rounded-xl border border-border bg-card p-6 text-center text-sm text-muted">
@@ -529,6 +556,7 @@ export default function PortfolioPage() {
                     <th className="whitespace-nowrap px-3 py-3 text-right">TP / SL</th>
                     <th className="whitespace-nowrap px-3 py-3 text-right">Funding</th>
                     <th className="whitespace-nowrap px-3 py-3 text-right">Used Margin</th>
+                    <th className="whitespace-nowrap px-3 py-3 text-right"></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -579,6 +607,32 @@ export default function PortfolioPage() {
                       <td className="whitespace-nowrap px-3 py-3 text-right font-mono text-foreground">
                         {formatUsd(d.posUsedMargin)}
                       </td>
+                      <td className="whitespace-nowrap px-3 py-3 text-right">
+                        {(() => {
+                          const closeKey = `${d.p.symbol.replace("/", "")}:${d.isLong ? "Long" : "Short"}`;
+                          const isClosing = closingSymbols.has(closeKey);
+                          return isClosing ? (
+                            <svg className="ml-auto h-4 w-4 animate-spin text-muted" viewBox="0 0 24 24" fill="none">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                            </svg>
+                          ) : (
+                            <button
+                              onClick={async () => {
+                                const ok = await doClosePosition({
+                                  symbol: d.p.symbol.replace("/", ""),
+                                  side: d.isLong ? "Long" : "Short",
+                                  size: d.baseSize,
+                                });
+                                if (ok) refreshAccount();
+                              }}
+                              className="rounded-md px-2 py-1 text-[10px] font-medium text-red-400 hover:bg-red-500/10 transition-colors"
+                            >
+                              Close
+                            </button>
+                          );
+                        })()}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -587,112 +641,168 @@ export default function PortfolioPage() {
           )}
         </div>
 
-        {/* Open Orders — live tracking */}
+        {/* Open Orders — table like Positions */}
         {openOrders.length > 0 && (
           <div className="mb-6">
-            <h2 className="mb-3 text-lg font-semibold text-foreground flex items-center gap-2">
-              <span className="h-2 w-2 animate-pulse rounded-full bg-yellow-400" />
-              Open Orders
-              <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500/20 text-xs text-emerald-400">{openOrders.length}</span>
-            </h2>
-            <div className="space-y-2">
-              {openOrders.map((o) => {
-                const isBuy = o.side === "bid";
-                const sym = o.symbol.replace("/", "");
-                const baseAsset = sym.replace(/USD$/, "");
-                const livePrice = realtimePrices[sym] ?? null;
-                const distance = livePrice && o.price > 0 ? ((livePrice - o.price) / o.price) * 100 : null;
-                const isClosePrice = distance !== null && Math.abs(distance) < 1;
-                const isVeryClosePrice = distance !== null && Math.abs(distance) < 0.3;
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-foreground flex items-center gap-2">
+                <span className="h-2 w-2 animate-pulse rounded-full bg-yellow-400" />
+                Open Orders
+                <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500/20 text-xs text-emerald-400">{openOrders.length}</span>
+              </h2>
+              {openOrders.length > 1 && (
+                <button
+                  onClick={() => cancelAllOrders(openOrders.map(o => o.orderId))}
+                  disabled={!!cancelAllProgress}
+                  className="rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+                >
+                  {cancelAllProgress ? `Cancelling ${cancelAllProgress.current}/${cancelAllProgress.total}...` : "Cancel All"}
+                </button>
+              )}
+            </div>
+            <div className="overflow-x-auto rounded-xl border border-border">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-border bg-card text-xs text-muted">
+                    <th className="whitespace-nowrap px-3 py-2 text-left font-medium">Market</th>
+                    <th className="whitespace-nowrap px-3 py-2 text-left font-medium">Side</th>
+                    <th className="whitespace-nowrap px-3 py-2 text-right font-medium">Order Value</th>
+                    <th className="whitespace-nowrap px-3 py-2 text-right font-medium">Size</th>
+                    <th className="whitespace-nowrap px-3 py-2 text-right font-medium">Limit Price</th>
+                    <th className="whitespace-nowrap px-3 py-2 text-right font-medium">Market Price</th>
+                    <th className="whitespace-nowrap px-3 py-2 text-right font-medium">Distance</th>
+                    <th className="whitespace-nowrap px-3 py-2 text-right font-medium">Filled</th>
+                    <th className="whitespace-nowrap px-3 py-2 text-right font-medium">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {openOrders.map((o) => {
+                    const isBuy = o.side === "bid";
+                    const sym = o.symbol.replace("/", "");
+                    const baseAsset = sym.replace(/USD$/, "");
+                    const livePrice = realtimePrices[sym] ?? null;
+                    const distance = livePrice && o.price > 0 ? ((livePrice - o.price) / o.price) * 100 : null;
+                    const isClosePrice = distance !== null && Math.abs(distance) < 1;
+                    const isVeryClosePrice = distance !== null && Math.abs(distance) < 0.3;
 
-                // Fill progress from baseline tracking
-                const baseline = orderBaselinesRef.current.get(o.orderId) ?? o.size;
-                const filledAmount = Math.max(0, baseline - o.size);
-                const fillPct = baseline > 0 ? (filledAmount / baseline) * 100 : 0;
+                    const baseline = orderBaselinesRef.current.get(o.orderId) ?? o.size;
+                    const filledAmount = Math.max(0, baseline - o.size);
+                    const fillPct = baseline > 0 ? (filledAmount / baseline) * 100 : 0;
 
-                // Elapsed time: prefer API placedAt, fallback to first-seen time in localStorage
-                const orderTimeKey = `clydex_order_time:${o.symbol}:${o.side}:${o.price}:${o.size}`;
-                let placedMs: number | null = null;
-                if (o.placedAt) {
-                  const t = new Date(o.placedAt).getTime();
-                  if (!isNaN(t) && t > 0) {
-                    placedMs = t;
-                    try { localStorage.setItem(orderTimeKey, String(t)); } catch { /* quota */ }
-                  }
-                }
-                if (!placedMs) {
-                  try {
-                    const stored = localStorage.getItem(orderTimeKey);
-                    if (stored) {
-                      const t = Number(stored);
-                      if (t > 0 && isFinite(t)) placedMs = t;
-                    }
-                  } catch { /* ignore */ }
-                }
-                if (!placedMs) {
-                  placedMs = Date.now();
-                  try { localStorage.setItem(orderTimeKey, String(placedMs)); } catch { /* quota */ }
-                }
-
-                return (
-                  <div key={o.orderId} className="overflow-hidden rounded-xl border border-border bg-card/50">
-                    {/* Row 1: Market, Side, Size, Elapsed */}
-                    <div className="flex items-center justify-between px-4 py-2.5">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-semibold text-foreground">{baseAsset}/USD</span>
-                        <span className={`rounded-md px-1.5 py-0.5 text-[10px] font-bold ${isBuy ? "bg-green-500/10 text-green-400" : "bg-red-500/10 text-red-400"}`}>
-                          {isBuy ? "Buy" : "Sell"}
-                        </span>
-                        <span className="text-xs font-mono text-foreground">{formatSize(o.size, 4)}</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <ElapsedTime since={placedMs} />
-                        <span className="text-xs font-mono text-muted">{formatUsd(o.size * o.price)}</span>
-                      </div>
-                    </div>
-
-                    {/* Row 2: Prices + Distance */}
-                    <div className="grid grid-cols-3 gap-2 px-4 pb-2 text-xs">
-                      <div>
-                        <span className="text-muted">Limit</span>
-                        <div className="font-mono text-foreground">{formatPrice(o.price)}</div>
-                      </div>
-                      <div>
-                        <span className="text-muted">Market</span>
-                        <div className={`font-mono ${isVeryClosePrice ? "text-yellow-400 font-semibold" : "text-foreground"}`}>
+                    return (
+                      <React.Fragment key={o.orderId}>
+                      <tr className="border-b border-border/50 last:border-0">
+                        <td className="whitespace-nowrap px-3 py-3 font-semibold text-foreground">{baseAsset}/USD</td>
+                        <td className="whitespace-nowrap px-3 py-3">
+                          <span className={`rounded-md px-1.5 py-0.5 text-[10px] font-bold ${isBuy ? "bg-green-500/10 text-green-400" : "bg-red-500/10 text-red-400"}`}>
+                            {isBuy ? "Buy" : "Sell"}
+                          </span>
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-3 text-right font-mono text-foreground">{formatUsd(o.size * o.price)}</td>
+                        <td className="whitespace-nowrap px-3 py-3 text-right font-mono text-muted">{formatSize(o.size, 4)}</td>
+                        <td className="whitespace-nowrap px-3 py-3 text-right font-mono text-foreground">{formatPrice(o.price)}</td>
+                        <td className={`whitespace-nowrap px-3 py-3 text-right font-mono ${isVeryClosePrice ? "text-yellow-400 font-semibold" : "text-foreground"}`}>
                           {livePrice ? formatPrice(livePrice) : "—"}
-                        </div>
-                      </div>
-                      <div>
-                        <span className="text-muted">Distance</span>
-                        <div className={`font-mono ${isVeryClosePrice ? "text-yellow-400 font-semibold" : isClosePrice ? "text-yellow-400" : "text-muted"}`}>
+                        </td>
+                        <td className={`whitespace-nowrap px-3 py-3 text-right font-mono ${isVeryClosePrice ? "text-yellow-400 font-semibold" : isClosePrice ? "text-yellow-400" : "text-muted"}`}>
                           {distance !== null ? `${distance >= 0 ? "+" : ""}${distance.toFixed(2)}%` : "—"}
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Row 3: Fill progress */}
-                    <div className="flex items-center justify-between px-4 pb-2.5">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-[10px] text-muted">Filled:</span>
-                        {fillPct > 0 ? (
-                          <div className="flex items-center gap-1.5">
-                            <div className="w-16 h-1.5 rounded-full bg-white/10 overflow-hidden">
-                              <div className="h-full rounded-full bg-green-400 transition-all duration-700" style={{ width: `${fillPct}%` }} />
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-3 text-right font-mono text-muted">
+                          {fillPct > 0 ? (
+                            <span className="text-green-400">{fillPct.toFixed(0)}%</span>
+                          ) : "0%"}
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-3 text-right">
+                          {cancellingIds.has(o.orderId) ? (
+                            <svg className="ml-auto h-4 w-4 animate-spin text-muted" viewBox="0 0 24 24" fill="none">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                            </svg>
+                          ) : (
+                            <div className="flex items-center justify-end gap-1.5">
+                              <button
+                                onClick={() => doCancelOrder(o.orderId).then(ok => { if (ok) refreshAccount(); })}
+                                className="rounded-md px-2 py-1 text-[10px] font-medium text-red-400 hover:bg-red-500/10 transition-colors"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setEditingOrderId(o.orderId);
+                                  setEditPrice(String(o.price));
+                                  setEditSize(String(o.size));
+                                }}
+                                className="rounded-md px-2 py-1 text-[10px] font-medium text-muted hover:bg-white/5 hover:text-foreground transition-colors"
+                              >
+                                Edit
+                              </button>
                             </div>
-                            <span className="text-[10px] font-mono text-green-400">{fillPct.toFixed(0)}%</span>
-                          </div>
-                        ) : (
-                          <span className="text-[10px] font-mono text-muted">0%</span>
-                        )}
-                      </div>
-                      <span className={`text-[10px] ${isVeryClosePrice ? "text-yellow-400" : isClosePrice ? "text-yellow-400/70" : "text-muted"}`}>
-                        {isVeryClosePrice ? "Price very close" : isClosePrice ? "Price approaching" : "Waiting for price"}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
+                          )}
+                        </td>
+                      </tr>
+                      {editingOrderId === o.orderId && (
+                        <tr className="border-b border-border/50 bg-card/30">
+                          <td colSpan={9} className="px-3 py-3">
+                            <div className="flex items-center gap-3">
+                              <div>
+                                <label className="text-[10px] text-muted block mb-0.5">Price</label>
+                                <input
+                                  type="number"
+                                  step="any"
+                                  value={editPrice}
+                                  onChange={e => setEditPrice(e.target.value)}
+                                  className="w-28 rounded-md border border-border bg-background px-2 py-1 text-xs font-mono text-foreground outline-none focus:border-accent"
+                                />
+                              </div>
+                              <div>
+                                <label className="text-[10px] text-muted block mb-0.5">Size</label>
+                                <input
+                                  type="number"
+                                  step="any"
+                                  value={editSize}
+                                  onChange={e => setEditSize(e.target.value)}
+                                  className="w-28 rounded-md border border-border bg-background px-2 py-1 text-xs font-mono text-foreground outline-none focus:border-accent"
+                                />
+                              </div>
+                              <div className="flex items-end gap-1.5 pb-0.5">
+                                <button
+                                  onClick={async () => {
+                                    const newPrice = parseFloat(editPrice);
+                                    const newSize = parseFloat(editSize);
+                                    if (!newPrice || !newSize || newPrice <= 0 || newSize <= 0) return;
+                                    const ok = await doEditOrder({
+                                      oldOrderId: o.orderId,
+                                      symbol: sym,
+                                      side: isBuy ? "Long" : "Short",
+                                      size: newSize,
+                                      price: newPrice,
+                                      leverage: 1,
+                                    });
+                                    if (ok) { setEditingOrderId(null); refreshAccount(); }
+                                  }}
+                                  className="rounded-md bg-accent/20 px-3 py-1 text-[10px] font-medium text-accent hover:bg-accent/30 transition-colors"
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  onClick={() => setEditingOrderId(null)}
+                                  className="rounded-md px-3 py-1 text-[10px] font-medium text-muted hover:bg-white/5 transition-colors"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                            {orderActionError && (
+                              <div className="mt-1.5 text-[10px] text-red-400">{orderActionError}</div>
+                            )}
+                          </td>
+                        </tr>
+                      )}
+                      </React.Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           </div>
         )}

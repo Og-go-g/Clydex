@@ -5,6 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "prisma generate && next build",
+    "db:init:history": "psql $HISTORY_DATABASE_URL -f sql/001_timescale_schema.sql",
+    "sync:history": "tsx scripts/sync-all-history.ts",
     "start": "next start",
     "test": "vitest run",
     "test:watch": "vitest"
@@ -29,6 +31,7 @@
     "iron-session": "^8.0.4",
     "lightweight-charts": "^5.1.0",
     "next": "^16.1.6",
+    "pg": "^8.20.0",
     "prisma": "^7.4.2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
@@ -37,6 +40,7 @@
   },
   "devDependencies": {
     "@types/node": "^22",
+    "@types/pg": "^8.20.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@vitejs/plugin-react": "^6.0.1",
@@ -44,6 +48,7 @@
     "dotenv": "^17.3.1",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.19",
+    "tsx": "^4.21.0",
     "typescript": "^5",
     "vitest": "^4.1.0"
   }

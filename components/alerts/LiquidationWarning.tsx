@@ -43,6 +43,8 @@ export function LiquidationWarning() {
   const [emergencyDismissed, setEmergencyDismissed] = useState(false);
   // Track which position set was dismissed — only re-show if positions change
   const dismissedForRef = useRef<string | null>(null);
+  // Fingerprint of current positions for dismiss tracking
+  const currentFingerprintRef = useRef<string | null>(null);
 
   // Poll account margins every 15s when authenticated
   useEffect(() => {
@@ -112,9 +114,6 @@ export function LiquidationWarning() {
     const interval = setInterval(checkMargins, 15_000);
     return () => clearInterval(interval);
   }, [isAuthenticated]);
-
-  // Fingerprint of current positions for dismiss tracking
-  const currentFingerprintRef = useRef<string | null>(null);
 
   const handleDismiss = useCallback(() => {
     setDismissed(true);

@@ -10,6 +10,29 @@ type ExecStatus = "idle" | "signing" | "submitting" | "verifying" | "confirmed" 
 
 export type PositionData = Record<string, unknown> | null;
 
+/** Shape of position/order objects from /api/account */
+interface AccountPosition {
+  symbol?: string;
+  marketSymbol?: string;
+  baseAsset?: string;
+  markPrice?: number;
+  liqPrice?: number;
+  usedMargin?: number;
+  maxLeverage?: number;
+  perp?: {
+    baseSize?: number;
+    isLong?: boolean;
+    price?: number;
+    sizePricePnl?: number;
+    fundingPnl?: number;
+  };
+}
+
+interface AccountOrder {
+  symbol?: string;
+  marketSymbol?: string;
+}
+
 interface OrderExecState {
   status: ExecStatus;
   error: string | null;
@@ -25,6 +48,7 @@ interface OrderData {
   orderType?: string;
   price?: number;
   previewId?: string;
+  slippage?: number;
 }
 
 // ─── Consumed preview IDs (prevents double-execution across re-renders) ──
@@ -192,33 +216,29 @@ async function verifyExecution(
       const sym = marketSymbol.replace(/\//, "").toUpperCase();
 
       if (kind === "position") {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const found = positions.some((p: any) => {
+        const found = (positions as AccountPosition[]).some((p) => {
           const pSym = (p.symbol ?? "").toUpperCase();
-          const hasSize = Math.abs(p.perp?.baseSize ?? p.baseSize ?? 0) > 1e-12;
+          const hasSize = Math.abs(p.perp?.baseSize ?? 0) > 1e-12;
           return (pSym === sym || pSym.startsWith(sym.replace(/USD$/, ""))) && hasSize;
         });
         if (found) return true;
       } else if (kind === "order") {
         // Limit order: check if open order exists OR if it filled instantly into a position
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const orderFound = orders.some((o: any) =>
+        const orderFound = (orders as AccountOrder[]).some((o) =>
           o.symbol === sym || o.marketSymbol === sym
         );
         if (orderFound) return true;
         // Instant fill: order went straight to position (price was very close to market)
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const posFound = positions.some((p: any) => {
+        const posFound = (positions as AccountPosition[]).some((p) => {
           const pSym = (p.symbol ?? "").toUpperCase();
-          const hasSize = Math.abs(p.perp?.baseSize ?? p.baseSize ?? 0) > 1e-12;
+          const hasSize = Math.abs(p.perp?.baseSize ?? 0) > 1e-12;
           return (pSym === sym || pSym.startsWith(sym.replace(/USD$/, ""))) && hasSize;
         });
         if (posFound) return true;
       } else if (kind === "close") {
         // Close: check if position for this market is gone or reduced
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const found = positions.some((p: any) =>
-          (p.symbol === sym || p.marketSymbol === sym) && Math.abs(p.perp?.baseSize ?? p.baseSize ?? 0) > 1e-12
+        const found = (positions as AccountPosition[]).some((p) =>
+          (p.symbol === sym || p.marketSymbol === sym) && Math.abs(p.perp?.baseSize ?? 0) > 1e-12
         );
         if (!found) return true; // position gone = close successful
       }
@@ -238,10 +258,9 @@ async function fetchConfirmedPosition(marketSymbol: string): Promise<PositionDat
     if (!res.ok) return null;
     const data = await res.json();
     const sym = marketSymbol.replace(/\//, "").toUpperCase();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const pos = (data.positions ?? []).find((p: any) => {
+    const pos = ((data.positions ?? []) as AccountPosition[]).find((p) => {
       const pSym = (p.symbol ?? "").toUpperCase();
-      return (pSym === sym || pSym.startsWith(sym.replace(/USD$/, ""))) && Math.abs(p.perp?.baseSize ?? p.baseSize ?? 0) > 1e-12;
+      return (pSym === sym || pSym.startsWith(sym.replace(/USD$/, ""))) && Math.abs(p.perp?.baseSize ?? 0) > 1e-12;
     });
     if (!pos) return null;
     return {
@@ -370,6 +389,7 @@ export function useOrderExecution() {
           leverage: orderData.leverage,
           price: orderData.price,
           orderType: (orderData.orderType as "market" | "limit") ?? "market",
+          slippage: orderData.slippage,
         };
 
         if (orderData.previewId) {
@@ -395,6 +415,7 @@ export function useOrderExecution() {
               leverage: typeof p.leverage === "number" ? p.leverage : validatedParams.leverage,
               price: typeof p.price === "number" ? p.price : validatedParams.price,
               orderType: p.orderType ?? validatedParams.orderType,
+              slippage: validatedParams.slippage,
             };
           }
         }
@@ -448,7 +469,7 @@ export function useOrderExecution() {
   );
 
   const executeClose = useCallback(
-    async (data: { market: string; side: "Long" | "Short"; size: number; previewId?: string }) => {
+    async (data: { market: string; side: "Long" | "Short"; size: number; previewId?: string; slippage?: number }) => {
       if (executingRef.current) return;
       // Prevent double-close of same preview
       if (data.previewId && consumedPreviews.has(data.previewId)) {
@@ -498,6 +519,7 @@ export function useOrderExecution() {
             symbol: data.market,
             side: data.side,
             size: data.size,
+            slippage: data.slippage,
           }),
           "closePosition"
         );
@@ -627,10 +649,20 @@ function handleError(
     rawMsg.includes("Transaction cancelled") ||
     rawMsg.includes("User denied");
 
+  const isSlippageError =
+    rawMsg.includes("slippage") ||
+    rawMsg.includes("Slippage") ||
+    rawMsg.includes("price exceeds") ||
+    rawMsg.includes("price limit") ||
+    rawMsg.includes("would exceed") ||
+    rawMsg.includes("fill price");
+
   console.error(`[OrderExecution] ${action} error:`, rawMsg, err);
   let safeMsg: string;
   if (isUserReject) {
     safeMsg = "Transaction cancelled by user";
+  } else if (isSlippageError) {
+    safeMsg = "Order failed due to slippage. Try again with higher slippage tolerance.";
   } else if (rawMsg.includes("insufficient") || rawMsg.includes("Insufficient")) {
     safeMsg = "Insufficient margin for this order";
   } else if (rawMsg.includes("timeout") || rawMsg.includes("Timeout")) {

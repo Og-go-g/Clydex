@@ -119,3 +119,13 @@ export async function getMarketFee(marketId: number, feeKind: "maker" | "taker",
   const nord = await getNord();
   return nord.getMarketFee({ marketId, feeKind, accountId });
 }
+
+/** Get both taker and maker fees for a market+account. Returns rates as decimals (e.g. 0.0005 = 0.05%). */
+export async function getMarketFees(marketId: number, accountId: number): Promise<{ takerRate: number; makerRate: number }> {
+  const nord = await getNord();
+  const [takerRate, makerRate] = await Promise.all([
+    nord.getMarketFee({ marketId, feeKind: "taker", accountId }),
+    nord.getMarketFee({ marketId, feeKind: "maker", accountId }),
+  ]);
+  return { takerRate, makerRate };
+}

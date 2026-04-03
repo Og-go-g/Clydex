@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import * as Sentry from "@sentry/nextjs";
 import { getAuthAddress } from "@/lib/auth/session";
-import { getUser, getAccount, getAccountOrders, getAccountTriggers, getMarketsInfo, getMarketStats } from "@/lib/n1/client";
+import { getAccount, getAccountOrders, getAccountTriggers, getMarketsInfo, getMarketStats } from "@/lib/n1/client";
+import { getCachedAccountId } from "@/lib/n1/account-cache";
 
 // ─── Server-side caches ─────────────────────────────────────────
 
@@ -19,39 +20,6 @@ async function getCachedMarketsInfo() {
   cachedMarketsInfo = await getMarketsInfo();
   marketsCacheTime = now;
   return cachedMarketsInfo;
-}
-
-// User → accountId cache (refreshes every 5 min — account IDs don't change)
-const userCache = new Map<string, { accountId: number; time: number }>();
-const USER_CACHE_TTL = 300_000;
-const MAX_USER_CACHE_SIZE = 1_000;
-
-async function getCachedAccountId(address: string): Promise<number | null> {
-  const now = Date.now();
-  const cached = userCache.get(address);
-  if (cached && now - cached.time < USER_CACHE_TTL) {
-    return cached.accountId;
-  }
-  const user = await getUser(address);
-  if (!user || !user.accountIds?.length) return null;
-  const accountId = user.accountIds[0];
-
-  // Evict oldest entries if cache is at capacity
-  while (userCache.size >= MAX_USER_CACHE_SIZE) {
-    let oldestKey: string | null = null;
-    let oldestTime = Infinity;
-    for (const [key, entry] of userCache) {
-      if (entry.time < oldestTime) {
-        oldestTime = entry.time;
-        oldestKey = key;
-      }
-    }
-    if (oldestKey) userCache.delete(oldestKey);
-    else break;
-  }
-
-  userCache.set(address, { accountId, time: now });
-  return accountId;
 }
 
 /** GET /api/account — get authenticated user's account info */

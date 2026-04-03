@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useState, useCallback, useRef, type ReactNode } from "react";
+import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from "react";
 import { getMessages } from "@/lib/chat/store";
 
 interface ChartPanelState {
@@ -133,12 +133,10 @@ export function ChartPanelProvider({ children }: { children: ReactNode }) {
     persistTimer.current = setTimeout(doPersist, 100);
   }, [doPersist]);
 
-  // Persist whenever state changes
-  const prevState = useRef({ isOpen, marketId, baseAsset });
-  if (prevState.current.isOpen !== isOpen || prevState.current.marketId !== marketId || prevState.current.baseAsset !== baseAsset) {
-    prevState.current = { isOpen, marketId, baseAsset };
+  // Persist whenever state changes (must be in useEffect, not during render)
+  useEffect(() => {
     schedPersist();
-  }
+  }, [isOpen, marketId, baseAsset, schedPersist]);
 
   const toggle = useCallback(() => setIsOpen((v) => !v), []);
   const close = useCallback(() => setIsOpen(false), []);

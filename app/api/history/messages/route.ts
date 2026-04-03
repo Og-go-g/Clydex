@@ -97,12 +97,12 @@ export async function POST(request: Request) {
               if (DANGEROUS_URI.test(val.trim())) { delete obj[key]; continue; }
             }
             // Strip HTML tags from all string values to prevent stored XSS
-            // Always replace without .test() first — regex `g` flag has stateful lastIndex
-            obj[key] = (val as string).replace(/<\/?[a-z][^>]*>/gi, "");
+            let sanitized = (val as string).replace(/<\/?[a-z][^>]*>/gi, "");
             // Strip event handler patterns (onclick=, onerror=, etc.)
-            if (/\bon\w+\s*=/i.test(val as string)) {
-              obj[key] = (val as string).replace(/\bon\w+\s*=\s*["'][^"']*["']/gi, "");
+            if (/\bon\w+\s*=/i.test(sanitized)) {
+              sanitized = sanitized.replace(/\bon\w+\s*=\s*["'][^"']*["']/gi, "");
             }
+            obj[key] = sanitized;
           }
         }
         const serialized = JSON.stringify(validParts);

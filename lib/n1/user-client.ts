@@ -21,6 +21,8 @@ export interface PlaceOrderParams {
   orderType?: "market" | "limit" | "postOnly";
   reduceOnly?: boolean;
   accountId?: number;
+  /** Slippage tolerance as decimal (0.001 = 0.1%). For market orders, sets worst acceptable fill price. */
+  slippage?: number;
 }
 
 export interface SetTriggerParams {
@@ -111,10 +113,23 @@ export async function placeOrder(user: NordUser, params: PlaceOrderParams) {
   const fillMode = toFillMode(params.orderType ?? "market");
   const isReduceOnly = params.reduceOnly ?? false;
 
-  // For market orders, use quoteSize if no explicit size
   // Price is required for limit orders
   if (fillMode === FillMode.Limit && !params.price) {
     throw new Error("Limit orders require a price");
+  }
+
+  // For market orders with slippage: calculate worst acceptable fill price
+  // This acts as a price ceiling (long) or floor (short) — IOC cancels unfilled remainder
+  let effectivePrice = params.price;
+  if (fillMode === FillMode.ImmediateOrCancel && !params.price && params.slippage) {
+    const { getMarketStats } = await import("./client");
+    const stats = await getMarketStats(market.id);
+    const markPrice = stats.perpStats?.mark_price ?? stats.indexPrice ?? 0;
+    if (markPrice > 0) {
+      effectivePrice = side === Side.Bid
+        ? markPrice * (1 + params.slippage) // Long: max price
+        : markPrice * (1 - params.slippage); // Short: min price
+    }
   }
 
   // Avoid "Precision loss when converting to scaled integer" SDK error.
@@ -133,7 +148,7 @@ export async function placeOrder(user: NordUser, params: PlaceOrderParams) {
     fillMode,
     isReduceOnly,
     size: roundedSize,
-    price: params.price,
+    price: effectivePrice,
     accountId: params.accountId,
   });
 }
@@ -143,6 +158,50 @@ export async function placeOrder(user: NordUser, params: PlaceOrderParams) {
  */
 export async function cancelOrder(user: NordUser, orderId: string | number, accountId?: number) {
   return user.cancelOrder(BigInt(orderId), accountId);
+}
+
+/**
+ * Edit an order atomically: cancel old + place new in a single transaction.
+ * Uses SDK's `atomic()` to ensure the old order is cancelled and new one placed
+ * without a gap where neither exists.
+ */
+export async function editOrder(
+  user: NordUser,
+  params: {
+    oldOrderId: string | number;
+    symbol: string;
+    side: OrderSide;
+    size: number;
+    price: number;
+    leverage: number;
+    accountId?: number;
+  }
+) {
+  const { ensureMarketCache } = await import("./constants");
+  await ensureMarketCache();
+
+  const market = resolveMarket(params.symbol);
+  if (!market) throw new Error(`Unknown market: ${params.symbol}`);
+
+  const leverageError = validateLeverage(market, params.leverage);
+  if (leverageError) throw new Error(leverageError);
+
+  const sdkSide = toSdkSide(params.side);
+  const roundedSize = Math.round(params.size * 10) / 10;
+  if (roundedSize <= 0) throw new Error("Order size too small");
+
+  return user.atomic([
+    { kind: "cancel", orderId: BigInt(params.oldOrderId) },
+    {
+      kind: "place",
+      marketId: market.id,
+      side: sdkSide,
+      fillMode: FillMode.Limit,
+      isReduceOnly: false,
+      size: roundedSize,
+      price: params.price,
+    },
+  ], params.accountId);
 }
 
 /**
@@ -240,7 +299,7 @@ export async function withdrawUsdc(user: NordUser, amount: number) {
  */
 export async function closePosition(
   user: NordUser,
-  params: { symbol: string; side: OrderSide; size: number; accountId?: number }
+  params: { symbol: string; side: OrderSide; size: number; slippage?: number; accountId?: number }
 ) {
   const { ensureMarketCache } = await import("./constants");
   await ensureMarketCache();
@@ -255,12 +314,29 @@ export async function closePosition(
   const closeSide = params.side === "Long" ? Side.Ask : Side.Bid;
   const flooredSize = Math.floor(params.size * 10) / 10;
   const safeSize = flooredSize > 0 ? flooredSize : params.size;
+
+  // Slippage protection for close orders
+  let closePrice: number | undefined;
+  if (params.slippage) {
+    const { getMarketStats } = await import("./client");
+    const stats = await getMarketStats(market.id);
+    const markPrice = stats.perpStats?.mark_price ?? stats.indexPrice ?? 0;
+    if (markPrice > 0) {
+      // Close long = sell (ask) → min acceptable price
+      // Close short = buy (bid) → max acceptable price
+      closePrice = closeSide === Side.Ask
+        ? markPrice * (1 - params.slippage)
+        : markPrice * (1 + params.slippage);
+    }
+  }
+
   return user.placeOrder({
     marketId: market.id,
     side: closeSide,
     fillMode: FillMode.ImmediateOrCancel,
     isReduceOnly: true,
     size: safeSize,
+    price: closePrice,
     accountId: params.accountId,
   });
 }
