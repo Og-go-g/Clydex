@@ -124,8 +124,14 @@ function sym(marketId: number): string {
   return marketSymbols[marketId] ?? `MARKET-${marketId}`;
 }
 
-async function fetchAllPages<T>(baseUrl: string): Promise<T[]> {
-  const all: T[] = [];
+// fetchAllPages removed — using streaming syncGeneric instead to avoid OOM
+
+// ─── Streaming insert helper ─────────────────────────────────────
+
+type R = Record<string, unknown>;
+
+async function syncGeneric(pool: Pool, baseUrl: string, sql: string, paramsFn: (items: R[]) => unknown[]): Promise<number> {
+  let total = 0;
   let cursor: unknown;
   let hasMore = true;
 
@@ -136,195 +142,188 @@ async function fetchAllPages<T>(baseUrl: string): Promise<T[]> {
     const res = await fetchWithRetry(url);
     if (!res || !res.ok) break;
 
-    try {
-      const body = await res.json();
-      const data: T[] = Array.isArray(body) ? body : (body.items ?? body.data ?? body.results ?? []);
-      all.push(...data);
+    let body: Record<string, unknown>;
+    try { body = await res.json(); } catch { break; }
 
-      cursor = body.nextStartInclusive ?? body.cursor ?? body.nextCursor ?? undefined;
-      hasMore = data.length >= PAGE_SIZE && cursor != null;
+    const items: R[] = Array.isArray(body) ? body as R[] : ((body.items ?? body.data ?? []) as R[]);
+    if (items.length === 0) break;
 
-      if (hasMore) {
-        process.stdout.write(`\r    ... fetched ${all.length} records so far                    `);
-        await sleep(DELAY_BETWEEN_PAGES);
-      }
-    } catch {
-      break;
-    }
+    const result = await pool.query(sql, paramsFn(items));
+    total += result.rowCount ?? 0;
+
+    cursor = (body as Record<string, unknown>).nextStartInclusive ?? (body as Record<string, unknown>).cursor;
+    hasMore = items.length >= PAGE_SIZE && cursor != null;
+    if (hasMore) await sleep(DELAY_BETWEEN_PAGES);
   }
-
-  return all;
+  return total;
 }
 
-// ─── Sync Functions (raw SQL, Prisma camelCase columns) ──────────
-
-type R = Record<string, unknown>;
+// ─── Sync Functions (snake_case columns) ─────────────────────────
 
 async function syncTrades(pool: Pool, accountId: number, wallet: string): Promise<number> {
   let total = 0;
   for (const role of ["taker", "maker"] as const) {
     const param = role === "taker" ? "takerId" : "makerId";
-    const trades = await fetchAllPages<R>(`${API_BASE}/trades?${param}=${accountId}`);
-    if (trades.length === 0) continue;
+    let cursor: unknown;
+    let hasMore = true;
 
-    const result = await pool.query(
-      `INSERT INTO trade_history (trade_id, account_id, wallet_addr, market_id, symbol, side, size, price, role, fee, "time")
-       SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::text[], $7::numeric[], $8::numeric[], $9::text[], $10::numeric[], $11::timestamptz[])
-       ON CONFLICT (trade_id, "time") DO NOTHING`,
-      [
-        trades.map((t) => String(t.tradeId)),
-        trades.map(() => accountId),
-        trades.map(() => wallet),
-        trades.map((t) => Number(t.marketId)),
-        trades.map((t) => sym(Number(t.marketId))),
-        trades.map((t) => t.takerSide === "bid" ? "Long" : "Short"),
-        trades.map((t) => String(t.baseSize ?? 0)),
-        trades.map((t) => String(t.price ?? 0)),
-        trades.map(() => role),
-        trades.map(() => "0"),
-        trades.map((t) => new Date(String(t.time))),
-      ],
-    );
-    total += result.rowCount ?? 0;
+    while (hasMore) {
+      let url = `${API_BASE}/trades?${param}=${accountId}&pageSize=${PAGE_SIZE}`;
+      if (cursor) url += `&startInclusive=${encodeURIComponent(String(cursor))}`;
+
+      const res = await fetchWithRetry(url);
+      if (!res || !res.ok) break;
+
+      let body: Record<string, unknown>;
+      try { body = await res.json(); } catch { break; }
+
+      const trades: R[] = Array.isArray(body) ? body as R[] : ((body.items ?? body.data ?? []) as R[]);
+      if (trades.length === 0) break;
+
+      const result = await pool.query(
+        `INSERT INTO trade_history (trade_id, account_id, wallet_addr, market_id, symbol, side, size, price, role, fee, "time")
+         SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::text[], $7::numeric[], $8::numeric[], $9::text[], $10::numeric[], $11::timestamptz[])
+         ON CONFLICT (trade_id, "time") DO NOTHING`,
+        [
+          trades.map((t) => String(t.tradeId)),
+          trades.map(() => accountId),
+          trades.map(() => wallet),
+          trades.map((t) => Number(t.marketId)),
+          trades.map((t) => sym(Number(t.marketId))),
+          trades.map((t) => t.takerSide === "bid" ? "Long" : "Short"),
+          trades.map((t) => String(t.baseSize ?? 0)),
+          trades.map((t) => String(t.price ?? 0)),
+          trades.map(() => role),
+          trades.map(() => "0"),
+          trades.map((t) => new Date(String(t.time))),
+        ],
+      );
+      total += result.rowCount ?? 0;
+
+      cursor = (body as Record<string, unknown>).nextStartInclusive ?? (body as Record<string, unknown>).cursor;
+      hasMore = trades.length >= PAGE_SIZE && cursor != null;
+
+      if (hasMore) {
+        process.stdout.write(`\r    ... fetched ${total} records so far                    `);
+        await sleep(DELAY_BETWEEN_PAGES);
+      }
+    }
   }
   return total;
 }
 
 async function syncOrders(pool: Pool, accountId: number, wallet: string): Promise<number> {
-  const orders = await fetchAllPages<R>(`${API_BASE}/account/${accountId}/orders`);
-  if (orders.length === 0) return 0;
+  let total = 0;
+  let cursor: unknown;
+  let hasMore = true;
 
-  const result = await pool.query(
-    `INSERT INTO order_history (order_id, account_id, wallet_addr, market_id, symbol, side, placed_size, filled_size, placed_price, order_value, fill_mode, fill_status, status, is_reduce_only, added_at, updated_at)
-     SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::text[], $7::numeric[], $8::numeric[], $9::numeric[], $10::numeric[], $11::text[], $12::text[], $13::text[], $14::boolean[], $15::timestamptz[], $16::timestamptz[])
-     ON CONFLICT (order_id, added_at) DO NOTHING`,
-    [
-      orders.map((o) => String(o.orderId)),
-      orders.map(() => accountId),
-      orders.map(() => wallet),
-      orders.map((o) => Number(o.marketId)),
-      orders.map((o) => String(o.marketSymbol ?? sym(Number(o.marketId)))),
-      orders.map((o) => o.side === "bid" ? "Long" : "Short"),
-      orders.map((o) => String(o.placedSize ?? 0)),
-      orders.map((o) => o.filledSize != null ? String(o.filledSize) : null),
-      orders.map((o) => String(o.placedPrice ?? 0)),
-      orders.map((o) => String((Number(o.placedPrice) || 0) * (Number(o.placedSize) || 0))),
-      orders.map((o) => String(o.fillMode ?? "unknown")),
-      orders.map((o) => o.filledSize != null && Number(o.filledSize) > 0 ? "Filled" : "Unfilled"),
-      orders.map((o) => String(o.finalizationReason ?? "unknown")),
-      orders.map((o) => Boolean(o.isReduceOnly)),
-      orders.map((o) => new Date(String(o.addedAt))),
-      orders.map((o) => new Date(String(o.updatedAt))),
-    ],
-  );
-  return result.rowCount ?? 0;
+  while (hasMore) {
+    let url = `${API_BASE}/account/${accountId}/orders?pageSize=${PAGE_SIZE}`;
+    if (cursor) url += `&startInclusive=${encodeURIComponent(String(cursor))}`;
+
+    const res = await fetchWithRetry(url);
+    if (!res || !res.ok) break;
+
+    let body: Record<string, unknown>;
+    try { body = await res.json(); } catch { break; }
+
+    const orders: R[] = Array.isArray(body) ? body as R[] : ((body.items ?? body.data ?? []) as R[]);
+    if (orders.length === 0) break;
+
+    const result = await pool.query(
+      `INSERT INTO order_history (order_id, account_id, wallet_addr, market_id, symbol, side, placed_size, filled_size, placed_price, order_value, fill_mode, fill_status, status, is_reduce_only, added_at, updated_at)
+       SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::text[], $7::numeric[], $8::numeric[], $9::numeric[], $10::numeric[], $11::text[], $12::text[], $13::text[], $14::boolean[], $15::timestamptz[], $16::timestamptz[])
+       ON CONFLICT (order_id, added_at) DO NOTHING`,
+      [
+        orders.map((o) => String(o.orderId)),
+        orders.map(() => accountId),
+        orders.map(() => wallet),
+        orders.map((o) => Number(o.marketId)),
+        orders.map((o) => String(o.marketSymbol ?? sym(Number(o.marketId)))),
+        orders.map((o) => o.side === "bid" ? "Long" : "Short"),
+        orders.map((o) => String(o.placedSize ?? 0)),
+        orders.map((o) => o.filledSize != null ? String(o.filledSize) : null),
+        orders.map((o) => String(o.placedPrice ?? 0)),
+        orders.map((o) => String((Number(o.placedPrice) || 0) * (Number(o.placedSize) || 0))),
+        orders.map((o) => String(o.fillMode ?? "unknown")),
+        orders.map((o) => o.filledSize != null && Number(o.filledSize) > 0 ? "Filled" : "Unfilled"),
+        orders.map((o) => String(o.finalizationReason ?? "unknown")),
+        orders.map((o) => Boolean(o.isReduceOnly)),
+        orders.map((o) => new Date(String(o.addedAt))),
+        orders.map((o) => new Date(String(o.updatedAt))),
+      ],
+    );
+    total += result.rowCount ?? 0;
+
+    cursor = (body as Record<string, unknown>).nextStartInclusive ?? (body as Record<string, unknown>).cursor;
+    hasMore = orders.length >= PAGE_SIZE && cursor != null;
+    if (hasMore) await sleep(DELAY_BETWEEN_PAGES);
+  }
+  return total;
 }
 
 async function syncPnl(pool: Pool, accountId: number, wallet: string): Promise<number> {
-  const items = await fetchAllPages<R>(`${API_BASE}/account/${accountId}/history/pnl`);
-  if (items.length === 0) return 0;
-
-  const result = await pool.query(
+  return syncGeneric(pool, `${API_BASE}/account/${accountId}/history/pnl`,
     `INSERT INTO pnl_history (account_id, wallet_addr, market_id, symbol, trading_pnl, settled_funding_pnl, position_size, "time")
      SELECT * FROM unnest($1::int[], $2::text[], $3::int[], $4::text[], $5::numeric[], $6::numeric[], $7::numeric[], $8::timestamptz[])
      ON CONFLICT (wallet_addr, market_id, "time") DO NOTHING`,
-    [
-      items.map(() => accountId),
-      items.map(() => wallet),
-      items.map((p) => Number(p.marketId)),
-      items.map((p) => sym(Number(p.marketId))),
-      items.map((p) => String(p.tradingPnl ?? 0)),
-      items.map((p) => String(p.settledFundingPnl ?? 0)),
-      items.map((p) => String(p.positionSize ?? 0)),
-      items.map((p) => new Date(String(p.time))),
-    ],
-  );
-  return result.rowCount ?? 0;
+    (items: R[]) => [
+      items.map(() => accountId), items.map(() => wallet),
+      items.map((p) => Number(p.marketId)), items.map((p) => sym(Number(p.marketId))),
+      items.map((p) => String(p.tradingPnl ?? 0)), items.map((p) => String(p.settledFundingPnl ?? 0)),
+      items.map((p) => String(p.positionSize ?? 0)), items.map((p) => new Date(String(p.time))),
+    ]);
 }
 
 async function syncFunding(pool: Pool, accountId: number, wallet: string): Promise<number> {
-  const items = await fetchAllPages<R>(`${API_BASE}/account/${accountId}/history/funding`);
-  if (items.length === 0) return 0;
-
-  const result = await pool.query(
+  return syncGeneric(pool, `${API_BASE}/account/${accountId}/history/funding`,
     `INSERT INTO funding_history (account_id, wallet_addr, market_id, symbol, funding_pnl, position_size, "time")
      SELECT * FROM unnest($1::int[], $2::text[], $3::int[], $4::text[], $5::numeric[], $6::numeric[], $7::timestamptz[])
      ON CONFLICT (wallet_addr, market_id, "time") DO NOTHING`,
-    [
-      items.map(() => accountId),
-      items.map(() => wallet),
-      items.map((f) => Number(f.marketId)),
-      items.map((f) => sym(Number(f.marketId))),
-      items.map((f) => String(f.fundingPnl ?? 0)),
-      items.map((f) => String(f.positionSize ?? 0)),
+    (items) => [
+      items.map(() => accountId), items.map(() => wallet),
+      items.map((f) => Number(f.marketId)), items.map((f) => sym(Number(f.marketId))),
+      items.map((f) => String(f.fundingPnl ?? 0)), items.map((f) => String(f.positionSize ?? 0)),
       items.map((f) => new Date(String(f.time))),
-    ],
-  );
-  return result.rowCount ?? 0;
+    ]);
 }
 
 async function syncDeposits(pool: Pool, accountId: number, wallet: string): Promise<number> {
-  const items = await fetchAllPages<R>(`${API_BASE}/account/${accountId}/history/deposit`);
-  if (items.length === 0) return 0;
-
-  const result = await pool.query(
+  return syncGeneric(pool, `${API_BASE}/account/${accountId}/history/deposit`,
     `INSERT INTO deposit_history (account_id, wallet_addr, amount, balance, token_id, "time")
      SELECT * FROM unnest($1::int[], $2::text[], $3::numeric[], $4::numeric[], $5::int[], $6::timestamptz[])
      ON CONFLICT (wallet_addr, "time", amount) DO NOTHING`,
-    [
-      items.map(() => accountId),
-      items.map(() => wallet),
-      items.map((d) => String(d.amount ?? 0)),
-      items.map((d) => String(d.balance ?? 0)),
-      items.map((d) => Number(d.tokenId ?? 0)),
-      items.map((d) => new Date(String(d.time))),
-    ],
-  );
-  return result.rowCount ?? 0;
+    (items) => [
+      items.map(() => accountId), items.map(() => wallet),
+      items.map((d) => String(d.amount ?? 0)), items.map((d) => String(d.balance ?? 0)),
+      items.map((d) => Number(d.tokenId ?? 0)), items.map((d) => new Date(String(d.time))),
+    ]);
 }
 
 async function syncWithdrawals(pool: Pool, accountId: number, wallet: string): Promise<number> {
-  const items = await fetchAllPages<R>(`${API_BASE}/account/${accountId}/history/withdrawal`);
-  if (items.length === 0) return 0;
-
-  const result = await pool.query(
+  return syncGeneric(pool, `${API_BASE}/account/${accountId}/history/withdrawal`,
     `INSERT INTO withdrawal_history (account_id, wallet_addr, amount, balance, fee, dest_pubkey, "time")
      SELECT * FROM unnest($1::int[], $2::text[], $3::numeric[], $4::numeric[], $5::numeric[], $6::text[], $7::timestamptz[])
      ON CONFLICT (wallet_addr, "time", amount) DO NOTHING`,
-    [
-      items.map(() => accountId),
-      items.map(() => wallet),
-      items.map((w) => String(w.amount ?? 0)),
-      items.map((w) => String(w.balance ?? 0)),
-      items.map((w) => String(w.fee ?? 0)),
-      items.map((w) => String(w.destPubkey ?? "")),
+    (items) => [
+      items.map(() => accountId), items.map(() => wallet),
+      items.map((w) => String(w.amount ?? 0)), items.map((w) => String(w.balance ?? 0)),
+      items.map((w) => String(w.fee ?? 0)), items.map((w) => String(w.destPubkey ?? "")),
       items.map((w) => new Date(String(w.time))),
-    ],
-  );
-  return result.rowCount ?? 0;
+    ]);
 }
 
 async function syncLiquidations(pool: Pool, accountId: number, wallet: string): Promise<number> {
-  const items = await fetchAllPages<R>(`${API_BASE}/account/${accountId}/history/liquidation`);
-  if (items.length === 0) return 0;
-
-  const result = await pool.query(
+  return syncGeneric(pool, `${API_BASE}/account/${accountId}/history/liquidation`,
     `INSERT INTO liquidation_history (account_id, wallet_addr, fee, liquidation_kind, margins, "time")
      SELECT * FROM unnest($1::int[], $2::text[], $3::numeric[], $4::text[], $5::jsonb[], $6::timestamptz[])
      ON CONFLICT (wallet_addr, "time", fee) DO NOTHING`,
-    [
-      items.map(() => accountId),
-      items.map(() => wallet),
-      items.map((l) => String(l.fee ?? 0)),
-      items.map((l) => String(l.liquidationKind ?? "unknown")),
-      items.map((l) => {
-        const { time: _t, fee: _f, liquidationKind: _lk, ...rest } = l;
-        return JSON.stringify(rest);
-      }),
+    (items) => [
+      items.map(() => accountId), items.map(() => wallet),
+      items.map((l) => String(l.fee ?? 0)), items.map((l) => String(l.liquidationKind ?? "unknown")),
+      items.map((l) => { const { time: _t, fee: _f, liquidationKind: _lk, ...rest } = l; return JSON.stringify(rest); }),
       items.map((l) => new Date(String(l.time))),
-    ],
-  );
-  return result.rowCount ?? 0;
+    ]);
 }
 
 // ─── 01.xyz Frontend API Sync ─────────────────────────────────────
