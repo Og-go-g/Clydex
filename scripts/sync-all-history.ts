@@ -168,11 +168,10 @@ async function syncTrades(pool: Pool, accountId: number, wallet: string): Promis
     if (trades.length === 0) continue;
 
     const result = await pool.query(
-      `INSERT INTO trade_history (id, "tradeId", "accountId", "walletAddr", "marketId", symbol, side, size, price, role, fee, "time")
-       SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::text[], $11::numeric[], $12::timestamptz[])
-       ON CONFLICT ("tradeId") DO NOTHING`,
+      `INSERT INTO trade_history (trade_id, account_id, wallet_addr, market_id, symbol, side, size, price, role, fee, "time")
+       SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::text[], $7::numeric[], $8::numeric[], $9::text[], $10::numeric[], $11::timestamptz[])
+       ON CONFLICT (trade_id, "time") DO NOTHING`,
       [
-        trades.map(() => crypto.randomUUID()),
         trades.map((t) => String(t.tradeId)),
         trades.map(() => accountId),
         trades.map(() => wallet),
@@ -196,11 +195,10 @@ async function syncOrders(pool: Pool, accountId: number, wallet: string): Promis
   if (orders.length === 0) return 0;
 
   const result = await pool.query(
-    `INSERT INTO order_history (id, "orderId", "accountId", "walletAddr", "marketId", symbol, side, "placedSize", "filledSize", "placedPrice", "orderValue", "fillMode", "fillStatus", status, "isReduceOnly", "addedAt", "updatedAt")
-     SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::numeric[], $11::numeric[], $12::text[], $13::text[], $14::text[], $15::boolean[], $16::timestamptz[], $17::timestamptz[])
-     ON CONFLICT ("orderId") DO NOTHING`,
+    `INSERT INTO order_history (order_id, account_id, wallet_addr, market_id, symbol, side, placed_size, filled_size, placed_price, order_value, fill_mode, fill_status, status, is_reduce_only, added_at, updated_at)
+     SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::text[], $7::numeric[], $8::numeric[], $9::numeric[], $10::numeric[], $11::text[], $12::text[], $13::text[], $14::boolean[], $15::timestamptz[], $16::timestamptz[])
+     ON CONFLICT (order_id, added_at) DO NOTHING`,
     [
-      orders.map(() => crypto.randomUUID()),
       orders.map((o) => String(o.orderId)),
       orders.map(() => accountId),
       orders.map(() => wallet),
@@ -227,11 +225,10 @@ async function syncPnl(pool: Pool, accountId: number, wallet: string): Promise<n
   if (items.length === 0) return 0;
 
   const result = await pool.query(
-    `INSERT INTO pnl_history (id, "accountId", "walletAddr", "marketId", symbol, "tradingPnl", "settledFundingPnl", "positionSize", "time")
-     SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::numeric[], $7::numeric[], $8::numeric[], $9::timestamptz[])
-     ON CONFLICT ("walletAddr", "marketId", "time") DO NOTHING`,
+    `INSERT INTO pnl_history (account_id, wallet_addr, market_id, symbol, trading_pnl, settled_funding_pnl, position_size, "time")
+     SELECT * FROM unnest($1::int[], $2::text[], $3::int[], $4::text[], $5::numeric[], $6::numeric[], $7::numeric[], $8::timestamptz[])
+     ON CONFLICT (wallet_addr, market_id, "time") DO NOTHING`,
     [
-      items.map(() => crypto.randomUUID()),
       items.map(() => accountId),
       items.map(() => wallet),
       items.map((p) => Number(p.marketId)),
@@ -250,11 +247,10 @@ async function syncFunding(pool: Pool, accountId: number, wallet: string): Promi
   if (items.length === 0) return 0;
 
   const result = await pool.query(
-    `INSERT INTO funding_history (id, "accountId", "walletAddr", "marketId", symbol, "fundingPnl", "positionSize", "time")
-     SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::numeric[], $7::numeric[], $8::timestamptz[])
-     ON CONFLICT ("walletAddr", "marketId", "time") DO NOTHING`,
+    `INSERT INTO funding_history (account_id, wallet_addr, market_id, symbol, funding_pnl, position_size, "time")
+     SELECT * FROM unnest($1::int[], $2::text[], $3::int[], $4::text[], $5::numeric[], $6::numeric[], $7::timestamptz[])
+     ON CONFLICT (wallet_addr, market_id, "time") DO NOTHING`,
     [
-      items.map(() => crypto.randomUUID()),
       items.map(() => accountId),
       items.map(() => wallet),
       items.map((f) => Number(f.marketId)),
@@ -272,11 +268,10 @@ async function syncDeposits(pool: Pool, accountId: number, wallet: string): Prom
   if (items.length === 0) return 0;
 
   const result = await pool.query(
-    `INSERT INTO deposit_history (id, "accountId", "walletAddr", amount, balance, "tokenId", "time")
-     SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::numeric[], $5::numeric[], $6::int[], $7::timestamptz[])
-     ON CONFLICT ("walletAddr", "time", amount) DO NOTHING`,
+    `INSERT INTO deposit_history (account_id, wallet_addr, amount, balance, token_id, "time")
+     SELECT * FROM unnest($1::int[], $2::text[], $3::numeric[], $4::numeric[], $5::int[], $6::timestamptz[])
+     ON CONFLICT (wallet_addr, "time", amount) DO NOTHING`,
     [
-      items.map(() => crypto.randomUUID()),
       items.map(() => accountId),
       items.map(() => wallet),
       items.map((d) => String(d.amount ?? 0)),
@@ -293,11 +288,10 @@ async function syncWithdrawals(pool: Pool, accountId: number, wallet: string): P
   if (items.length === 0) return 0;
 
   const result = await pool.query(
-    `INSERT INTO withdrawal_history (id, "accountId", "walletAddr", amount, balance, fee, "destPubkey", "time")
-     SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::numeric[], $5::numeric[], $6::numeric[], $7::text[], $8::timestamptz[])
-     ON CONFLICT ("walletAddr", "time", amount) DO NOTHING`,
+    `INSERT INTO withdrawal_history (account_id, wallet_addr, amount, balance, fee, dest_pubkey, "time")
+     SELECT * FROM unnest($1::int[], $2::text[], $3::numeric[], $4::numeric[], $5::numeric[], $6::text[], $7::timestamptz[])
+     ON CONFLICT (wallet_addr, "time", amount) DO NOTHING`,
     [
-      items.map(() => crypto.randomUUID()),
       items.map(() => accountId),
       items.map(() => wallet),
       items.map((w) => String(w.amount ?? 0)),
@@ -315,11 +309,10 @@ async function syncLiquidations(pool: Pool, accountId: number, wallet: string): 
   if (items.length === 0) return 0;
 
   const result = await pool.query(
-    `INSERT INTO liquidation_history (id, "accountId", "walletAddr", fee, "liquidationKind", margins, "time")
-     SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::numeric[], $5::text[], $6::jsonb[], $7::timestamptz[])
-     ON CONFLICT ("walletAddr", "time", fee) DO NOTHING`,
+    `INSERT INTO liquidation_history (account_id, wallet_addr, fee, liquidation_kind, margins, "time")
+     SELECT * FROM unnest($1::int[], $2::text[], $3::numeric[], $4::text[], $5::jsonb[], $6::timestamptz[])
+     ON CONFLICT (wallet_addr, "time", fee) DO NOTHING`,
     [
-      items.map(() => crypto.randomUUID()),
       items.map(() => accountId),
       items.map(() => wallet),
       items.map((l) => String(l.fee ?? 0)),
@@ -345,13 +338,12 @@ async function syncVolumeCalendar(pool: Pool, accountId: number, wallet: string)
     if (entries.length === 0) return 0;
 
     const result = await pool.query(
-      `INSERT INTO volume_calendar (id, "accountId", "walletAddr", date, volume, "makerVolume", "takerVolume", "makerFees", "takerFees", "totalFees")
-       SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::text[], $5::numeric[], $6::numeric[], $7::numeric[], $8::numeric[], $9::numeric[], $10::numeric[])
-       ON CONFLICT ("walletAddr", date) DO UPDATE SET
-         volume = EXCLUDED.volume, "makerVolume" = EXCLUDED."makerVolume", "takerVolume" = EXCLUDED."takerVolume",
-         "makerFees" = EXCLUDED."makerFees", "takerFees" = EXCLUDED."takerFees", "totalFees" = EXCLUDED."totalFees"`,
+      `INSERT INTO volume_calendar (account_id, wallet_addr, date, volume, maker_volume, taker_volume, maker_fees, taker_fees, total_fees)
+       SELECT * FROM unnest($1::int[], $2::text[], $3::text[], $4::numeric[], $5::numeric[], $6::numeric[], $7::numeric[], $8::numeric[], $9::numeric[])
+       ON CONFLICT (wallet_addr, date) DO UPDATE SET
+         volume = EXCLUDED.volume, maker_volume = EXCLUDED.maker_volume, taker_volume = EXCLUDED.taker_volume,
+         maker_fees = EXCLUDED.maker_fees, taker_fees = EXCLUDED.taker_fees, total_fees = EXCLUDED.total_fees`,
       [
-        entries.map(() => crypto.randomUUID()),
         entries.map(() => accountId),
         entries.map(() => wallet),
         entries.map(([date]) => date),
@@ -374,13 +366,13 @@ async function syncPnlTotals(pool: Pool, accountId: number, wallet: string): Pro
     const body = await res.json();
 
     await pool.query(
-      `INSERT INTO pnl_totals (id, "accountId", "walletAddr", "totalPnl", "totalTradingPnl", "totalFundingPnl", "fetchedAt")
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT ("walletAddr") DO UPDATE SET
-         "totalPnl" = EXCLUDED."totalPnl", "totalTradingPnl" = EXCLUDED."totalTradingPnl",
-         "totalFundingPnl" = EXCLUDED."totalFundingPnl", "fetchedAt" = EXCLUDED."fetchedAt"`,
+      `INSERT INTO pnl_totals (account_id, wallet_addr, total_pnl, total_trading_pnl, total_funding_pnl, fetched_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (wallet_addr) DO UPDATE SET
+         total_pnl = EXCLUDED.total_pnl, total_trading_pnl = EXCLUDED.total_trading_pnl,
+         total_funding_pnl = EXCLUDED.total_funding_pnl, fetched_at = EXCLUDED.fetched_at`,
       [
-        crypto.randomUUID(), accountId, wallet,
+        accountId, wallet,
         String(body.totalPnl ?? 0), String(body.totalTradingPnl ?? 0),
         String(body.totalFundingPnl ?? 0), new Date(body.fetchedAt ?? new Date().toISOString()),
       ],
@@ -395,7 +387,7 @@ const ALL_TYPES = ["trades", "orders", "pnl", "funding", "deposits", "withdrawal
 
 async function isAlreadySynced(pool: Pool, wallet: string): Promise<boolean> {
   const result = await pool.query(
-    `SELECT count(*) > 0 AS synced FROM sync_cursors WHERE "walletAddr" = $1`,
+    `SELECT count(*) > 0 AS synced FROM sync_cursors WHERE wallet_addr = $1`,
     [wallet],
   );
   return result.rows[0]?.synced ?? false;
@@ -405,9 +397,9 @@ async function setCursorsToNow(pool: Pool, wallet: string): Promise<void> {
   const now = new Date().toISOString();
   for (const type of ALL_TYPES) {
     await pool.query(
-      `INSERT INTO sync_cursors (id, "walletAddr", type, cursor, "lastSyncAt")
-       VALUES (gen_random_uuid(), $1, $2, $3, NOW())
-       ON CONFLICT ("walletAddr", type) DO UPDATE SET cursor = $3, "lastSyncAt" = NOW()`,
+      `INSERT INTO sync_cursors (wallet_addr, type, cursor, last_sync_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (wallet_addr, type) DO UPDATE SET cursor = $3, last_sync_at = NOW()`,
       [wallet, type, now],
     );
   }
