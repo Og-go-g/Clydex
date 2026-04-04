@@ -364,6 +364,7 @@ async function main() {
 
   const t0 = Date.now();
   let processed = 0, found = 0, synced = 0, skipped = 0, failed = 0, totalRec = 0;
+  const failedIds: number[] = [];
 
   async function processAccount(id: number) {
     const w = `account:${id}`;
@@ -376,28 +377,38 @@ async function main() {
     // Skip already synced (unless --force)
     if (!FORCE && await isSynced(w)) { skipped++; processed++; return; }
 
-    try {
-      const t = await syncTrades(id, w);
-      const o = await syncOrders(id, w);
-      const p = await syncPnl(id, w);
-      const f = await syncFunding(id, w);
-      const d = await syncDeposits(id, w);
-      const wd = await syncWithdrawals(id, w);
-      const l = await syncLiquidations(id, w);
+    // Retry up to 3 times on failure — no account gets skipped without a fight
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const t = await syncTrades(id, w);
+        const o = await syncOrders(id, w);
+        const p = await syncPnl(id, w);
+        const f = await syncFunding(id, w);
+        const d = await syncDeposits(id, w);
+        const wd = await syncWithdrawals(id, w);
+        const l = await syncLiquidations(id, w);
 
-      const sum = t + o + p + f + d + wd + l;
-      totalRec += sum;
+        const sum = t + o + p + f + d + wd + l;
+        totalRec += sum;
 
-      await markSynced(w);
-      synced++;
+        await markSynced(w);
+        synced++;
 
-      if (sum > 0) {
-        console.log(`\n  Account ${id}: +${sum} (t:${t} o:${o} p:${p} f:${f} d:${d} w:${wd} l:${l})`);
+        if (sum > 0) {
+          console.log(`\n  Account ${id}: +${sum} (t:${t} o:${o} p:${p} f:${f} d:${d} w:${wd} l:${l})`);
+        }
+        break; // Success — exit retry loop
+      } catch (err) {
+        const msg = err instanceof Error ? err.message.slice(0, 80) : String(err);
+        if (attempt < 3) {
+          console.log(`\n  Account ${id}: attempt ${attempt}/3 failed — ${msg}, retrying in ${attempt * 10}s...`);
+          await sleep(attempt * 10_000);
+        } else {
+          console.log(`\n  Account ${id}: FAILED after 3 attempts — ${msg}`);
+          failedIds.push(id);
+          failed++;
+        }
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message.slice(0, 60) : String(err);
-      console.log(`\n  Account ${id}: FAIL — ${msg}`);
-      failed++;
     }
     processed++;
   }
@@ -417,6 +428,39 @@ async function main() {
     );
   }
 
+  // ─── Final retry pass for any failed accounts ─────────────────
+  if (failedIds.length > 0) {
+    console.log(`\n\n[3/3] Retrying ${failedIds.length} failed accounts one more time...\n`);
+    const stillFailed: number[] = [];
+    for (const id of failedIds) {
+      const w = `account:${id}`;
+      try {
+        const t = await syncTrades(id, w);
+        const o = await syncOrders(id, w);
+        const p = await syncPnl(id, w);
+        const f = await syncFunding(id, w);
+        const d = await syncDeposits(id, w);
+        const wd = await syncWithdrawals(id, w);
+        const l = await syncLiquidations(id, w);
+
+        const sum = t + o + p + f + d + wd + l;
+        totalRec += sum;
+        await markSynced(w);
+        synced++;
+        failed--;
+        console.log(`  Account ${id}: RECOVERED +${sum} records`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message.slice(0, 60) : String(err);
+        console.log(`  Account ${id}: STILL FAILED — ${msg}`);
+        stillFailed.push(id);
+      }
+    }
+    if (stillFailed.length > 0) {
+      console.log(`\n  ⚠ Permanently failed accounts: [${stillFailed.join(", ")}]`);
+      console.log(`  Re-run with: npx tsx scripts/sync-all-history.ts --force`);
+    }
+  }
+
   console.log(`\n\n  ═══ DONE ═══`);
   console.log(`  Accounts found: ${found}`);
   console.log(`  Synced: ${synced}`);
@@ -426,7 +470,7 @@ async function main() {
   console.log(`  Time: ${elapsed(Date.now() - t0)}`);
 
   await db.end();
-  process.exit(0);
+  process.exit(failed > 0 ? 1 : 0);
 }
 
 main().catch(err => { console.error("\nFatal:", err); process.exit(1); });
