@@ -102,6 +102,13 @@ async function loadMarkets() {
 
 function sym(id: number): string { return syms[id] || `MKT-${id}`; }
 
+/** Safe date parse — returns epoch 0 instead of Invalid Date */
+function safeDate(v: unknown): Date {
+  if (!v) return new Date(0);
+  const d = new Date(String(v));
+  return isNaN(d.getTime()) ? new Date(0) : d;
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  STREAMING PAGE PROCESSOR
 //  Fetches one page at a time, inserts into DB, frees memory.
@@ -132,11 +139,14 @@ async function streamPages(
       const result = await db.query(sql, toParams(items));
       total += result.rowCount ?? 0;
     } catch (err) {
-      // Log but continue — don't crash on one bad page
-      const msg = err instanceof Error ? err.message.slice(0, 80) : String(err);
-      if (!msg.includes("duplicate") && !msg.includes("conflict")) {
-        throw err; // Re-throw real errors
+      // Skip bad pages (invalid data, duplicates, etc) — don't crash
+      const msg = err instanceof Error ? err.message.slice(0, 100) : String(err);
+      if (pages === 0) {
+        // First page failed — likely a schema issue, re-throw
+        throw err;
       }
+      // Log and continue with next page
+      process.stdout.write(`\r    [!] page ${pages + 1} skipped: ${msg.slice(0, 60)}                    \n`);
     }
 
     pages++;
@@ -177,7 +187,7 @@ async function syncTrades(id: number, w: string): Promise<number> {
         p.map(t => String(t.price ?? 0)),
         p.map(() => role),
         p.map(() => "0"),
-        p.map(t => new Date(String(t.time))),
+        p.map(t => safeDate(t.time)),
       ],
     );
   }
@@ -205,8 +215,8 @@ async function syncOrders(id: number, w: string): Promise<number> {
       p.map(o => o.filledSize != null && Number(o.filledSize) > 0 ? "Filled" : "Unfilled"),
       p.map(o => String(o.finalizationReason ?? "unknown")),
       p.map(o => Boolean(o.isReduceOnly)),
-      p.map(o => new Date(String(o.addedAt))),
-      p.map(o => new Date(String(o.updatedAt))),
+      p.map(o => safeDate(o.addedAt)),
+      p.map(o => safeDate(o.updatedAt)),
     ],
   );
 }
@@ -221,7 +231,7 @@ async function syncPnl(id: number, w: string): Promise<number> {
       p.map(() => id), p.map(() => w),
       p.map(x => Number(x.marketId)), p.map(x => sym(Number(x.marketId))),
       p.map(x => String(x.tradingPnl ?? 0)), p.map(x => String(x.settledFundingPnl ?? 0)),
-      p.map(x => String(x.positionSize ?? 0)), p.map(x => new Date(String(x.time))),
+      p.map(x => String(x.positionSize ?? 0)), p.map(x => safeDate(x.time)),
     ],
   );
 }
@@ -236,7 +246,7 @@ async function syncFunding(id: number, w: string): Promise<number> {
       p.map(() => id), p.map(() => w),
       p.map(x => Number(x.marketId)), p.map(x => sym(Number(x.marketId))),
       p.map(x => String(x.fundingPnl ?? 0)), p.map(x => String(x.positionSize ?? 0)),
-      p.map(x => new Date(String(x.time))),
+      p.map(x => safeDate(x.time)),
     ],
   );
 }
@@ -250,7 +260,7 @@ async function syncDeposits(id: number, w: string): Promise<number> {
     (p) => [
       p.map(() => id), p.map(() => w),
       p.map(x => String(x.amount ?? 0)), p.map(x => String(x.balance ?? 0)),
-      p.map(x => Number(x.tokenId ?? 0)), p.map(x => new Date(String(x.time))),
+      p.map(x => Number(x.tokenId ?? 0)), p.map(x => safeDate(x.time)),
     ],
   );
 }
@@ -265,7 +275,7 @@ async function syncWithdrawals(id: number, w: string): Promise<number> {
       p.map(() => id), p.map(() => w),
       p.map(x => String(x.amount ?? 0)), p.map(x => String(x.balance ?? 0)),
       p.map(x => String(x.fee ?? 0)), p.map(x => String(x.destPubkey ?? "")),
-      p.map(x => new Date(String(x.time))),
+      p.map(x => safeDate(x.time)),
     ],
   );
 }
@@ -280,7 +290,7 @@ async function syncLiquidations(id: number, w: string): Promise<number> {
       p.map(() => id), p.map(() => w),
       p.map(x => String(x.fee ?? 0)), p.map(x => String(x.liquidationKind ?? "unknown")),
       p.map(x => { const { time: _, fee: __, liquidationKind: ___, ...r } = x; return JSON.stringify(r); }),
-      p.map(x => new Date(String(x.time))),
+      p.map(x => safeDate(x.time)),
     ],
   );
 }
