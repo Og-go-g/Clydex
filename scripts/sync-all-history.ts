@@ -19,7 +19,7 @@ import type { Agent } from "http";
 const API_BASE = "https://zo-mainnet.n1.xyz";
 const FRONTEND_API = "https://01.xyz/api";
 const MAX_ACCOUNT_ID = 12000;
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 250;
 const DELAY_BETWEEN_PAGES = 100;
 const MAX_RETRIES = 3;
 const RETRY_BACKOFF = 5_000;
