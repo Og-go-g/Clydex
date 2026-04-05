@@ -127,40 +127,56 @@ export async function getTradeHistoryWithPnl(params: PaginationParams): Promise<
     pnlByMarket.set(p.marketId, arr);
   }
 
-  // 3. For each trade, find the PnL delta at that point:
-  //    - Find the pnl snapshot closest to the trade time (within ±5s or exact match)
-  //    - Compute delta = snapshot.tradingPnl - previous_snapshot.tradingPnl
-  const data: TradeWithPnlRow[] = trades.data.map((trade) => {
-    const snapshots = pnlByMarket.get(trade.marketId);
-    if (!snapshots || snapshots.length === 0) {
-      return { ...trade, closedPnl: null };
-    }
+  // 3. Map PnL snapshots → trades (not trades → snapshots).
+  //    Each pnl_history entry = one position close event with a specific time.
+  //    We find the single closest trade for each PnL snapshot (within ±5s).
+  //    This guarantees 1:1 mapping — no double-counting.
 
-    const tradeTime = new Date(trade.time).getTime();
+  // Build a lookup: for each PnL snapshot, compute its delta and find matching trade
+  const pnlForTrade = new Map<string, number>(); // tradeId → closedPnl
 
-    // Find closest snapshot (prefer exact match or within ±5s)
-    let bestIdx = -1;
-    let bestDist = Infinity;
+  for (const [marketId, snapshots] of pnlByMarket) {
+    const marketTrades = trades.data
+      .filter(t => t.marketId === marketId)
+      .map(t => ({ id: t.tradeId ?? t.id, time: new Date(t.time).getTime() }));
+
+    if (marketTrades.length === 0) continue;
+
+    const usedTradeIds = new Set<string>();
+
     for (let i = 0; i < snapshots.length; i++) {
-      const dist = Math.abs(snapshots[i].time - tradeTime);
-      if (dist < bestDist) {
-        bestDist = dist;
-        bestIdx = i;
+      const snapTime = snapshots[i].time;
+      const curr = snapshots[i].tradingPnl;
+      const prev = i > 0 ? snapshots[i - 1].tradingPnl : 0;
+      const delta = curr - prev;
+
+      if (Math.abs(delta) < 0.000001) continue; // no PnL change
+
+      // Find the closest trade to this snapshot (within ±5s), not yet consumed
+      let bestTrade: string | null = null;
+      let bestDist = Infinity;
+      for (const t of marketTrades) {
+        if (usedTradeIds.has(t.id)) continue;
+        const dist = Math.abs(t.time - snapTime);
+        if (dist < bestDist && dist <= 5_000) {
+          bestDist = dist;
+          bestTrade = t.id;
+        }
+      }
+
+      if (bestTrade) {
+        pnlForTrade.set(bestTrade, delta);
+        usedTradeIds.add(bestTrade);
       }
     }
+  }
 
-    // Only match within 5 seconds
-    if (bestIdx < 0 || bestDist > 5_000) {
-      return { ...trade, closedPnl: null };
-    }
-
-    const curr = snapshots[bestIdx].tradingPnl;
-    const prev = bestIdx > 0 ? snapshots[bestIdx - 1].tradingPnl : 0;
-    const delta = curr - prev;
-
+  const data: TradeWithPnlRow[] = trades.data.map((trade) => {
+    const tradeKey = trade.tradeId ?? trade.id;
+    const pnl = pnlForTrade.get(tradeKey);
     return {
       ...trade,
-      closedPnl: Math.abs(delta) > 0.000001 ? delta.toFixed(6) : null,
+      closedPnl: pnl != null ? pnl.toFixed(6) : null,
     };
   });
 
