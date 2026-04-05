@@ -513,7 +513,7 @@ function TradeHistoryTable({ data }: { data: TradeRow[] }) {
               <td className={`${TD} text-white`}>{fmtPrice(row.price)}</td>
               <td className={`${TD} text-white`}>{tv > 0 ? "$" + tv.toFixed(2) : "--"}</td>
               <td className={`${TD} text-red-400`}>
-                {fee > 0 ? fmtUsd(-fee, 3) : "--"}
+                {fee > 0 ? fmtUsd(-fee) : "--"}
               </td>
               <td className={`${TD} ${row.closedPnl ? pnlColor(row.closedPnl) : "text-muted"}`}>
                 {row.closedPnl && parseFloat(row.closedPnl) !== 0 ? fmtUsd(row.closedPnl) : "--"}
