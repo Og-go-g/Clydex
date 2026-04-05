@@ -1,24 +1,4 @@
-version: "3.9"
-
 services:
-  postgres:
-    image: timescale/timescaledb:latest-pg16
-    container_name: clydex-db
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: clydex
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-clydex_secret}
-      POSTGRES_DB: clydex_main
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    ports:
-      - "127.0.0.1:5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U clydex -d clydex_main"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   app:
     build: .
     container_name: clydex-app
@@ -27,9 +7,8 @@ services:
       - "3000:3000"
     env_file:
       - .env
-    depends_on:
-      postgres:
-        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/"]
       interval: 30s
@@ -48,6 +27,3 @@ services:
       - /etc/letsencrypt:/etc/letsencrypt:ro
     depends_on:
       - app
-
-volumes:
-  pgdata:
