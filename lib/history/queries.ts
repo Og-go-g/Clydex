@@ -91,92 +91,97 @@ export async function getTradeHistory(params: PaginationParams): Promise<PagedRe
   };
 }
 
+// ─── Position Tracker — per-trade Closed PnL ────────────────────
+//
+// Walks ALL trades for a (wallet, market) pair in chronological order,
+// tracking average entry price. When a trade reduces or flips a position,
+// the realized PnL is: (tradePrice - avgEntry) × closedSize × direction.
+// Returns a Map<tradeId, closedPnl>.
+
+function computePerTradePnl(trades: TradeHistoryRow[]): Map<string, number> {
+  const result = new Map<string, number>();
+  let posSize = 0;   // positive = long, negative = short
+  let avgEntry = 0;
+
+  for (const t of trades) {
+    const price = parseFloat(t.price);
+    const size = parseFloat(t.size);
+    if (!isFinite(price) || !isFinite(size) || size === 0) {
+      result.set(t.tradeId, 0);
+      continue;
+    }
+
+    // tradeDelta: positive for longs, negative for shorts
+    const tradeDelta = t.side === "Long" ? size : -size;
+
+    // Same direction as current position (or opening fresh) → increases position
+    if (posSize === 0 || Math.sign(tradeDelta) === Math.sign(posSize)) {
+      const newSize = posSize + tradeDelta;
+      if (newSize !== 0) {
+        avgEntry = (avgEntry * posSize + price * tradeDelta) / newSize;
+      }
+      posSize = newSize;
+      result.set(t.tradeId, 0);
+    } else {
+      // Opposite direction → reduces or flips position
+      const closedSize = Math.min(Math.abs(tradeDelta), Math.abs(posSize));
+      const direction = Math.sign(posSize); // +1 if was long, -1 if was short
+      const pnl = (price - avgEntry) * closedSize * direction;
+      result.set(t.tradeId, pnl);
+
+      const remaining = Math.abs(tradeDelta) - closedSize;
+      if (remaining > 0) {
+        // Position flipped — open new position at trade price
+        posSize = Math.sign(tradeDelta) * remaining;
+        avgEntry = price;
+      } else {
+        // Position reduced (or fully closed)
+        posSize = posSize + tradeDelta; // reduces toward 0
+        // avgEntry stays the same for partial closes
+        if (posSize === 0) avgEntry = 0;
+      }
+    }
+  }
+
+  return result;
+}
+
 // ─── Trade History + Closed PnL ──────────────────────────────────
 
 export async function getTradeHistoryWithPnl(params: PaginationParams): Promise<PagedResult<TradeWithPnlRow>> {
-  // 1. Fetch trades normally
+  // 1. Fetch paginated trades
   const trades = await getTradeHistory(params);
   if (trades.data.length === 0) {
     return { ...trades, data: [] };
   }
 
-  // 2. For each trade, find the closest pnl_history snapshot (same market, closest time ≤ trade time).
-  //    The tradingPnl field is cumulative realized PnL, so the change between two consecutive
-  //    snapshots = the realized PnL from that position change.
-  const { walletAddr } = params;
-
-  // Collect unique (marketId, time) pairs from trades
+  // 2. Collect unique marketIds from page results
   const marketIds = [...new Set(trades.data.map((t) => t.marketId))];
 
-  // Fetch ALL pnl snapshots for these markets for this wallet (they're sparse — ~10-50 per market)
-  const pnlRows = marketIds.length > 0
-    ? await query(
-        `SELECT "marketId", "time", "tradingPnl" FROM pnl_history
-         WHERE "walletAddr" = $1 AND "marketId" = ANY($2::int[])
-         ORDER BY "marketId", "time"`,
-        [walletAddr, marketIds],
-      )
-    : [];
-  const pnlData = toCamelRows<{ marketId: number; time: Date; tradingPnl: string }>(pnlRows);
-
-  // Group PnL by market, sorted by time ascending
-  const pnlByMarket = new Map<number, { time: number; tradingPnl: number }[]>();
-  for (const p of pnlData) {
-    const arr = pnlByMarket.get(p.marketId) ?? [];
-    arr.push({ time: new Date(p.time).getTime(), tradingPnl: parseFloat(p.tradingPnl) });
-    pnlByMarket.set(p.marketId, arr);
-  }
-
-  // 3. Map PnL snapshots → trades (not trades → snapshots).
-  //    Each pnl_history entry = one position close event with a specific time.
-  //    We find the single closest trade for each PnL snapshot (within ±5s).
-  //    This guarantees 1:1 mapping — no double-counting.
-
-  // Build a lookup: for each PnL snapshot, compute its delta and find matching trade
-  const pnlForTrade = new Map<string, number>(); // tradeId → closedPnl
-
-  for (const [marketId, snapshots] of pnlByMarket) {
-    const marketTrades = trades.data
-      .filter(t => t.marketId === marketId)
-      .map(t => ({ id: t.tradeId ?? t.id, time: new Date(t.time).getTime() }));
-
-    if (marketTrades.length === 0) continue;
-
-    const usedTradeIds = new Set<string>();
-
-    for (let i = 0; i < snapshots.length; i++) {
-      const snapTime = snapshots[i].time;
-      const curr = snapshots[i].tradingPnl;
-      const prev = i > 0 ? snapshots[i - 1].tradingPnl : 0;
-      const delta = curr - prev;
-
-      if (Math.abs(delta) < 0.000001) continue; // no PnL change
-
-      // Find the closest trade to this snapshot (within ±5s), not yet consumed
-      let bestTrade: string | null = null;
-      let bestDist = Infinity;
-      for (const t of marketTrades) {
-        if (usedTradeIds.has(t.id)) continue;
-        const dist = Math.abs(t.time - snapTime);
-        if (dist < bestDist && dist <= 5_000) {
-          bestDist = dist;
-          bestTrade = t.id;
-        }
+  // 3. For each market, load ALL trades chronologically and compute PnL
+  const pnlMap = new Map<string, number>();
+  await Promise.all(
+    marketIds.map(async (mId) => {
+      const allRows = await query(
+        `SELECT * FROM trade_history
+         WHERE "walletAddr" = $1 AND "marketId" = $2
+         ORDER BY "time" ASC, "tradeId" ASC`,
+        [params.walletAddr, mId],
+      );
+      const allTrades = toCamelRows<TradeHistoryRow>(allRows);
+      const marketPnl = computePerTradePnl(allTrades);
+      for (const [tradeId, pnl] of marketPnl) {
+        pnlMap.set(tradeId, pnl);
       }
+    }),
+  );
 
-      if (bestTrade) {
-        pnlForTrade.set(bestTrade, delta);
-        usedTradeIds.add(bestTrade);
-      }
-    }
-  }
-
+  // 4. Merge computed PnL into paginated results
   const data: TradeWithPnlRow[] = trades.data.map((trade) => {
-    const tradeKey = trade.tradeId ?? trade.id;
-    const pnl = pnlForTrade.get(tradeKey);
+    const pnl = pnlMap.get(trade.tradeId);
     return {
       ...trade,
-      closedPnl: pnl != null ? pnl.toFixed(6) : null,
+      closedPnl: pnl !== undefined && pnl !== 0 ? pnl.toFixed(6) : null,
     };
   });
 
