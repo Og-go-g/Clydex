@@ -72,10 +72,11 @@ function proxy(): Agent | undefined {
 // ═══════════════════════════════════════════════════════════════════
 
 const dbUrl = process.env.HISTORY_DATABASE_URL || "";
+const wantsSsl = dbUrl.includes("sslmode=require") || process.env.DB_SSL === "true";
 const db = new Pool({
   connectionString: dbUrl,
   max: 10,
-  ssl: dbUrl.includes("localhost") || dbUrl.includes("127.0.0.1") ? false : true,
+  ssl: wantsSsl ? { rejectUnauthorized: true } : false,
 });
 
 // ═══════════════════════════════════════════════════════════════════

@@ -8,7 +8,11 @@ import { PrismaPg } from "@prisma/adapter-pg";
 function createClient(): PrismaClient {
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error("DATABASE_URL environment variable is not set");
-  const adapter = new PrismaPg({ connectionString: url });
+  const wantsSsl = url.includes("sslmode=require") || process.env.DB_SSL === "true";
+  const adapter = new PrismaPg({
+    connectionString: url,
+    ssl: wantsSsl ? { rejectUnauthorized: true } : false,
+  });
   return new PrismaClient({ adapter });
 }
 

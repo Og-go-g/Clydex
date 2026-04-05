@@ -5,11 +5,11 @@ config({ path: ".env" });
 import { Pool } from "pg";
 
 const url = process.env.HISTORY_DATABASE_URL!;
-const isLocal = url.includes("localhost") || url.includes("127.0.0.1");
+const wantsSsl = url.includes("sslmode=require") || process.env.DB_SSL === "true";
 const pool = new Pool({
   connectionString: url,
   max: 3,
-  ssl: isLocal ? false : true,
+  ssl: wantsSsl ? { rejectUnauthorized: true } : false,
 });
 
 const API = "https://zo-mainnet.n1.xyz";
