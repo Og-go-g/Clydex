@@ -12,7 +12,7 @@ import { getCachedAccountId } from "@/lib/n1/account-cache";
  * Typically ~1 week of new data per user.
  *
  * Protected by CRON_SECRET bearer token.
- * Configure in Vercel: cron schedule "0 3 * * 1" (Monday 3am UTC).
+ * Configured via crontab: "0 3 * * 1" (Monday 3am UTC).
  */
 export async function GET(request: NextRequest) {
   const cronSecret = process.env.CRON_SECRET;
@@ -22,8 +22,10 @@ export async function GET(request: NextRequest) {
 
   const auth = request.headers.get("authorization") ?? "";
   const expected = `Bearer ${cronSecret}`;
-  const authBuf = Buffer.from(auth.padEnd(expected.length));
-  const expectedBuf = Buffer.from(expected.padEnd(auth.length));
+  // Timing-safe comparison — pad both to the SAME length (max of the two)
+  const maxLen = Math.max(auth.length, expected.length);
+  const authBuf = Buffer.from(auth.padEnd(maxLen));
+  const expectedBuf = Buffer.from(expected.padEnd(maxLen));
   if (auth.length !== expected.length || !timingSafeEqual(authBuf, expectedBuf)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }

@@ -26,6 +26,7 @@ model TradeHistory {
 
   @@index([walletAddr, time])
   @@index([walletAddr, marketId])
+  @@index([accountId, time])
   @@map("trade_history")
 }
 
@@ -45,6 +46,7 @@ model PnlHistory {
 
   @@unique([walletAddr, marketId, time])
   @@index([walletAddr, time])
+  @@index([accountId, time])
   @@map("pnl_history")
 }
 
@@ -63,6 +65,7 @@ model FundingHistory {
 
   @@unique([walletAddr, marketId, time])
   @@index([walletAddr, time])
+  @@index([accountId, time])
   @@map("funding_history")
 }
 
@@ -142,6 +145,7 @@ model OrderHistory {
 
   @@index([walletAddr, addedAt])
   @@index([walletAddr, marketId])
+  @@index([accountId, addedAt])
   @@map("order_history")
 }
 
@@ -176,6 +180,7 @@ model VolumeCalendar {
 
   @@unique([walletAddr, date])
   @@index([walletAddr])
+  @@index([walletAddr, date])
   @@map("volume_calendar")
 }
 

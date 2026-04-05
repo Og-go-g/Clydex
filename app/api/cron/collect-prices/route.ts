@@ -10,7 +10,7 @@ import { getMarketsInfo, getMarketStats } from "@/lib/n1/client";
  * and stores them in PriceHistory for chart data.
  *
  * Protected by CRON_SECRET bearer token.
- * Called by Vercel Cron every 15 minutes.
+ * Called by crontab every 15 minutes.
  */
 export async function GET(request: NextRequest) {
   // Auth: always require cron secret
@@ -20,9 +20,10 @@ export async function GET(request: NextRequest) {
   }
   const auth = request.headers.get("authorization") ?? "";
   const expected = `Bearer ${cronSecret}`;
-  // Timing-safe comparison to prevent timing attacks on bearer token
-  const authBuf = Buffer.from(auth.padEnd(expected.length));
-  const expectedBuf = Buffer.from(expected.padEnd(auth.length));
+  // Timing-safe comparison — pad both to the SAME length (max of the two)
+  const maxLen = Math.max(auth.length, expected.length);
+  const authBuf = Buffer.from(auth.padEnd(maxLen));
+  const expectedBuf = Buffer.from(expected.padEnd(maxLen));
   if (auth.length !== expected.length || !timingSafeEqual(authBuf, expectedBuf)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }

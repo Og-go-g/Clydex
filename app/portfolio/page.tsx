@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from "react"
 import { useWallet } from "@/lib/wallet/context";
 import { useAuth } from "@/lib/auth/context";
 import { DepositWithdrawModal } from "@/components/collateral/DepositWithdrawModal";
+import { ClosePositionModal } from "@/components/collateral/ClosePositionModal";
 import { HistoryModal } from "@/components/history/HistoryModal";
 import { useRealtimePrices } from "@/hooks/useRealtimePrices";
 import { usePageActive } from "@/hooks/usePageActive";
@@ -134,6 +135,10 @@ export default function PortfolioPage() {
   const [error, setError] = useState<string | null>(null);
   const [collateralModalOpen, setCollateralModalOpen] = useState(false);
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
+  const [closeModalPos, setCloseModalPos] = useState<{
+    symbol: string; displaySymbol: string; side: "Long" | "Short"; isLong: boolean;
+    absSize: number; entryPrice: number; markPrice: number; totalPnl: number; positionValue: number;
+  } | null>(null);
 
   const refreshingRef = useRef(false);
 
@@ -497,6 +502,16 @@ export default function PortfolioPage() {
           onClose={() => setHistoryModalOpen(false)}
         />
 
+        {closeModalPos && (
+          <ClosePositionModal
+            isOpen
+            position={closeModalPos}
+            doClose={doClosePosition}
+            onClose={() => setCloseModalPos(null)}
+            onSuccess={fetchAccount}
+          />
+        )}
+
         {/* Account Summary */}
         <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-5">
           <div className="rounded-xl border border-border bg-card p-4">
@@ -602,36 +617,28 @@ export default function PortfolioPage() {
                         )}
                       </td>
                       <td className={`whitespace-nowrap px-3 py-3 text-right font-mono ${d.fundingPnl >= 0 ? "text-green-400" : "text-red-400"}`}>
-                        {formatUsd(d.fundingPnl, 6)}
+                        {formatUsd(d.fundingPnl)}
                       </td>
                       <td className="whitespace-nowrap px-3 py-3 text-right font-mono text-foreground">
                         {formatUsd(d.posUsedMargin)}
                       </td>
                       <td className="whitespace-nowrap px-3 py-3 text-right">
-                        {(() => {
-                          const closeKey = `${d.p.symbol.replace("/", "")}:${d.isLong ? "Long" : "Short"}`;
-                          const isClosing = closingSymbols.has(closeKey);
-                          return isClosing ? (
-                            <svg className="ml-auto h-4 w-4 animate-spin text-muted" viewBox="0 0 24 24" fill="none">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                            </svg>
-                          ) : (
-                            <button
-                              onClick={async () => {
-                                const ok = await doClosePosition({
-                                  symbol: d.p.symbol.replace("/", ""),
-                                  side: d.isLong ? "Long" : "Short",
-                                  size: d.baseSize,
-                                });
-                                if (ok) refreshAccount();
-                              }}
-                              className="rounded-md px-2 py-1 text-[10px] font-medium text-red-400 hover:bg-red-500/10 transition-colors"
-                            >
-                              Close
-                            </button>
-                          );
-                        })()}
+                        <button
+                          onClick={() => setCloseModalPos({
+                            symbol: d.p.symbol.replace("/", ""),
+                            displaySymbol: d.p.symbol,
+                            side: d.isLong ? "Long" : "Short",
+                            isLong: d.isLong,
+                            absSize: d.absSize,
+                            entryPrice: d.entryPrice,
+                            markPrice: d.markPrice,
+                            totalPnl: d.totalPnl,
+                            positionValue: d.positionValue,
+                          })}
+                          className="rounded-md px-2 py-1 text-[10px] font-medium text-red-400 hover:bg-red-500/10 transition-colors"
+                        >
+                          Close
+                        </button>
                       </td>
                     </tr>
                   ))}

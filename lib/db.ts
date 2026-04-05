@@ -1,16 +1,14 @@
 import { PrismaClient } from "@/lib/generated/prisma/client";
-import { PrismaNeon } from "@prisma/adapter-neon";
+import { PrismaPg } from "@prisma/adapter-pg";
 
 /**
- * Create a PrismaClient with Neon serverless adapter.
- * PrismaNeon v7 takes a Pool config object, not a neon() SQL function.
+ * Create a PrismaClient connected to local PostgreSQL.
+ * Uses @prisma/adapter-pg for self-hosted DB (replaces Neon adapter).
  */
 function createClient(): PrismaClient {
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error("DATABASE_URL environment variable is not set");
-  // Strip channel_binding — not supported by Neon serverless driver
-  const cleanUrl = url.replace(/[&?]channel_binding=[^&]*/g, "");
-  const adapter = new PrismaNeon({ connectionString: cleanUrl });
+  const adapter = new PrismaPg({ connectionString: url });
   return new PrismaClient({ adapter });
 }
 

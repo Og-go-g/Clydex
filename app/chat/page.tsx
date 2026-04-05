@@ -12,6 +12,7 @@ import { useAuth } from "@/lib/auth/context";
 import { useRealtimePrices } from "@/hooks/useRealtimePrices";
 import { useOrderExecution, isPreviewConsumed, isPreviewFailed, getConfirmedPosition } from "@/hooks/useOrderExecution";
 import { useOrderActions } from "@/hooks/useOrderActions";
+import { ClosePositionModal } from "@/components/collateral/ClosePositionModal";
 import { useToast } from "@/components/alerts/ToastProvider";
 import { usePageActive } from "@/hooks/usePageActive";
 import { useChartPanel, useChartPanelSafe } from "@/lib/chat/chart-panel-context";
@@ -30,6 +31,15 @@ interface ToolMessagePart {
   output?: Record<string, unknown>;
   errorText?: string;
 }
+
+type CloseModalData = {
+  symbol: string; displaySymbol: string; side: "Long" | "Short"; isLong: boolean;
+  absSize: number; entryPrice: number; markPrice: number; totalPnl: number; positionValue: number;
+};
+
+/** Module-level ref for opening the close modal from any nested component */
+let openCloseModalFn: ((data: CloseModalData) => void) | null = null;
+export function openCloseModal(data: CloseModalData) { openCloseModalFn?.(data); }
 
 // ─── Constants ──────────────────────────────────────────────────
 
@@ -306,6 +316,14 @@ function ChatContent({ chatId }: { chatId: string }) {
   });
 
   const [input, setInput] = useState("");
+  const { closePosition: doClosePosition } = useOrderActions();
+  const [closeModalData, setCloseModalData] = useState<CloseModalData | null>(null);
+
+  // Register module-level opener so nested components can open the modal
+  useEffect(() => {
+    openCloseModalFn = setCloseModalData;
+    return () => { openCloseModalFn = null; };
+  }, []);
 
   // Pick up prefill from "Trade X" button on markets page
   useEffect(() => {
@@ -370,7 +388,8 @@ function ChatContent({ chatId }: { chatId: string }) {
   const activeSymbols = pageActive ? priceSymbols : [];
   const realtimePrices = useRealtimePrices(activeSymbols);
 
-  // Collect symbols of positions/orders that have been closed/cancelled in this conversation
+  // Collect symbols of positions/orders that have been ACTUALLY closed/cancelled
+  // Only mark as closed when the preview has been consumed (user clicked execute)
   const closedSymbols = useMemo(() => {
     const closed = new Set<string>();
     for (const msg of messages) {
@@ -379,10 +398,13 @@ function ChatContent({ chatId }: { chatId: string }) {
       for (const part of parts) {
         if (!part.output || part.output.error) continue;
         const tName = part.toolName || part.type?.replace("tool-", "");
-        // closePosition tool — user initiated a close
+        // closePosition — only mark closed if preview was actually consumed (executed)
         if (tName === "closePosition" && part.output.action === "close_position") {
-          const sym = part.output.market as string | undefined;
-          if (sym) closed.add(sym);
+          const pid = part.output.previewId as string | undefined;
+          if (pid && isPreviewConsumed(pid)) {
+            const sym = part.output.market as string | undefined;
+            if (sym) closed.add(sym);
+          }
         }
         // cancelOrder — mark order as cancelled
         if (tName === "cancelOrder" && !part.output.error) {
@@ -531,6 +553,7 @@ function ChatContent({ chatId }: { chatId: string }) {
                     realtimePrices={realtimePrices}
                     closedSymbols={closedSymbols}
                     onSendMessage={handleCardAction}
+                    onOpenCloseModal={setCloseModalData}
                     isDismissed={isDismissed}
                     messageId={msg.id}
                   />
@@ -578,6 +601,15 @@ function ChatContent({ chatId }: { chatId: string }) {
           <ChartToggleButton />
         </form>
       </div>
+
+      {closeModalData && (
+        <ClosePositionModal
+          isOpen
+          position={closeModalData}
+          doClose={doClosePosition}
+          onClose={() => setCloseModalData(null)}
+        />
+      )}
     </div>
   );
 }
@@ -590,6 +622,7 @@ function MessageContent({
   realtimePrices,
   closedSymbols,
   onSendMessage,
+  onOpenCloseModal,
   isDismissed,
   messageId,
 }: {
@@ -598,6 +631,7 @@ function MessageContent({
   realtimePrices?: Record<string, number>;
   closedSymbols?: Set<string>;
   onSendMessage?: (msg: string) => void;
+  onOpenCloseModal?: (data: CloseModalData) => void;
   isDismissed?: boolean;
   messageId?: string;
 }) {
@@ -690,6 +724,7 @@ function MessageContent({
               realtimePrices={realtimePrices}
               closedSymbols={closedSymbols}
               onSendMessage={onSendMessage}
+              onOpenCloseModal={onOpenCloseModal}
               isDismissed={isDismissed}
               cardIndex={g.tools[0].idx}
               messageId={messageId}
@@ -763,7 +798,7 @@ function SimpleMarkdown({ text }: { text: string }) {
 
 // ─── Tool Result Rendering ───────────────────────────────────────
 
-function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, isDismissed, cardIndex, messageId, descriptionText, beforeText }: { part: ToolMessagePart; realtimePrices?: Record<string, number>; closedSymbols?: Set<string>; onSendMessage?: (msg: string) => void; isDismissed?: boolean; cardIndex?: number; messageId?: string; descriptionText?: string; beforeText?: string }) {
+function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, onOpenCloseModal, isDismissed, cardIndex, messageId, descriptionText, beforeText }: { part: ToolMessagePart; realtimePrices?: Record<string, number>; closedSymbols?: Set<string>; onSendMessage?: (msg: string) => void; onOpenCloseModal?: (data: CloseModalData) => void; isDismissed?: boolean; cardIndex?: number; messageId?: string; descriptionText?: string; beforeText?: string }) {
   const toolName = part.toolName || part.type?.replace("tool-", "");
   const state = part.state;
   const result = part.output;
@@ -821,7 +856,7 @@ function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, isDism
     if (positions.length > 0) {
       return (
         <CollapsibleCard cardKey={cKey} label={`Positions (${positions.length})`} beforeText={beforeText} descriptionText={descriptionText}>
-          <PositionsCard data={result} realtimePrices={realtimePrices} closedSymbols={closedSymbols} onSendMessage={onSendMessage} />
+          <PositionsCard data={result} realtimePrices={realtimePrices} closedSymbols={closedSymbols} onSendMessage={onSendMessage} onOpenCloseModal={onOpenCloseModal} />
         </CollapsibleCard>
       );
     }
@@ -856,7 +891,7 @@ function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, isDism
     const sym = (result.market as string) ?? "";
     return (
       <CollapsibleCard cardKey={cKey} label={`Close — ${sym}`} badge={isDismissed ? "Dismissed" : undefined} badgeColor="text-muted" beforeText={beforeText} descriptionText={descriptionText}>
-        <ClosePositionCard data={result} isDismissed={isDismissed} realtimePrices={realtimePrices} />
+        <ClosePositionCard data={result} isDismissed={isDismissed} realtimePrices={realtimePrices} onOpenCloseModal={onOpenCloseModal} />
       </CollapsibleCard>
     );
   }
@@ -1045,11 +1080,13 @@ function PositionsCard({
   realtimePrices,
   closedSymbols,
   onSendMessage,
+  onOpenCloseModal,
 }: {
   data: Record<string, unknown>;
   realtimePrices?: Record<string, number>;
   closedSymbols?: Set<string>;
   onSendMessage?: (msg: string) => void;
+  onOpenCloseModal?: (data: CloseModalData) => void;
 }) {
   // Remember which positions were in the original tool result by (marketId + side).
   // On refresh, only show positions matching these — prevents old chats from
@@ -1257,10 +1294,20 @@ function PositionsCard({
               </div>
             )}
 
-            {/* Close button */}
-            {onSendMessage && (
+            {/* Close button → opens ClosePositionModal */}
+            {onOpenCloseModal && (
               <button
-                onClick={() => onSendMessage(`close ${baseAsset} 100%`)}
+                onClick={() => onOpenCloseModal({
+                  symbol: wsKey,
+                  displaySymbol: `${baseAsset}/USD`,
+                  side: isLong ? "Long" : "Short",
+                  isLong,
+                  absSize: pos.size ?? 0,
+                  entryPrice: pos.entryPrice ?? 0,
+                  markPrice: liveMarkPrice ?? pos.markPrice ?? 0,
+                  totalPnl: livePnlFunding,
+                  positionValue: (pos.size ?? 0) * (liveMarkPrice ?? pos.markPrice ?? 0),
+                })}
                 disabled={isClosed}
                 className="w-full rounded-lg border border-red-500/30 bg-red-500/5 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-red-500/5"
               >
@@ -2076,14 +2123,22 @@ function LivePositionCard({ initialPos, txHash, realtimePrices, onSendMessage }:
             {liveTriggers.stopLoss && <span className="text-red-400">SL {fmtPrice(liveTriggers.stopLoss)}</span>}
           </div>
         )}
-        {onSendMessage && (
-          <button
-            onClick={() => onSendMessage(`close ${baseAsset} 100%`)}
-            className="w-full rounded-lg border border-red-500/30 bg-red-500/5 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/10 transition-colors"
-          >
-            Close Position
-          </button>
-        )}
+        <button
+          onClick={() => openCloseModal({
+            symbol: sym,
+            displaySymbol: `${baseAsset}/USD`,
+            side: initSide as "Long" | "Short",
+            isLong: posIsLong,
+            absSize,
+            entryPrice: entryP,
+            markPrice: liveMarkPrice,
+            totalPnl: livePnlFunding,
+            positionValue: absSize * liveMarkPrice,
+          })}
+          className="w-full rounded-lg border border-red-500/30 bg-red-500/5 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/10 transition-colors"
+        >
+          Close Position
+        </button>
       </div>
     </div>
   );
@@ -3172,7 +3227,7 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage, isDismissed: pr
 
 // ─── Close Position Card ─────────────────────────────────────────
 
-function ClosePositionCard({ data, isDismissed: propDismissed, realtimePrices }: { data: Record<string, unknown>; isDismissed?: boolean; realtimePrices?: Record<string, number> }) {
+function ClosePositionCard({ data, isDismissed: propDismissed, realtimePrices, onOpenCloseModal }: { data: Record<string, unknown>; isDismissed?: boolean; realtimePrices?: Record<string, number>; onOpenCloseModal?: (data: CloseModalData) => void }) {
   const { executeClose, status, error, txHash, reset, recheck, hasSession } = useOrderExecution();
   const market = data.market as string;
   const side = data.side as "Long" | "Short";
@@ -3337,6 +3392,7 @@ function ClosePositionCard({ data, isDismissed: propDismissed, realtimePrices }:
     );
   }
 
+  const closeBaseAssetName = baseAssetFrom(market);
   return (
     <div className="my-2 rounded-xl border border-orange-500/30 bg-background p-4">
       <div className="mb-2 flex items-center justify-between">
@@ -3345,18 +3401,15 @@ function ClosePositionCard({ data, isDismissed: propDismissed, realtimePrices }:
           <span className="text-sm font-semibold text-foreground">{market}</span>
           <span className="text-xs text-muted">{side}</span>
         </div>
-        <div className="mr-5">
-          <button
-            onClick={(e) => { e.stopPropagation(); handleDismissClose(); }}
-            className="rounded-md p-1 text-muted/50 hover:text-muted hover:bg-white/5 transition-colors"
-            aria-label="Dismiss"
-            title="Dismiss"
-          >
-            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
+        <button
+          onClick={(e) => { e.stopPropagation(); handleDismissClose(); }}
+          className="rounded-md p-1 text-muted/50 hover:text-muted hover:bg-white/5 transition-colors"
+          aria-label="Dismiss"
+        >
+          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
       </div>
 
       <div className="grid grid-cols-2 gap-2 text-xs mb-3">
@@ -3376,43 +3429,26 @@ function ClosePositionCard({ data, isDismissed: propDismissed, realtimePrices }:
           <span className="text-muted">Est. PnL</span>
           <div className={`font-mono ${pnlColor}`}>{formatUsd(pnl)}</div>
         </div>
-        <div>
-          <span className="text-muted">Fees</span>
-          <div className="font-mono text-foreground">
-            {(data.takerFee != null && data.makerFee != null)
-              ? `${formatUsd(data.takerFee as number)} / ${formatUsd(data.makerFee as number)}`
-              : formatUsd(data.estimatedFee as number)}
-          </div>
-          {(data.takerRate != null && data.makerRate != null) && (
-            <div className="text-[10px] text-muted/60 font-mono">taker / maker</div>
-          )}
-        </div>
-      </div>
-
-      <div className="mb-3">
-        <div className="text-[10px] text-muted mb-1">Max Slippage</div>
-        <div className="flex gap-1">
-          {CLOSE_SLIPPAGE_STEPS.map((s, i) => (
-            <button
-              key={s}
-              onClick={() => setCloseSlippageIdx(i)}
-              className={`flex-1 rounded-md py-1 text-[10px] font-mono transition-colors ${
-                closeSlippageIdx === i
-                  ? "bg-orange-500/20 text-orange-400 border border-orange-500/40"
-                  : "bg-white/5 text-muted border border-transparent hover:bg-white/10"
-              }`}
-            >
-              {(s * 100).toFixed(1)}%
-            </button>
-          ))}
-        </div>
       </div>
 
       <button
-        onClick={handleClose}
+        onClick={() => {
+          const fn = onOpenCloseModal ?? openCloseModal;
+          fn({
+            symbol: market,
+            displaySymbol: `${closeBaseAssetName}/USD`,
+            side,
+            isLong,
+            absSize: closeSize,
+            entryPrice,
+            markPrice: currentPrice,
+            totalPnl: pnl,
+            positionValue: closeSize * currentPrice,
+          });
+        }}
         className="w-full rounded-lg bg-orange-600 py-2.5 text-sm font-medium text-white hover:bg-orange-500 transition-colors"
       >
-        {hasSession ? "Close Position" : "Sign & Close Position"}
+        Close Position
       </button>
     </div>
   );

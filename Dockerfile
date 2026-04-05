@@ -17,8 +17,9 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# Generate Prisma client
-RUN npx prisma generate --schema prisma/schema.prisma
+# Generate Prisma clients (main + history)
+RUN npx prisma generate --schema prisma/schema.prisma && \
+    npx prisma generate --schema prisma/history.prisma
 
 # Build Next.js (standalone output)
 # Dummy env vars needed at build time (code validates on import)

@@ -5,7 +5,7 @@ import { useWallet as useSolanaWallet } from "@solana/wallet-adapter-react";
 import { PublicKey } from "@solana/web3.js";
 import { getOrCreateUser, invalidateSession } from "./useOrderExecution";
 
-type ActionStatus = "idle" | "signing" | "submitting" | "confirmed" | "error";
+type ActionStatus = "idle" | "signing" | "submitting" | "verifying" | "confirmed" | "error";
 
 interface OrderActionState {
   cancellingIds: Set<number>;
@@ -156,7 +156,7 @@ export function useOrderActions() {
           symbol: params.symbol,
           side: params.side,
           size: params.size,
-          slippage: params.slippage ?? 0.001,
+          slippage: params.slippage ?? 0.03,
         }));
         setState(s => {
           const next = new Set(s.closingSymbols);
@@ -172,6 +172,8 @@ export function useOrderActions() {
           next.delete(key);
           return { ...s, closingSymbols: next, lastError: isUserReject ? "Cancelled by user" : msg };
         });
+        // Re-throw so ClosePositionModal can catch and show error
+        if (!isUserReject) throw err;
         return false;
       }
     },

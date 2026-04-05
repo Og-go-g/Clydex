@@ -307,13 +307,12 @@ export async function closePosition(
   const market = resolveMarket(params.symbol);
   if (!market) throw new Error(`Unknown market: ${params.symbol}`);
 
-  // Close = opposite side, reduce-only market order
-  // For close orders: round DOWN to avoid exceeding position size.
-  // Math.floor ensures we never close more than we have (0.05 → 0.0, not 0.1).
-  // If floor zeros out, use the original size (SDK will clamp to position size for reduce-only).
+  // Close = opposite side, reduce-only market order.
+  // isReduceOnly: true tells the exchange to clamp size to actual position,
+  // so we pass the full size (no manual rounding) to close the entire position.
+  // Math.abs as safety: UI may pass negative size for shorts (display convention).
   const closeSide = params.side === "Long" ? Side.Ask : Side.Bid;
-  const flooredSize = Math.floor(params.size * 10) / 10;
-  const safeSize = flooredSize > 0 ? flooredSize : params.size;
+  const closeSize = Math.abs(params.size);
 
   // Slippage protection for close orders
   let closePrice: number | undefined;
@@ -335,7 +334,7 @@ export async function closePosition(
     side: closeSide,
     fillMode: FillMode.ImmediateOrCancel,
     isReduceOnly: true,
-    size: safeSize,
+    size: closeSize,
     price: closePrice,
     accountId: params.accountId,
   });

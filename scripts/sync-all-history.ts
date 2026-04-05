@@ -5,12 +5,14 @@
  * Streams data page-by-page into PostgreSQL — never holds more than 1 page in memory.
  *
  * Usage:
- *   npx tsx scripts/sync-all-history.ts --force          # Re-sync everything
  *   npx tsx scripts/sync-all-history.ts                   # Resume (skip synced)
+ *   npx tsx scripts/sync-all-history.ts --force            # Re-sync everything
+ *   npx tsx scripts/sync-all-history.ts --from=500         # Start from account 500
+ *   npx tsx scripts/sync-all-history.ts --to=1000          # Stop at account 1000
  *
  * Environment:
- *   SYNC_PROXIES     — Comma-separated proxy list (user:pass@host:port)
- *   SYNC_CONCURRENCY — Parallel accounts (default: 5)
+ *   SYNC_PROXIES       — Comma-separated proxy list (user:pass@host:port)
+ *   SYNC_CONCURRENCY   — Parallel accounts (default: 3)
  *   HISTORY_DATABASE_URL — PostgreSQL connection string
  */
 
@@ -27,12 +29,31 @@ import type { Agent } from "http";
 // ═══════════════════════════════════════════════════════════════════
 
 const API = "https://zo-mainnet.n1.xyz";
-const MAX_ID = 12000;
+const FRONTEND_API = "https://01.xyz/api";
+const MAX_ID = Number(process.argv.find(a => a.startsWith("--to="))?.split("=")[1] || "12000");
+const FROM_ID = Number(process.argv.find(a => a.startsWith("--from="))?.split("=")[1] || "0");
 const PAGE = 250;
-const CONCURRENCY = Number(process.env.SYNC_CONCURRENCY || "5");
+const CONCURRENCY = Number(process.env.SYNC_CONCURRENCY || "3");
 const FORCE = process.argv.includes("--force");
-const RETRIES = 3;
-const BACKOFF = 5_000;
+
+// Rate limiting — respect 01 API limits
+const API_DELAY_MS = 200;          // 200ms between API calls (~5 req/s)
+const BETWEEN_ACCOUNTS_MS = 500;   // 500ms pause between accounts
+const FRONTEND_API_DELAY_MS = 3000; // 3s between 01.xyz frontend API calls (behind Vercel WAF)
+const RETRY_COUNT = 3;
+const RETRY_BACKOFF_MS = 5_000;
+
+// ═══════════════════════════════════════════════════════════════════
+//  GRACEFUL SHUTDOWN
+// ═══════════════════════════════════════════════════════════════════
+
+let shuttingDown = false;
+process.on("SIGINT", () => {
+  if (shuttingDown) { console.log("\n  Force exit."); process.exit(1); }
+  shuttingDown = true;
+  console.log("\n\n  ⏸ Shutting down gracefully... (press Ctrl+C again to force)");
+  console.log("  Waiting for current accounts to finish...");
+});
 
 // ═══════════════════════════════════════════════════════════════════
 //  PROXY ROTATION
@@ -50,36 +71,76 @@ function proxy(): Agent | undefined {
 //  DATABASE
 // ═══════════════════════════════════════════════════════════════════
 
+const dbUrl = process.env.HISTORY_DATABASE_URL || "";
 const db = new Pool({
-  connectionString: process.env.HISTORY_DATABASE_URL,
+  connectionString: dbUrl,
   max: 10,
-  ssl: (process.env.HISTORY_DATABASE_URL || "").includes("localhost") ? false : { rejectUnauthorized: false },
+  ssl: dbUrl.includes("localhost") || dbUrl.includes("127.0.0.1") ? false : true,
 });
 
 // ═══════════════════════════════════════════════════════════════════
-//  FETCH WITH RETRY
+//  HELPERS
 // ═══════════════════════════════════════════════════════════════════
 
-async function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
+function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
+/** Rate-limited fetch with retry + 429 backoff */
 async function get(url: string): Promise<Record<string, unknown> | null> {
-  for (let i = 0; i < RETRIES; i++) {
+  for (let i = 0; i < RETRY_COUNT; i++) {
     try {
       const agent = proxy();
       const opts: RequestInit & { agent?: Agent } = {
         headers: { Accept: "application/json" },
-        signal: AbortSignal.timeout(20_000),
+        signal: AbortSignal.timeout(30_000),
       };
       if (agent) (opts as Record<string, unknown>).agent = agent;
       const res = await fetch(url, opts);
+
       if (res.status === 429) {
-        await sleep(BACKOFF * (i + 1));
+        const retryAfter = Number(res.headers.get("retry-after") || "10");
+        const waitMs = Math.max(retryAfter * 1000, RETRY_BACKOFF_MS * (i + 1));
+        process.stdout.write(`\n    [429] Rate limited, waiting ${Math.round(waitMs / 1000)}s...\n`);
+        await sleep(waitMs);
+        continue;
+      }
+      if (res.status === 404 || res.status === 400) return null;
+      if (!res.ok) {
+        if (i < RETRY_COUNT - 1) { await sleep(RETRY_BACKOFF_MS); continue; }
+        return null;
+      }
+      return await res.json() as Record<string, unknown>;
+    } catch {
+      if (i < RETRY_COUNT - 1) await sleep(RETRY_BACKOFF_MS * (i + 1));
+    }
+  }
+  return null;
+}
+
+/** Rate-limited fetch for 01.xyz frontend API (behind Vercel WAF) */
+const BROWSER_HEADERS: Record<string, string> = {
+  Accept: "application/json, text/plain, */*",
+  "Accept-Language": "en-US,en;q=0.9",
+  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  Referer: "https://01.xyz/",
+  Origin: "https://01.xyz",
+};
+
+async function getFrontend(url: string): Promise<Record<string, unknown> | null> {
+  for (let i = 0; i < RETRY_COUNT; i++) {
+    try {
+      const res = await fetch(url, {
+        headers: BROWSER_HEADERS,
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (res.status === 429 || res.status === 403) {
+        const waitMs = FRONTEND_API_DELAY_MS * (i + 2);
+        await sleep(waitMs);
         continue;
       }
       if (!res.ok) return null;
       return await res.json() as Record<string, unknown>;
     } catch {
-      if (i < RETRIES - 1) await sleep(BACKOFF);
+      if (i < RETRY_COUNT - 1) await sleep(RETRY_BACKOFF_MS);
     }
   }
   return null;
@@ -93,7 +154,7 @@ const syms: Record<number, string> = {};
 
 async function loadMarkets() {
   const info = await get(`${API}/info`);
-  if (!info) throw new Error("Cannot load markets");
+  if (!info) throw new Error("Cannot load markets from 01 Exchange API");
   for (const m of (info.markets as Array<{ marketId: number; symbol: string }>) || []) {
     syms[m.marketId] = m.symbol;
   }
@@ -102,7 +163,6 @@ async function loadMarkets() {
 
 function sym(id: number): string { return syms[id] || `MKT-${id}`; }
 
-/** Safe date parse — returns epoch 0 instead of Invalid Date */
 function safeDate(v: unknown): Date {
   if (!v) return new Date(0);
   const d = new Date(String(v));
@@ -111,7 +171,6 @@ function safeDate(v: unknown): Date {
 
 // ═══════════════════════════════════════════════════════════════════
 //  STREAMING PAGE PROCESSOR
-//  Fetches one page at a time, inserts into DB, frees memory.
 // ═══════════════════════════════════════════════════════════════════
 
 type R = Record<string, unknown>;
@@ -120,12 +179,13 @@ async function streamPages(
   baseUrl: string,
   sql: string,
   toParams: (page: R[]) => unknown[],
+  label?: string,
 ): Promise<number> {
   let total = 0;
   let cursor: string | undefined;
   let pages = 0;
 
-  while (true) {
+  while (!shuttingDown) {
     let url = baseUrl + (baseUrl.includes("?") ? "&" : "?") + `pageSize=${PAGE}`;
     if (cursor) url += `&startInclusive=${encodeURIComponent(cursor)}`;
 
@@ -139,25 +199,18 @@ async function streamPages(
       const result = await db.query(sql, toParams(items));
       total += result.rowCount ?? 0;
     } catch (err) {
-      // Skip bad pages (invalid data, duplicates, etc) — don't crash
       const msg = err instanceof Error ? err.message.slice(0, 100) : String(err);
-      if (pages === 0) {
-        // First page failed — likely a schema issue, re-throw
-        throw err;
+      // Log and continue — don't crash the entire sync
+      if (label) {
+        process.stdout.write(`\n    [!] ${label} page ${pages + 1} skipped: ${msg.slice(0, 60)}\n`);
       }
-      // Log and continue with next page
-      process.stdout.write(`\r    [!] page ${pages + 1} skipped: ${msg.slice(0, 60)}                    \n`);
     }
 
     pages++;
-    if (pages % 10 === 0) {
-      process.stdout.write(`\r    ... ${total} records inserted (${pages} pages)                    `);
-    }
-
     cursor = (body.nextStartInclusive ?? body.cursor ?? body.nextCursor) as string | undefined;
     if (!cursor || items.length < PAGE) break;
 
-    await sleep(50); // Gentle rate limit
+    await sleep(API_DELAY_MS); // Rate limit between pages
   }
 
   return total;
@@ -173,23 +226,21 @@ async function syncTrades(id: number, w: string): Promise<number> {
     const param = role === "taker" ? "takerId" : "makerId";
     total += await streamPages(
       `${API}/trades?${param}=${id}`,
-      `INSERT INTO trade_history (trade_id, account_id, wallet_addr, market_id, symbol, side, size, price, role, fee, "time")
+      `INSERT INTO trade_history ("tradeId", "accountId", "walletAddr", "marketId", symbol, side, size, price, role, fee, "time")
        SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::text[], $7::numeric[], $8::numeric[], $9::text[], $10::numeric[], $11::timestamptz[])
-       ON CONFLICT (trade_id, "time") DO NOTHING`,
+       ON CONFLICT ("tradeId") DO NOTHING`,
       (p) => [
         p.map(t => String(t.tradeId)),
-        p.map(() => id),
-        p.map(() => w),
-        p.map(t => Number(t.marketId)),
-        p.map(t => sym(Number(t.marketId))),
+        p.map(() => id), p.map(() => w),
+        p.map(t => Number(t.marketId)), p.map(t => sym(Number(t.marketId))),
         p.map(t => t.takerSide === "bid" ? "Long" : "Short"),
-        p.map(t => String(t.baseSize ?? 0)),
-        p.map(t => String(t.price ?? 0)),
-        p.map(() => role),
-        p.map(() => "0"),
+        p.map(t => String(t.baseSize ?? 0)), p.map(t => String(t.price ?? 0)),
+        p.map(() => role), p.map(() => "0"),
         p.map(t => safeDate(t.time)),
       ],
+      `trades(${role})`,
     );
+    await sleep(API_DELAY_MS);
   }
   return total;
 }
@@ -197,15 +248,13 @@ async function syncTrades(id: number, w: string): Promise<number> {
 async function syncOrders(id: number, w: string): Promise<number> {
   return streamPages(
     `${API}/account/${id}/orders`,
-    `INSERT INTO order_history (order_id, account_id, wallet_addr, market_id, symbol, side, placed_size, filled_size, placed_price, order_value, fill_mode, fill_status, status, is_reduce_only, added_at, updated_at)
+    `INSERT INTO order_history ("orderId", "accountId", "walletAddr", "marketId", symbol, side, "placedSize", "filledSize", "placedPrice", "orderValue", "fillMode", "fillStatus", status, "isReduceOnly", "addedAt", "updatedAt")
      SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::text[], $7::numeric[], $8::numeric[], $9::numeric[], $10::numeric[], $11::text[], $12::text[], $13::text[], $14::boolean[], $15::timestamptz[], $16::timestamptz[])
-     ON CONFLICT (order_id, added_at) DO NOTHING`,
+     ON CONFLICT ("orderId") DO NOTHING`,
     (p) => [
       p.map(o => String(o.orderId)),
-      p.map(() => id),
-      p.map(() => w),
-      p.map(o => Number(o.marketId)),
-      p.map(o => String(o.marketSymbol ?? sym(Number(o.marketId)))),
+      p.map(() => id), p.map(() => w),
+      p.map(o => Number(o.marketId)), p.map(o => String(o.marketSymbol ?? sym(Number(o.marketId)))),
       p.map(o => o.side === "bid" ? "Long" : "Short"),
       p.map(o => String(o.placedSize ?? 0)),
       p.map(o => o.filledSize != null ? String(o.filledSize) : null),
@@ -215,84 +264,147 @@ async function syncOrders(id: number, w: string): Promise<number> {
       p.map(o => o.filledSize != null && Number(o.filledSize) > 0 ? "Filled" : "Unfilled"),
       p.map(o => String(o.finalizationReason ?? "unknown")),
       p.map(o => Boolean(o.isReduceOnly)),
-      p.map(o => safeDate(o.addedAt)),
-      p.map(o => safeDate(o.updatedAt)),
+      p.map(o => safeDate(o.addedAt)), p.map(o => safeDate(o.updatedAt)),
     ],
+    "orders",
   );
 }
 
 async function syncPnl(id: number, w: string): Promise<number> {
   return streamPages(
     `${API}/account/${id}/history/pnl`,
-    `INSERT INTO pnl_history (account_id, wallet_addr, market_id, symbol, trading_pnl, settled_funding_pnl, position_size, "time")
+    `INSERT INTO pnl_history ("accountId", "walletAddr", "marketId", symbol, "tradingPnl", "settledFundingPnl", "positionSize", "time")
      SELECT * FROM unnest($1::int[], $2::text[], $3::int[], $4::text[], $5::numeric[], $6::numeric[], $7::numeric[], $8::timestamptz[])
-     ON CONFLICT (wallet_addr, market_id, "time") DO NOTHING`,
+     ON CONFLICT ("walletAddr", "marketId", "time") DO NOTHING`,
     (p) => [
       p.map(() => id), p.map(() => w),
       p.map(x => Number(x.marketId)), p.map(x => sym(Number(x.marketId))),
       p.map(x => String(x.tradingPnl ?? 0)), p.map(x => String(x.settledFundingPnl ?? 0)),
       p.map(x => String(x.positionSize ?? 0)), p.map(x => safeDate(x.time)),
     ],
+    "pnl",
   );
 }
 
 async function syncFunding(id: number, w: string): Promise<number> {
   return streamPages(
     `${API}/account/${id}/history/funding`,
-    `INSERT INTO funding_history (account_id, wallet_addr, market_id, symbol, funding_pnl, position_size, "time")
+    `INSERT INTO funding_history ("accountId", "walletAddr", "marketId", symbol, "fundingPnl", "positionSize", "time")
      SELECT * FROM unnest($1::int[], $2::text[], $3::int[], $4::text[], $5::numeric[], $6::numeric[], $7::timestamptz[])
-     ON CONFLICT (wallet_addr, market_id, "time") DO NOTHING`,
+     ON CONFLICT ("walletAddr", "marketId", "time") DO NOTHING`,
     (p) => [
       p.map(() => id), p.map(() => w),
       p.map(x => Number(x.marketId)), p.map(x => sym(Number(x.marketId))),
       p.map(x => String(x.fundingPnl ?? 0)), p.map(x => String(x.positionSize ?? 0)),
       p.map(x => safeDate(x.time)),
     ],
+    "funding",
   );
 }
 
 async function syncDeposits(id: number, w: string): Promise<number> {
   return streamPages(
     `${API}/account/${id}/history/deposit`,
-    `INSERT INTO deposit_history (account_id, wallet_addr, amount, balance, token_id, "time")
+    `INSERT INTO deposit_history ("accountId", "walletAddr", amount, balance, "tokenId", "time")
      SELECT * FROM unnest($1::int[], $2::text[], $3::numeric[], $4::numeric[], $5::int[], $6::timestamptz[])
-     ON CONFLICT (wallet_addr, "time", amount) DO NOTHING`,
+     ON CONFLICT ("walletAddr", "time", amount) DO NOTHING`,
     (p) => [
       p.map(() => id), p.map(() => w),
       p.map(x => String(x.amount ?? 0)), p.map(x => String(x.balance ?? 0)),
       p.map(x => Number(x.tokenId ?? 0)), p.map(x => safeDate(x.time)),
     ],
+    "deposits",
   );
 }
 
 async function syncWithdrawals(id: number, w: string): Promise<number> {
   return streamPages(
     `${API}/account/${id}/history/withdrawal`,
-    `INSERT INTO withdrawal_history (account_id, wallet_addr, amount, balance, fee, dest_pubkey, "time")
+    `INSERT INTO withdrawal_history ("accountId", "walletAddr", amount, balance, fee, "destPubkey", "time")
      SELECT * FROM unnest($1::int[], $2::text[], $3::numeric[], $4::numeric[], $5::numeric[], $6::text[], $7::timestamptz[])
-     ON CONFLICT (wallet_addr, "time", amount) DO NOTHING`,
+     ON CONFLICT ("walletAddr", "time", amount) DO NOTHING`,
     (p) => [
       p.map(() => id), p.map(() => w),
       p.map(x => String(x.amount ?? 0)), p.map(x => String(x.balance ?? 0)),
       p.map(x => String(x.fee ?? 0)), p.map(x => String(x.destPubkey ?? "")),
       p.map(x => safeDate(x.time)),
     ],
+    "withdrawals",
   );
 }
 
 async function syncLiquidations(id: number, w: string): Promise<number> {
   return streamPages(
     `${API}/account/${id}/history/liquidation`,
-    `INSERT INTO liquidation_history (account_id, wallet_addr, fee, liquidation_kind, margins, "time")
+    `INSERT INTO liquidation_history ("accountId", "walletAddr", fee, "liquidationKind", margins, "time")
      SELECT * FROM unnest($1::int[], $2::text[], $3::numeric[], $4::text[], $5::jsonb[], $6::timestamptz[])
-     ON CONFLICT (wallet_addr, "time", fee) DO NOTHING`,
+     ON CONFLICT ("walletAddr", "time", fee) DO NOTHING`,
     (p) => [
       p.map(() => id), p.map(() => w),
       p.map(x => String(x.fee ?? 0)), p.map(x => String(x.liquidationKind ?? "unknown")),
       p.map(x => { const { time: _, fee: __, liquidationKind: ___, ...r } = x; return JSON.stringify(r); }),
       p.map(x => safeDate(x.time)),
     ],
+    "liquidations",
   );
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  01.XYZ FRONTEND API — volume calendar + PnL totals
+// ═══════════════════════════════════════════════════════════════════
+
+async function syncVolumeCalendar(id: number, w: string): Promise<number> {
+  const body = await getFrontend(`${FRONTEND_API}/volume-calendar/${id}`);
+  if (!body) return 0;
+
+  const days = (body.days ?? {}) as Record<string, Record<string, number>>;
+  const entries = Object.entries(days);
+  if (entries.length === 0) return 0;
+
+  try {
+    const result = await db.query(
+      `INSERT INTO volume_calendar (id, "accountId", "walletAddr", date, volume, "makerVolume", "takerVolume", "makerFees", "takerFees", "totalFees")
+       SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::text[], $5::numeric[], $6::numeric[], $7::numeric[], $8::numeric[], $9::numeric[], $10::numeric[])
+       ON CONFLICT ("walletAddr", date) DO UPDATE SET
+         volume = EXCLUDED.volume, "makerVolume" = EXCLUDED."makerVolume", "takerVolume" = EXCLUDED."takerVolume",
+         "makerFees" = EXCLUDED."makerFees", "takerFees" = EXCLUDED."takerFees", "totalFees" = EXCLUDED."totalFees"`,
+      [
+        entries.map(() => crypto.randomUUID()),
+        entries.map(() => id), entries.map(() => w),
+        entries.map(([date]) => date),
+        entries.map(([, d]) => String(d.volume ?? 0)),
+        entries.map(([, d]) => String(d.makerVolume ?? 0)),
+        entries.map(([, d]) => String(d.takerVolume ?? 0)),
+        entries.map(([, d]) => String(d.makerFees ?? 0)),
+        entries.map(([, d]) => String(d.takerFees ?? 0)),
+        entries.map(([, d]) => String(d.totalFees ?? 0)),
+      ],
+    );
+    return result.rowCount ?? 0;
+  } catch { return 0; }
+}
+
+async function syncPnlTotals(id: number, w: string): Promise<boolean> {
+  const body = await getFrontend(`${FRONTEND_API}/pnl-totals/${id}`);
+  if (!body) return false;
+
+  try {
+    await db.query(
+      `INSERT INTO pnl_totals (id, "accountId", "walletAddr", "totalPnl", "totalTradingPnl", "totalFundingPnl", "fetchedAt")
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT ("walletAddr") DO UPDATE SET
+         "totalPnl" = EXCLUDED."totalPnl", "totalTradingPnl" = EXCLUDED."totalTradingPnl",
+         "totalFundingPnl" = EXCLUDED."totalFundingPnl", "fetchedAt" = EXCLUDED."fetchedAt"`,
+      [
+        crypto.randomUUID(), id, w,
+        String(body.totalPnl ?? 0),
+        String(body.totalTradingPnl ?? 0),
+        String(body.totalFundingPnl ?? 0),
+        new Date(),
+      ],
+    );
+    return true;
+  } catch { return false; }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -300,7 +412,7 @@ async function syncLiquidations(id: number, w: string): Promise<number> {
 // ═══════════════════════════════════════════════════════════════════
 
 async function isSynced(w: string): Promise<boolean> {
-  const r = await db.query(`SELECT 1 FROM sync_cursors WHERE wallet_addr = $1 LIMIT 1`, [w]);
+  const r = await db.query(`SELECT 1 FROM sync_cursors WHERE "walletAddr" = $1 LIMIT 1`, [w]);
   return r.rowCount !== null && r.rowCount > 0;
 }
 
@@ -308,32 +420,32 @@ async function markSynced(w: string): Promise<void> {
   const now = new Date().toISOString();
   for (const t of ["trades", "orders", "pnl", "funding", "deposits", "withdrawals", "liquidations"]) {
     await db.query(
-      `INSERT INTO sync_cursors (wallet_addr, type, cursor, last_sync_at)
-       VALUES ($1, $2, $3, NOW())
-       ON CONFLICT (wallet_addr, type) DO UPDATE SET cursor = $3, last_sync_at = NOW()`,
+      `INSERT INTO sync_cursors (id, "walletAddr", type, cursor, "lastSyncAt")
+       VALUES (gen_random_uuid(), $1, $2, $3, NOW())
+       ON CONFLICT ("walletAddr", type) DO UPDATE SET cursor = $3, "lastSyncAt" = NOW()`,
       [w, t, now],
     );
   }
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  ACCOUNT EXISTENCE CHECK
+//  ACCOUNT RESOLUTION
 // ═══════════════════════════════════════════════════════════════════
 
-async function accountExists(id: number): Promise<boolean> {
+async function getAccountOwner(id: number): Promise<string | null> {
   const body = await get(`${API}/account/${id}`);
-  if (!body) return false;
-  // Empty or null response means account doesn't exist
-  if (typeof body === "object" && Object.keys(body).length === 0) return false;
-  return true;
+  if (!body || typeof body !== "object") return null;
+  if (Object.keys(body).length === 0) return null;
+  const owner = (body as Record<string, unknown>).owner ?? (body as Record<string, unknown>).authority ?? null;
+  return typeof owner === "string" && owner.length >= 32 ? owner : null;
 }
 
 // ═══════════════════════════════════════════════════════════════════
 //  PROGRESS DISPLAY
 // ═══════════════════════════════════════════════════════════════════
 
-function bar(cur: number, tot: number, w = 30): string {
-  const pct = cur / tot;
+function bar(cur: number, tot: number, w = 25): string {
+  const pct = tot > 0 ? cur / tot : 0;
   const f = Math.round(pct * w);
   return `[${"█".repeat(f)}${"░".repeat(w - f)}] ${(pct * 100).toFixed(1)}%`;
 }
@@ -357,127 +469,202 @@ function eta(start: number, cur: number, tot: number): string {
 //  MAIN
 // ═══════════════════════════════════════════════════════════════════
 
+const STEPS = ["trades", "orders", "pnl", "funding", "deposits", "withdrawals", "liquidations", "volume", "pnl-totals"] as const;
+
+async function processAccount(id: number, logPrefix: string): Promise<{
+  ok: boolean; records: number; wallet: string | null;
+}> {
+  // Step 1: Get wallet address
+  const wallet = await getAccountOwner(id);
+  if (!wallet) return { ok: true, records: 0, wallet: null }; // doesn't exist
+
+  // Step 2: Check if already synced
+  if (!FORCE && await isSynced(wallet)) {
+    return { ok: true, records: 0, wallet };
+  }
+
+  // Step 3: Sync each data type sequentially with progress
+  const counts: Record<string, number> = {};
+
+  const syncFns: Array<{ name: string; fn: () => Promise<number> }> = [
+    { name: "trades", fn: () => syncTrades(id, wallet) },
+    { name: "orders", fn: () => syncOrders(id, wallet) },
+    { name: "pnl", fn: () => syncPnl(id, wallet) },
+    { name: "funding", fn: () => syncFunding(id, wallet) },
+    { name: "deposits", fn: () => syncDeposits(id, wallet) },
+    { name: "withdrawals", fn: () => syncWithdrawals(id, wallet) },
+    { name: "liquidations", fn: () => syncLiquidations(id, wallet) },
+  ];
+
+  for (const { name, fn } of syncFns) {
+    if (shuttingDown) break;
+    process.stdout.write(`\r${logPrefix} syncing ${name.padEnd(14)}                              `);
+    try {
+      counts[name] = await fn();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message.slice(0, 60) : String(err);
+      process.stdout.write(`\n    [!] ${name} failed: ${msg}\n`);
+      counts[name] = 0;
+    }
+    await sleep(API_DELAY_MS);
+  }
+
+  const sdkTotal = Object.values(counts).reduce((a, b) => a + b, 0);
+
+  // 01.xyz frontend API — only for accounts that have actual trading data
+  // Skip empty accounts to avoid hammering Vercel WAF for nothing
+  if (!shuttingDown && sdkTotal > 0) {
+    process.stdout.write(`\r${logPrefix} syncing volume-calendar    `);
+    try { counts.volume = await syncVolumeCalendar(id, wallet); } catch { counts.volume = 0; }
+    await sleep(FRONTEND_API_DELAY_MS);
+
+    if (!shuttingDown) {
+      process.stdout.write(`\r${logPrefix} syncing pnl-totals         `);
+      try { await syncPnlTotals(id, wallet); } catch { /* non-critical */ }
+      await sleep(FRONTEND_API_DELAY_MS);
+    }
+  }
+
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+
+  // Mark synced only if we completed everything
+  if (!shuttingDown) {
+    await markSynced(wallet);
+  }
+
+  return { ok: true, records: total, wallet };
+}
+
 async function main() {
   console.log("╔══════════════════════════════════════════╗");
   console.log("║   Clydex — 01 Exchange Full History Sync ║");
   console.log("╚══════════════════════════════════════════╝\n");
-  console.log(`  Mode: ${FORCE ? "FORCE" : "RESUME"}`);
+  console.log(`  Mode:        ${FORCE ? "FORCE (re-sync all)" : "RESUME (skip synced)"}`);
+  console.log(`  Range:       ${FROM_ID} → ${MAX_ID}`);
   console.log(`  Concurrency: ${CONCURRENCY}`);
-  console.log(`  Page size: ${PAGE}`);
-  if (PROXIES.length) console.log(`  Proxies: ${PROXIES.length} rotating`);
+  console.log(`  Page size:   ${PAGE}`);
+  console.log(`  API delay:   ${API_DELAY_MS}ms (SDK) / ${FRONTEND_API_DELAY_MS}ms (01.xyz)`);
+  if (PROXIES.length) console.log(`  Proxies:     ${PROXIES.length} rotating`);
   console.log("");
 
-  console.log("[1/3] Loading markets...");
+  // Verify DB connection
+  try {
+    await db.query("SELECT 1");
+    console.log("  DB connection: OK");
+  } catch (err) {
+    console.error("  DB connection FAILED:", err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
+
+  console.log("\n[1/3] Loading markets...");
   await loadMarkets();
 
-  console.log(`[2/3] Scanning accounts 0 → ${MAX_ID}...\n`);
+  const totalAccounts = MAX_ID - FROM_ID + 1;
+  console.log(`\n[2/3] Scanning accounts ${FROM_ID} → ${MAX_ID} (${totalAccounts} accounts)...\n`);
 
   const t0 = Date.now();
   let processed = 0, found = 0, synced = 0, skipped = 0, failed = 0, totalRec = 0;
   const failedIds: number[] = [];
 
-  async function processAccount(id: number) {
-    const w = `account:${id}`;
+  // Process sequentially in batches — concurrency is within a batch
+  for (let start = FROM_ID; start <= MAX_ID && !shuttingDown; start += CONCURRENCY) {
+    const batchEnd = Math.min(start + CONCURRENCY, MAX_ID + 1);
+    const batch: Promise<{ id: number; result: { ok: boolean; records: number; wallet: string | null } }>[] = [];
 
-    // Skip non-existent accounts
-    const exists = await accountExists(id);
-    if (!exists) { processed++; return; }
-    found++;
+    for (let id = start; id < batchEnd; id++) {
+      const prefix = `  [${id}]`;
+      batch.push(
+        (async () => {
+          // Retry up to 3 times
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+              const result = await processAccount(id, prefix);
+              return { id, result };
+            } catch (err) {
+              if (attempt < 3 && !shuttingDown) {
+                const msg = err instanceof Error ? err.message.slice(0, 60) : String(err);
+                process.stdout.write(`\n  [${id}] attempt ${attempt}/3 failed: ${msg} — retrying in ${attempt * 10}s\n`);
+                await sleep(attempt * 10_000);
+              } else {
+                return { id, result: { ok: false, records: 0, wallet: null } };
+              }
+            }
+          }
+          return { id, result: { ok: false, records: 0, wallet: null } };
+        })()
+      );
+    }
 
-    // Skip already synced (unless --force)
-    if (!FORCE && await isSynced(w)) { skipped++; processed++; return; }
+    const results = await Promise.all(batch);
 
-    // Retry up to 3 times on failure — no account gets skipped without a fight
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        const t = await syncTrades(id, w);
-        const o = await syncOrders(id, w);
-        const p = await syncPnl(id, w);
-        const f = await syncFunding(id, w);
-        const d = await syncDeposits(id, w);
-        const wd = await syncWithdrawals(id, w);
-        const l = await syncLiquidations(id, w);
+    for (const { id, result } of results) {
+      processed++;
+      if (!result.wallet) continue; // account doesn't exist
+      found++;
 
-        const sum = t + o + p + f + d + wd + l;
-        totalRec += sum;
+      if (!result.ok) {
+        failed++;
+        failedIds.push(id);
+        continue;
+      }
 
-        await markSynced(w);
+      if (result.records === 0) {
+        skipped++;
+      } else {
         synced++;
-
-        if (sum > 0) {
-          console.log(`\n  Account ${id}: +${sum} (t:${t} o:${o} p:${p} f:${f} d:${d} w:${wd} l:${l})`);
-        }
-        break; // Success — exit retry loop
-      } catch (err) {
-        const msg = err instanceof Error ? err.message.slice(0, 80) : String(err);
-        if (attempt < 3) {
-          console.log(`\n  Account ${id}: attempt ${attempt}/3 failed — ${msg}, retrying in ${attempt * 10}s...`);
-          await sleep(attempt * 10_000);
-        } else {
-          console.log(`\n  Account ${id}: FAILED after 3 attempts — ${msg}`);
-          failedIds.push(id);
-          failed++;
-        }
+        totalRec += result.records;
+        process.stdout.write(`\n  [${id}] ${result.wallet.slice(0, 8)}... +${result.records} records\n`);
       }
     }
-    processed++;
-  }
 
-  // Process in batches
-  for (let start = 0; start <= MAX_ID; start += CONCURRENCY) {
-    const batch: Promise<void>[] = [];
-    for (let id = start; id < Math.min(start + CONCURRENCY, MAX_ID + 1); id++) {
-      batch.push(processAccount(id));
-    }
-    await Promise.all(batch);
-
+    // Progress bar after each batch
     process.stdout.write(
-      `\r  ${bar(processed, MAX_ID)} | ${processed}/${MAX_ID} | ` +
-      `found:${found} ok:${synced} skip:${skipped} fail:${failed} | ` +
-      `${totalRec} records | ${elapsed(Date.now() - t0)} ETA:${eta(t0, processed, MAX_ID)}   `
+      `\r  ${bar(processed, totalAccounts)} ${processed}/${totalAccounts} ` +
+      `| found:${found} ok:${synced} skip:${skipped} fail:${failed} ` +
+      `| ${totalRec} rec | ${elapsed(Date.now() - t0)} ETA:${eta(t0, processed, totalAccounts)}   `
     );
+
+    // Pause between batches
+    if (!shuttingDown) await sleep(BETWEEN_ACCOUNTS_MS);
   }
 
-  // ─── Final retry pass for any failed accounts ─────────────────
-  if (failedIds.length > 0) {
-    console.log(`\n\n[3/3] Retrying ${failedIds.length} failed accounts one more time...\n`);
+  // ─── Final retry pass ─────────────────────────────────────────
+  if (failedIds.length > 0 && !shuttingDown) {
+    console.log(`\n\n[3/3] Retrying ${failedIds.length} failed accounts...\n`);
     const stillFailed: number[] = [];
     for (const id of failedIds) {
-      const w = `account:${id}`;
+      if (shuttingDown) { stillFailed.push(id); continue; }
       try {
-        const t = await syncTrades(id, w);
-        const o = await syncOrders(id, w);
-        const p = await syncPnl(id, w);
-        const f = await syncFunding(id, w);
-        const d = await syncDeposits(id, w);
-        const wd = await syncWithdrawals(id, w);
-        const l = await syncLiquidations(id, w);
-
-        const sum = t + o + p + f + d + wd + l;
-        totalRec += sum;
-        await markSynced(w);
-        synced++;
-        failed--;
-        console.log(`  Account ${id}: RECOVERED +${sum} records`);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message.slice(0, 60) : String(err);
-        console.log(`  Account ${id}: STILL FAILED — ${msg}`);
+        const result = await processAccount(id, `  [${id}]`);
+        if (result.ok && result.records > 0) {
+          totalRec += result.records;
+          synced++;
+          failed--;
+          console.log(`  [${id}] RECOVERED +${result.records} records`);
+        } else if (!result.ok) {
+          stillFailed.push(id);
+        }
+      } catch {
         stillFailed.push(id);
       }
+      await sleep(BETWEEN_ACCOUNTS_MS);
     }
     if (stillFailed.length > 0) {
-      console.log(`\n  ⚠ Permanently failed accounts: [${stillFailed.join(", ")}]`);
-      console.log(`  Re-run with: npx tsx scripts/sync-all-history.ts --force`);
+      console.log(`\n  Permanently failed: [${stillFailed.join(", ")}]`);
+      console.log(`  Re-run: npx tsx scripts/sync-all-history.ts --force`);
     }
   }
 
-  console.log(`\n\n  ═══ DONE ═══`);
+  console.log(`\n\n  ═══ ${shuttingDown ? "PAUSED" : "DONE"} ═══`);
   console.log(`  Accounts found: ${found}`);
-  console.log(`  Synced: ${synced}`);
-  console.log(`  Skipped: ${skipped}`);
-  console.log(`  Failed: ${failed}`);
-  console.log(`  Total records: ${totalRec}`);
-  console.log(`  Time: ${elapsed(Date.now() - t0)}`);
+  console.log(`  Synced:         ${synced}`);
+  console.log(`  Skipped:        ${skipped}`);
+  console.log(`  Failed:         ${failed}`);
+  console.log(`  Total records:  ${totalRec}`);
+  console.log(`  Time:           ${elapsed(Date.now() - t0)}`);
+  if (shuttingDown) {
+    console.log(`\n  Resume with: npx tsx scripts/sync-all-history.ts`);
+  }
 
   await db.end();
   process.exit(failed > 0 ? 1 : 0);

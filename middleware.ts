@@ -139,13 +139,13 @@ export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
 
   // ── Rate limit ──
-  // 1. Vercel sets request.ip from their edge (trusted, not spoofable)
-  // 2. Fallback: last entry of x-forwarded-for (closest proxy to Vercel edge)
-  // 3. Last resort: "unknown" (shared bucket — very aggressive limiting)
-  const vercelIp = (request as unknown as { ip?: string }).ip;
+  // Self-hosted behind nginx: trust X-Real-IP set by nginx proxy,
+  // fallback to first entry of X-Forwarded-For (real client IP),
+  // last resort: "unknown" (shared bucket — aggressive limiting).
+  const realIp = request.headers.get("x-real-ip");
   const xff = request.headers.get("x-forwarded-for");
-  const lastHop = xff?.split(",").pop()?.trim();
-  const ip = vercelIp || lastHop || "unknown";
+  const firstHop = xff?.split(",")[0]?.trim();
+  const ip = realIp || firstHop || "unknown";
 
   const tierKey = getTierKey(pathname);
 

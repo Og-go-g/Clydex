@@ -19,12 +19,12 @@ types.setTypeParser(1114, (str: string) => new Date(str + "Z"));
 function createPool(): Pool {
   const url = process.env.HISTORY_DATABASE_URL;
   if (!url) throw new Error("HISTORY_DATABASE_URL environment variable is not set");
+  const isLocal = url.includes("localhost") || url.includes("127.0.0.1");
   return new Pool({
     connectionString: url,
     max: 5,
-    ssl: url.includes("localhost") || url.includes("127.0.0.1")
-      ? false
-      : { rejectUnauthorized: false },
+    // Local DB: no SSL. Remote DB: verify certificates properly.
+    ssl: isLocal ? false : true,
   });
 }
 
