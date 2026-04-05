@@ -226,10 +226,11 @@ async function syncTrades(id: number, w: string): Promise<number> {
     const param = role === "taker" ? "takerId" : "makerId";
     total += await streamPages(
       `${API}/trades?${param}=${id}`,
-      `INSERT INTO trade_history ("tradeId", "accountId", "walletAddr", "marketId", symbol, side, size, price, role, fee, "time")
-       SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::text[], $7::numeric[], $8::numeric[], $9::text[], $10::numeric[], $11::timestamptz[])
+      `INSERT INTO trade_history (id, "tradeId", "accountId", "walletAddr", "marketId", symbol, side, size, price, role, fee, "time")
+       SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::text[], $11::numeric[], $12::timestamptz[])
        ON CONFLICT ("tradeId") DO NOTHING`,
       (p) => [
+        p.map(() => crypto.randomUUID()),
         p.map(t => String(t.tradeId)),
         p.map(() => id), p.map(() => w),
         p.map(t => Number(t.marketId)), p.map(t => sym(Number(t.marketId))),
@@ -248,10 +249,11 @@ async function syncTrades(id: number, w: string): Promise<number> {
 async function syncOrders(id: number, w: string): Promise<number> {
   return streamPages(
     `${API}/account/${id}/orders`,
-    `INSERT INTO order_history ("orderId", "accountId", "walletAddr", "marketId", symbol, side, "placedSize", "filledSize", "placedPrice", "orderValue", "fillMode", "fillStatus", status, "isReduceOnly", "addedAt", "updatedAt")
-     SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::text[], $7::numeric[], $8::numeric[], $9::numeric[], $10::numeric[], $11::text[], $12::text[], $13::text[], $14::boolean[], $15::timestamptz[], $16::timestamptz[])
+    `INSERT INTO order_history (id, "orderId", "accountId", "walletAddr", "marketId", symbol, side, "placedSize", "filledSize", "placedPrice", "orderValue", "fillMode", "fillStatus", status, "isReduceOnly", "addedAt", "updatedAt")
+     SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::numeric[], $11::numeric[], $12::text[], $13::text[], $14::text[], $15::boolean[], $16::timestamptz[], $17::timestamptz[])
      ON CONFLICT ("orderId") DO NOTHING`,
     (p) => [
+      p.map(() => crypto.randomUUID()),
       p.map(o => String(o.orderId)),
       p.map(() => id), p.map(() => w),
       p.map(o => Number(o.marketId)), p.map(o => String(o.marketSymbol ?? sym(Number(o.marketId)))),
@@ -273,10 +275,11 @@ async function syncOrders(id: number, w: string): Promise<number> {
 async function syncPnl(id: number, w: string): Promise<number> {
   return streamPages(
     `${API}/account/${id}/history/pnl`,
-    `INSERT INTO pnl_history ("accountId", "walletAddr", "marketId", symbol, "tradingPnl", "settledFundingPnl", "positionSize", "time")
-     SELECT * FROM unnest($1::int[], $2::text[], $3::int[], $4::text[], $5::numeric[], $6::numeric[], $7::numeric[], $8::timestamptz[])
+    `INSERT INTO pnl_history (id, "accountId", "walletAddr", "marketId", symbol, "tradingPnl", "settledFundingPnl", "positionSize", "time")
+     SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::numeric[], $7::numeric[], $8::numeric[], $9::timestamptz[])
      ON CONFLICT ("walletAddr", "marketId", "time") DO NOTHING`,
     (p) => [
+      p.map(() => crypto.randomUUID()),
       p.map(() => id), p.map(() => w),
       p.map(x => Number(x.marketId)), p.map(x => sym(Number(x.marketId))),
       p.map(x => String(x.tradingPnl ?? 0)), p.map(x => String(x.settledFundingPnl ?? 0)),
@@ -289,10 +292,11 @@ async function syncPnl(id: number, w: string): Promise<number> {
 async function syncFunding(id: number, w: string): Promise<number> {
   return streamPages(
     `${API}/account/${id}/history/funding`,
-    `INSERT INTO funding_history ("accountId", "walletAddr", "marketId", symbol, "fundingPnl", "positionSize", "time")
-     SELECT * FROM unnest($1::int[], $2::text[], $3::int[], $4::text[], $5::numeric[], $6::numeric[], $7::timestamptz[])
+    `INSERT INTO funding_history (id, "accountId", "walletAddr", "marketId", symbol, "fundingPnl", "positionSize", "time")
+     SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::numeric[], $7::numeric[], $8::timestamptz[])
      ON CONFLICT ("walletAddr", "marketId", "time") DO NOTHING`,
     (p) => [
+      p.map(() => crypto.randomUUID()),
       p.map(() => id), p.map(() => w),
       p.map(x => Number(x.marketId)), p.map(x => sym(Number(x.marketId))),
       p.map(x => String(x.fundingPnl ?? 0)), p.map(x => String(x.positionSize ?? 0)),
@@ -305,10 +309,11 @@ async function syncFunding(id: number, w: string): Promise<number> {
 async function syncDeposits(id: number, w: string): Promise<number> {
   return streamPages(
     `${API}/account/${id}/history/deposit`,
-    `INSERT INTO deposit_history ("accountId", "walletAddr", amount, balance, "tokenId", "time")
-     SELECT * FROM unnest($1::int[], $2::text[], $3::numeric[], $4::numeric[], $5::int[], $6::timestamptz[])
+    `INSERT INTO deposit_history (id, "accountId", "walletAddr", amount, balance, "tokenId", "time")
+     SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::numeric[], $5::numeric[], $6::int[], $7::timestamptz[])
      ON CONFLICT ("walletAddr", "time", amount) DO NOTHING`,
     (p) => [
+      p.map(() => crypto.randomUUID()),
       p.map(() => id), p.map(() => w),
       p.map(x => String(x.amount ?? 0)), p.map(x => String(x.balance ?? 0)),
       p.map(x => Number(x.tokenId ?? 0)), p.map(x => safeDate(x.time)),
@@ -320,10 +325,11 @@ async function syncDeposits(id: number, w: string): Promise<number> {
 async function syncWithdrawals(id: number, w: string): Promise<number> {
   return streamPages(
     `${API}/account/${id}/history/withdrawal`,
-    `INSERT INTO withdrawal_history ("accountId", "walletAddr", amount, balance, fee, "destPubkey", "time")
-     SELECT * FROM unnest($1::int[], $2::text[], $3::numeric[], $4::numeric[], $5::numeric[], $6::text[], $7::timestamptz[])
+    `INSERT INTO withdrawal_history (id, "accountId", "walletAddr", amount, balance, fee, "destPubkey", "time")
+     SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::numeric[], $5::numeric[], $6::numeric[], $7::text[], $8::timestamptz[])
      ON CONFLICT ("walletAddr", "time", amount) DO NOTHING`,
     (p) => [
+      p.map(() => crypto.randomUUID()),
       p.map(() => id), p.map(() => w),
       p.map(x => String(x.amount ?? 0)), p.map(x => String(x.balance ?? 0)),
       p.map(x => String(x.fee ?? 0)), p.map(x => String(x.destPubkey ?? "")),
@@ -336,10 +342,11 @@ async function syncWithdrawals(id: number, w: string): Promise<number> {
 async function syncLiquidations(id: number, w: string): Promise<number> {
   return streamPages(
     `${API}/account/${id}/history/liquidation`,
-    `INSERT INTO liquidation_history ("accountId", "walletAddr", fee, "liquidationKind", margins, "time")
-     SELECT * FROM unnest($1::int[], $2::text[], $3::numeric[], $4::text[], $5::jsonb[], $6::timestamptz[])
+    `INSERT INTO liquidation_history (id, "accountId", "walletAddr", fee, "liquidationKind", margins, "time")
+     SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::numeric[], $5::text[], $6::jsonb[], $7::timestamptz[])
      ON CONFLICT ("walletAddr", "time", fee) DO NOTHING`,
     (p) => [
+      p.map(() => crypto.randomUUID()),
       p.map(() => id), p.map(() => w),
       p.map(x => String(x.fee ?? 0)), p.map(x => String(x.liquidationKind ?? "unknown")),
       p.map(x => { const { time: _, fee: __, liquidationKind: ___, ...r } = x; return JSON.stringify(r); }),
