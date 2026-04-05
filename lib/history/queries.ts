@@ -91,60 +91,84 @@ export async function getTradeHistory(params: PaginationParams): Promise<PagedRe
   };
 }
 
-// ─── Position Tracker — per-trade Closed PnL ────────────────────
+// ─── Per-trade Closed PnL via SQL (exact NUMERIC arithmetic) ────
 //
-// Walks ALL trades for a (wallet, market) pair in chronological order,
-// tracking average entry price. When a trade reduces or flips a position,
-// the realized PnL is: (tradePrice - avgEntry) × closedSize × direction.
-// Returns a Map<tradeId, closedPnl>.
+// Uses a PL/pgSQL function that walks trades chronologically per market,
+// tracking position size and weighted-average entry price using
+// PostgreSQL's NUMERIC type (no floating-point precision loss).
+//
+// For each reduce/close trade: PnL = (tradePrice - avgEntry) × closedSize × direction
+// Returns only rows where |closedPnl| > 0.0001 (filters float noise).
+//
+// Fixes: C1 (precision), C2 (negative size guard), H2 (no JS memory load),
+//        H3 (numeric tradeId sort), M1 (threshold).
 
-function computePerTradePnl(trades: TradeHistoryRow[]): Map<string, number> {
-  const result = new Map<string, number>();
-  let posSize = 0;   // positive = long, negative = short
-  let avgEntry = 0;
+const PNL_QUERY = `
+WITH RECURSIVE
+numbered AS MATERIALIZED (
+  SELECT
+    "tradeId",
+    side,
+    price,
+    size,
+    CASE WHEN side = 'Long' THEN size ELSE -size END AS delta,
+    ROW_NUMBER() OVER (ORDER BY "time" ASC, CAST("tradeId" AS bigint) ASC) AS rn
+  FROM trade_history
+  WHERE "walletAddr" = $1 AND "marketId" = $2
+    AND size > 0 AND price > 0
+),
+tracker AS (
+  -- Base case: first trade opens position
+  SELECT
+    n."tradeId",
+    n.delta AS pos_after,
+    n.price AS avg_entry,
+    0::numeric(30,18) AS closed_pnl,
+    n.rn
+  FROM numbered n WHERE n.rn = 1
 
-  for (const t of trades) {
-    const price = parseFloat(t.price);
-    const size = parseFloat(t.size);
-    if (!isFinite(price) || !isFinite(size) || size === 0) {
-      result.set(t.tradeId, 0);
-      continue;
-    }
+  UNION ALL
 
-    // tradeDelta: positive for longs, negative for shorts
-    const tradeDelta = t.side === "Long" ? size : -size;
-
-    // Same direction as current position (or opening fresh) → increases position
-    if (posSize === 0 || Math.sign(tradeDelta) === Math.sign(posSize)) {
-      const newSize = posSize + tradeDelta;
-      if (newSize !== 0) {
-        avgEntry = (avgEntry * posSize + price * tradeDelta) / newSize;
-      }
-      posSize = newSize;
-      result.set(t.tradeId, 0);
-    } else {
-      // Opposite direction → reduces or flips position
-      const closedSize = Math.min(Math.abs(tradeDelta), Math.abs(posSize));
-      const direction = Math.sign(posSize); // +1 if was long, -1 if was short
-      const pnl = (price - avgEntry) * closedSize * direction;
-      result.set(t.tradeId, pnl);
-
-      const remaining = Math.abs(tradeDelta) - closedSize;
-      if (remaining > 0) {
-        // Position flipped — open new position at trade price
-        posSize = Math.sign(tradeDelta) * remaining;
-        avgEntry = price;
-      } else {
-        // Position reduced (or fully closed)
-        posSize = posSize + tradeDelta; // reduces toward 0
-        // avgEntry stays the same for partial closes
-        if (posSize === 0) avgEntry = 0;
-      }
-    }
-  }
-
-  return result;
-}
+  -- Recursive: process next trade
+  SELECT
+    n."tradeId",
+    -- pos_after: new position after this trade
+    CASE
+      WHEN t.pos_after = 0 OR SIGN(n.delta) = SIGN(t.pos_after)
+        THEN t.pos_after + n.delta
+      WHEN ABS(n.delta) > ABS(t.pos_after)
+        THEN n.delta + t.pos_after
+      ELSE t.pos_after + n.delta
+    END,
+    -- avg_entry: weighted average entry price
+    CASE
+      WHEN t.pos_after = 0
+        THEN n.price
+      WHEN SIGN(n.delta) = SIGN(t.pos_after)
+        THEN (t.avg_entry * t.pos_after + n.price * n.delta)
+             / (t.pos_after + n.delta)
+      WHEN ABS(n.delta) > ABS(t.pos_after)
+        THEN n.price
+      WHEN t.pos_after + n.delta = 0
+        THEN 0
+      ELSE t.avg_entry
+    END,
+    -- closed_pnl: realized PnL for this trade
+    CASE
+      WHEN t.pos_after = 0 OR SIGN(n.delta) = SIGN(t.pos_after)
+        THEN 0
+      ELSE (n.price - t.avg_entry)
+           * LEAST(ABS(n.delta), ABS(t.pos_after))
+           * SIGN(t.pos_after)
+    END,
+    n.rn
+  FROM numbered n
+  JOIN tracker t ON n.rn = t.rn + 1
+)
+SELECT "tradeId", closed_pnl::text AS "closedPnl"
+FROM tracker
+WHERE ABS(closed_pnl) > 0.0001
+`;
 
 // ─── Trade History + Closed PnL ──────────────────────────────────
 
@@ -158,32 +182,32 @@ export async function getTradeHistoryWithPnl(params: PaginationParams): Promise<
   // 2. Collect unique marketIds from page results
   const marketIds = [...new Set(trades.data.map((t) => t.marketId))];
 
-  // 3. For each market, load ALL trades chronologically and compute PnL
-  const pnlMap = new Map<string, number>();
-  await Promise.all(
+  // 3. For each market, compute PnL via SQL (exact NUMERIC, no JS memory load)
+  const pnlMap = new Map<string, string>();
+  const settled = await Promise.allSettled(
     marketIds.map(async (mId) => {
-      const allRows = await query(
-        `SELECT * FROM trade_history
-         WHERE "walletAddr" = $1 AND "marketId" = $2
-         ORDER BY "time" ASC, "tradeId" ASC`,
+      const rows = await query<{ tradeId: string; closedPnl: string }>(
+        PNL_QUERY,
         [params.walletAddr, mId],
       );
-      const allTrades = toCamelRows<TradeHistoryRow>(allRows);
-      const marketPnl = computePerTradePnl(allTrades);
-      for (const [tradeId, pnl] of marketPnl) {
-        pnlMap.set(tradeId, pnl);
+      for (const row of rows) {
+        pnlMap.set(row.tradeId, row.closedPnl);
       }
     }),
   );
 
+  // Log failures but don't crash — graceful degradation
+  for (const r of settled) {
+    if (r.status === "rejected") {
+      console.error("[getTradeHistoryWithPnl] PnL computation failed for a market:", r.reason);
+    }
+  }
+
   // 4. Merge computed PnL into paginated results
-  const data: TradeWithPnlRow[] = trades.data.map((trade) => {
-    const pnl = pnlMap.get(trade.tradeId);
-    return {
-      ...trade,
-      closedPnl: pnl !== undefined && pnl !== 0 ? pnl.toFixed(6) : null,
-    };
-  });
+  const data: TradeWithPnlRow[] = trades.data.map((trade) => ({
+    ...trade,
+    closedPnl: pnlMap.get(trade.tradeId) ?? null,
+  }));
 
   return { ...trades, data };
 }

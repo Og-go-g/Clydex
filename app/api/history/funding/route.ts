@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAuthAddress } from "@/lib/auth/session";
 import { getCachedAccountId } from "@/lib/n1/account-cache";
 import { getFundingHistoryRealtime, getFundingHistory } from "@/lib/history/queries";
+import { safeInt } from "@/lib/history/validate";
 
 export async function GET(req: NextRequest) {
   const address = await getAuthAddress();
@@ -10,9 +11,9 @@ export async function GET(req: NextRequest) {
   }
 
   const params = req.nextUrl.searchParams;
-  const marketId = params.get("marketId") ? Number(params.get("marketId")) : undefined;
-  const limit = params.get("limit") ? Number(params.get("limit")) : undefined;
-  const offset = params.get("offset") ? Number(params.get("offset")) : undefined;
+  const marketId = safeInt(params.get("marketId"));
+  const limit = safeInt(params.get("limit"));
+  const offset = safeInt(params.get("offset"));
 
   try {
     const accountId = await getCachedAccountId(address);

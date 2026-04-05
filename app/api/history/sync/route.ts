@@ -4,12 +4,15 @@ import { getCachedAccountId } from "@/lib/n1/account-cache";
 import { syncAllHistory, hasBeenSynced, getLastSyncTime } from "@/lib/history/sync";
 import { linkAccountToWallet } from "@/lib/history/link";
 
+const SYNC_COOLDOWN_MS = 60_000; // 60 seconds between syncs per user
+
 /**
  * POST /api/history/sync — incremental sync for authenticated user.
  *
- * 1. Links bulk-synced data (account:ID → wallet address) if needed
- * 2. Fetches new data since last cursor (typically ≤1 week)
- * 3. Returns sync results
+ * 1. Rate-limits: 1 sync per 60 seconds per wallet
+ * 2. Links bulk-synced data (account:ID → wallet address) if needed
+ * 3. Fetches new data since last cursor (typically ≤1 week)
+ * 4. Returns sync results
  */
 export async function POST() {
   const address = await getAuthAddress();
@@ -22,6 +25,16 @@ export async function POST() {
     return NextResponse.json({
       error: "No 01 Exchange account found",
     }, { status: 404 });
+  }
+
+  // Rate limit: reject if last sync was < 60s ago
+  const lastSync = await getLastSyncTime(address);
+  if (lastSync && Date.now() - lastSync.getTime() < SYNC_COOLDOWN_MS) {
+    const retryAfter = Math.ceil((SYNC_COOLDOWN_MS - (Date.now() - lastSync.getTime())) / 1000);
+    return NextResponse.json(
+      { error: "Sync throttled", retryAfter },
+      { status: 429, headers: { "Retry-After": String(retryAfter) } },
+    );
   }
 
   try {

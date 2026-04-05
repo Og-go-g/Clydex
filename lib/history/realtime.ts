@@ -137,7 +137,7 @@ export async function fetchRecentTrades(
   for (const role of ["taker", "maker"] as const) {
     const param = role === "taker" ? "takerId" : "makerId";
     const trades = await fetchAll<ApiTrade>(
-      `${SDK_API}/trades?${param}=${accountId}&since=${since}`,
+      `${SDK_API}/trades?${param}=${accountId}&since=${encodeURIComponent(since)}`,
     );
 
     for (const t of trades) {
@@ -171,7 +171,7 @@ export async function fetchRecentOrders(
   await ensureMarketCache();
 
   const orders = await fetchAll<ApiOrder>(
-    `${SDK_API}/account/${accountId}/orders?since=${since}`,
+    `${SDK_API}/account/${accountId}/orders?since=${encodeURIComponent(since)}`,
   );
 
   return orders.map((o) => ({
@@ -203,7 +203,7 @@ export async function fetchRecentPnl(
   await ensureMarketCache();
 
   const items = await fetchAll<ApiPnl>(
-    `${SDK_API}/account/${accountId}/history/pnl?since=${since}`,
+    `${SDK_API}/account/${accountId}/history/pnl?since=${encodeURIComponent(since)}`,
   );
 
   return items.map((p) => ({
@@ -227,7 +227,7 @@ export async function fetchRecentFunding(
   await ensureMarketCache();
 
   const items = await fetchAll<ApiFunding>(
-    `${SDK_API}/account/${accountId}/history/funding?since=${since}`,
+    `${SDK_API}/account/${accountId}/history/funding?since=${encodeURIComponent(since)}`,
   );
 
   return items.map((f) => ({

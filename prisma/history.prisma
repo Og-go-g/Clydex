@@ -17,7 +17,7 @@ model TradeHistory {
   walletAddr  String                         // Solana wallet address (for lookup)
   marketId    Int
   symbol      String                         // "BTC-PERP"
-  side        String                         // "Long" | "Short" (takerSide)
+  side        String                         // "Long" | "Short" (user's position direction from this trade)
   size        Decimal  @db.Decimal(30, 18)   // baseSize
   price       Decimal  @db.Decimal(30, 18)   // fill price
   role        String                         // "taker" | "maker"

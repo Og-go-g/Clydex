@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthAddress } from "@/lib/auth/session";
 import { getDepositHistory, getWithdrawalHistory } from "@/lib/history/queries";
+import { safeInt } from "@/lib/history/validate";
 
 export async function GET(req: NextRequest) {
   const address = await getAuthAddress();
@@ -10,8 +11,8 @@ export async function GET(req: NextRequest) {
 
   const params = req.nextUrl.searchParams;
   const type = params.get("type"); // "deposits" | "withdrawals" | null (both)
-  const limit = params.get("limit") ? Number(params.get("limit")) : undefined;
-  const offset = params.get("offset") ? Number(params.get("offset")) : undefined;
+  const limit = safeInt(params.get("limit"));
+  const offset = safeInt(params.get("offset"));
 
   try {
     if (type === "deposits") {

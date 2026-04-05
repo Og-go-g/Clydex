@@ -41,18 +41,26 @@ export async function linkAccountToWallet(accountId: number, walletAddr: string)
     ];
 
     for (const table of tables) {
-      // First: try to update. Unique constraint violations mean the row
-      // already exists under the real wallet — just delete the account:ID duplicate.
-      await client.query(
-        `UPDATE ${table} SET "walletAddr" = $1 WHERE "walletAddr" = $2`,
-        [walletAddr, accountKey],
-      ).catch(async () => {
-        // Unique conflict — delete bulk-synced duplicates that already exist under real wallet
+      // Try to update walletAddr. On unique_violation (23505), the row
+      // already exists under the real wallet — delete the account:ID duplicate.
+      // Re-throw all other errors (disk full, connection drop, etc.).
+      try {
         await client.query(
-          `DELETE FROM ${table} WHERE "walletAddr" = $1`,
-          [accountKey],
+          `UPDATE ${table} SET "walletAddr" = $1 WHERE "walletAddr" = $2`,
+          [walletAddr, accountKey],
         );
-      });
+      } catch (err: unknown) {
+        const pgCode = (err as { code?: string }).code;
+        if (pgCode === "23505") {
+          // unique_violation — safe to delete bulk-synced duplicates
+          await client.query(
+            `DELETE FROM ${table} WHERE "walletAddr" = $1`,
+            [accountKey],
+          );
+        } else {
+          throw err; // real error — abort transaction
+        }
+      }
     }
 
     // Sync cursors: delete account key entries, keep real wallet ones

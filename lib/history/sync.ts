@@ -154,7 +154,7 @@ async function syncTrades(accountId: number, walletAddr: string, since?: string)
 
     while (roleHasMore) {
       let url = `${API_BASE}/trades?${param}=${accountId}&pageSize=${PAGE_SIZE}`;
-      if (since) url += `&since=${since}`;
+      if (since) url += `&since=${encodeURIComponent(since)}`;
       if (cursor) url += `&startInclusive=${encodeURIComponent(String(cursor))}`;
 
       const page = await fetchPage<ApiTrade>(url);
@@ -199,7 +199,7 @@ async function syncOrders(accountId: number, walletAddr: string, since?: string)
 
   while (hasMore) {
     let url = `${API_BASE}/account/${accountId}/orders?pageSize=${PAGE_SIZE}`;
-    if (since) url += `&since=${since}`;
+    if (since) url += `&since=${encodeURIComponent(since)}`;
     if (cursor) url += `&startInclusive=${encodeURIComponent(String(cursor))}`;
 
     const page = await fetchPage<ApiOrder>(url);
@@ -246,7 +246,7 @@ async function syncPnl(accountId: number, walletAddr: string, since?: string): P
 
   while (hasMore) {
     let url = `${API_BASE}/account/${accountId}/history/pnl?pageSize=${PAGE_SIZE}`;
-    if (since) url += `&since=${since}`;
+    if (since) url += `&since=${encodeURIComponent(since)}`;
     if (cursor) url += `&startInclusive=${encodeURIComponent(String(cursor))}`;
 
     const page = await fetchPage<ApiPnl>(url);
@@ -285,7 +285,7 @@ async function syncFunding(accountId: number, walletAddr: string, since?: string
 
   while (hasMore) {
     let url = `${API_BASE}/account/${accountId}/history/funding?pageSize=${PAGE_SIZE}`;
-    if (since) url += `&since=${since}`;
+    if (since) url += `&since=${encodeURIComponent(since)}`;
     if (cursor) url += `&startInclusive=${encodeURIComponent(String(cursor))}`;
 
     const page = await fetchPage<ApiFunding>(url);
@@ -323,7 +323,7 @@ async function syncDeposits(accountId: number, walletAddr: string, since?: strin
 
   while (hasMore) {
     let url = `${API_BASE}/account/${accountId}/history/deposit?pageSize=${PAGE_SIZE}`;
-    if (since) url += `&since=${since}`;
+    if (since) url += `&since=${encodeURIComponent(since)}`;
     if (cursor) url += `&startInclusive=${encodeURIComponent(String(cursor))}`;
 
     const page = await fetchPage<ApiDeposit>(url);
@@ -360,7 +360,7 @@ async function syncWithdrawals(accountId: number, walletAddr: string, since?: st
 
   while (hasMore) {
     let url = `${API_BASE}/account/${accountId}/history/withdrawal?pageSize=${PAGE_SIZE}`;
-    if (since) url += `&since=${since}`;
+    if (since) url += `&since=${encodeURIComponent(since)}`;
     if (cursor) url += `&startInclusive=${encodeURIComponent(String(cursor))}`;
 
     const page = await fetchPage<ApiWithdrawal>(url);
@@ -398,7 +398,7 @@ async function syncLiquidations(accountId: number, walletAddr: string, since?: s
 
   while (hasMore) {
     let url = `${API_BASE}/account/${accountId}/history/liquidation?pageSize=${PAGE_SIZE}`;
-    if (since) url += `&since=${since}`;
+    if (since) url += `&since=${encodeURIComponent(since)}`;
     if (cursor) url += `&startInclusive=${encodeURIComponent(String(cursor))}`;
 
     const page = await fetchPage<ApiLiquidation>(url);

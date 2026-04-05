@@ -23,7 +23,9 @@ function createPool(): Pool {
   const wantsSsl = url.includes("sslmode=require") || process.env.DB_SSL === "true";
   return new Pool({
     connectionString: url,
-    max: 5,
+    max: 10,
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 5_000,
     ssl: wantsSsl ? { rejectUnauthorized: true } : false,
   });
 }
