@@ -250,14 +250,14 @@ export function HistoryModal({ isOpen, onClose }: HistoryModalProps) {
     }
   }, [checkSyncStatus]);
 
-  // Auto-sync on first open if never synced
+  // Auto-sync on first open: always trigger sync to link bulk data + fetch fresh
   useEffect(() => {
     if (!isOpen || initialSyncDone.current) return;
     initialSyncDone.current = true;
-    checkSyncStatus().then((status) => {
-      if (status && !status.synced) triggerSync();
-    });
-  }, [isOpen, checkSyncStatus, triggerSync]);
+    // Always sync on first open — this calls linkAccountToWallet (links bulk data)
+    // and fetches any new records since last sync
+    triggerSync();
+  }, [isOpen, triggerSync]);
 
   // ─── Fetch Data ───────────────────────────────────────────────
 
