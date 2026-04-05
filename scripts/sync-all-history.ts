@@ -432,12 +432,16 @@ async function markSynced(w: string): Promise<void> {
 //  ACCOUNT RESOLUTION
 // ═══════════════════════════════════════════════════════════════════
 
-async function getAccountOwner(id: number): Promise<string | null> {
+/**
+ * Check if account exists on 01 Exchange.
+ * Returns "account:{id}" as walletAddr key for bulk storage.
+ * When a user logs in, link.ts re-labels data to their real Solana address.
+ */
+async function getAccountKey(id: number): Promise<string | null> {
   const body = await get(`${API}/account/${id}`);
   if (!body || typeof body !== "object") return null;
   if (Object.keys(body).length === 0) return null;
-  const owner = (body as Record<string, unknown>).owner ?? (body as Record<string, unknown>).authority ?? null;
-  return typeof owner === "string" && owner.length >= 32 ? owner : null;
+  return `account:${id}`;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -475,7 +479,7 @@ async function processAccount(id: number, logPrefix: string): Promise<{
   ok: boolean; records: number; wallet: string | null;
 }> {
   // Step 1: Get wallet address
-  const wallet = await getAccountOwner(id);
+  const wallet = await getAccountKey(id);
   if (!wallet) return { ok: true, records: 0, wallet: null }; // doesn't exist
 
   // Step 2: Check if already synced
