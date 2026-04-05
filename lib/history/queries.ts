@@ -109,9 +109,9 @@ numbered AS MATERIALIZED (
   SELECT
     "tradeId",
     side,
-    price,
-    size,
-    CASE WHEN side = 'Long' THEN size ELSE -size END AS delta,
+    price::numeric AS price,
+    size::numeric AS size,
+    (CASE WHEN side = 'Long' THEN size ELSE -size END)::numeric AS delta,
     ROW_NUMBER() OVER (ORDER BY "time" ASC, CAST("tradeId" AS bigint) ASC) AS rn
   FROM trade_history
   WHERE "walletAddr" = $1 AND "marketId" = $2
@@ -123,7 +123,7 @@ tracker AS (
     n."tradeId",
     n.delta AS pos_after,
     n.price AS avg_entry,
-    0::numeric(30,18) AS closed_pnl,
+    0::numeric AS closed_pnl,
     n.rn
   FROM numbered n WHERE n.rn = 1
 
@@ -150,13 +150,13 @@ tracker AS (
       WHEN ABS(n.delta) > ABS(t.pos_after)
         THEN n.price
       WHEN t.pos_after + n.delta = 0
-        THEN 0
+        THEN 0::numeric
       ELSE t.avg_entry
     END,
     -- closed_pnl: realized PnL for this trade
     CASE
       WHEN t.pos_after = 0 OR SIGN(n.delta) = SIGN(t.pos_after)
-        THEN 0
+        THEN 0::numeric
       ELSE (n.price - t.avg_entry)
            * LEAST(ABS(n.delta), ABS(t.pos_after))
            * SIGN(t.pos_after)
