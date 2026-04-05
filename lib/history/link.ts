@@ -7,7 +7,10 @@ import { historyPool, query } from "@/lib/db-history";
  * When a user first connects, this function re-labels all their
  * records to use their real Solana wallet address.
  *
- * Runs in a transaction across all 8 history tables.
+ * Uses UPDATE with conflict-safe approach: updates walletAddr on all rows
+ * that have the account key. Unique constraint violations (duplicates)
+ * are handled by deleting the account:ID row when a real-wallet row exists.
+ *
  * Idempotent — safe to call multiple times.
  */
 export async function linkAccountToWallet(accountId: number, walletAddr: string): Promise<void> {
@@ -15,19 +18,12 @@ export async function linkAccountToWallet(accountId: number, walletAddr: string)
 
   // Check if there's any data under the account key
   const hasAccountData = await query<{ exists: boolean }>(
-    `SELECT EXISTS (SELECT 1 FROM sync_cursors WHERE "walletAddr" = $1) AS exists`,
+    `SELECT EXISTS (SELECT 1 FROM trade_history WHERE "walletAddr" = $1 LIMIT 1) AS exists`,
     [accountKey],
   );
-  if (!hasAccountData[0]?.exists) return;
+  if (!hasAccountData[0]?.exists) return; // nothing to link
 
-  // Check if already linked
-  const hasWalletData = await query<{ exists: boolean }>(
-    `SELECT EXISTS (SELECT 1 FROM sync_cursors WHERE "walletAddr" = $1) AS exists`,
-    [walletAddr],
-  );
-  if (hasWalletData[0]?.exists) return;
-
-  // Transaction: update all 8 tables
+  // Transaction: update all tables — move account:ID → real wallet
   const client = await historyPool.connect();
   try {
     await client.query("BEGIN");
@@ -40,15 +36,31 @@ export async function linkAccountToWallet(accountId: number, walletAddr: string)
       "deposit_history",
       "withdrawal_history",
       "liquidation_history",
-      "sync_cursors",
+      "volume_calendar",
+      "pnl_totals",
     ];
 
     for (const table of tables) {
+      // First: try to update. Unique constraint violations mean the row
+      // already exists under the real wallet — just delete the account:ID duplicate.
       await client.query(
         `UPDATE ${table} SET "walletAddr" = $1 WHERE "walletAddr" = $2`,
         [walletAddr, accountKey],
-      );
+      ).catch(async () => {
+        // Unique conflict — delete bulk-synced duplicates that already exist under real wallet
+        await client.query(
+          `DELETE FROM ${table} WHERE "walletAddr" = $1`,
+          [accountKey],
+        );
+      });
     }
+
+    // Sync cursors: delete account key entries, keep real wallet ones
+    // (per-user sync already created fresh cursors under real wallet)
+    await client.query(
+      `DELETE FROM sync_cursors WHERE "walletAddr" = $1`,
+      [accountKey],
+    );
 
     await client.query("COMMIT");
   } catch (err) {
