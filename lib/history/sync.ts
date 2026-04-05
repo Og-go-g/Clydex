@@ -165,7 +165,10 @@ async function syncTrades(accountId: number, walletAddr: string, since?: string)
       const wallets = page.data.map(() => walletAddr);
       const marketIds = page.data.map((t) => t.marketId);
       const symbols = page.data.map((t) => marketSymbol(t.marketId));
-      const sides = page.data.map((t) => t.takerSide === "bid" ? "Long" : "Short");
+      const sides = page.data.map((t) => {
+        const takerIsLong = t.takerSide === "bid";
+        return role === "taker" ? (takerIsLong ? "Long" : "Short") : (takerIsLong ? "Short" : "Long");
+      });
       const sizes = page.data.map((t) => String(t.baseSize ?? 0));
       const prices = page.data.map((t) => String(t.price ?? 0));
       const roles = page.data.map(() => role);

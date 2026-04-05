@@ -234,7 +234,10 @@ export function HistoryModal({ isOpen, onClose }: HistoryModalProps) {
     setSyncing(true);
     setSyncResults(null);
     try {
-      const res = await fetch("/api/history/sync", { method: "POST" });
+      const res = await fetch("/api/history/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
       if (res.ok) {
         const body = await res.json();
         setSyncResults(body.results);

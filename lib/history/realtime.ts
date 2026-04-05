@@ -148,7 +148,9 @@ export async function fetchRecentTrades(
         walletAddr,
         marketId: t.marketId,
         symbol: marketSymbol(t.marketId),
-        side: t.takerSide === "bid" ? "Long" : "Short",
+        side: (role === "taker")
+          ? (t.takerSide === "bid" ? "Long" : "Short")
+          : (t.takerSide === "bid" ? "Short" : "Long"),
         size: String(t.baseSize ?? 0),
         price: String(t.price ?? 0),
         role,

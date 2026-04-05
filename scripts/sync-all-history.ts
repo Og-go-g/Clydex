@@ -235,7 +235,10 @@ async function syncTrades(id: number, w: string): Promise<number> {
         p.map(t => String(t.tradeId)),
         p.map(() => id), p.map(() => w),
         p.map(t => Number(t.marketId)), p.map(t => sym(Number(t.marketId))),
-        p.map(t => t.takerSide === "bid" ? "Long" : "Short"),
+        p.map(t => {
+          const takerIsLong = t.takerSide === "bid";
+          return role === "taker" ? (takerIsLong ? "Long" : "Short") : (takerIsLong ? "Short" : "Long");
+        }),
         p.map(t => String(t.baseSize ?? 0)), p.map(t => String(t.price ?? 0)),
         p.map(() => role), p.map(() => "0"),
         p.map(t => safeDate(t.time)),
