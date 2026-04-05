@@ -122,7 +122,8 @@ function fmtPrice(v: string | number): string {
 function fmtSize(v: string | number): string {
   const n = typeof v === "string" ? parseFloat(v) : v;
   if (!isFinite(n)) return "0";
-  return n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+  const decimals = Math.abs(n) < 0.01 ? 6 : Math.abs(n) < 1 ? 4 : 2;
+  return n.toFixed(decimals);
 }
 
 function fmtDateLocal(iso: string): string {
