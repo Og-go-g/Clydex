@@ -81,7 +81,7 @@ export function ChatSidebar() {
       >
         {/* Sidebar content — flex-1 so it stops before the spacer */}
         <div className="flex-1 min-h-0 overflow-hidden">
-          <div className="flex h-full w-[260px] flex-col border-r border-[#262626] bg-[#0a0a0a]/15 backdrop-blur-sm">
+          <div className="flex h-full w-[260px] flex-col border-r border-[#262626] bg-[#0a0a0a]/[0.08] backdrop-blur-sm">
             {/* Header: New Chat + Collapse */}
             <div className="flex items-center gap-2 p-3">
               <button
@@ -105,7 +105,7 @@ export function ChatSidebar() {
           </div>
         </div>
         {/* Spacer matching input area height (border-t aligns with chat input border) */}
-        <div className="h-[78px] mt-px shrink-0 border-t border-border/40 bg-[#0a0a0a]/15 backdrop-blur-sm" />
+        <div className="h-[78px] mt-px shrink-0 border-t border-border/40 bg-[#0a0a0a]/[0.08] backdrop-blur-sm" />
       </div>
 
       {/* Desktop: expand button when collapsed */}
@@ -140,7 +140,7 @@ export function ChatSidebar() {
             onClick={() => setOpen(false)}
           />
           <div className="fixed left-0 top-16 z-50 h-[calc(100vh-4rem)] md:hidden">
-            <div className="flex h-full w-[260px] flex-col border-r border-[#262626] bg-[#0a0a0a]/15 backdrop-blur-sm">
+            <div className="flex h-full w-[260px] flex-col border-r border-[#262626] bg-[#0a0a0a]/[0.08] backdrop-blur-sm">
               <div className="p-3">
                 <button
                   onClick={() => {
