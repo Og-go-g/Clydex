@@ -341,7 +341,7 @@ export default function MarketDetailPage({
 
 
   return (
-    <div className="min-h-screen bg-background p-4 md:p-6">
+    <div className="min-h-screen p-4 md:p-6">
       <div className="mx-auto max-w-6xl">
         {/* Breadcrumb */}
         <div className="mb-4 flex items-center gap-2 text-sm text-muted">

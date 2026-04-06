@@ -468,7 +468,7 @@ export default function PortfolioPage() {
   });
 
   return (
-    <div className="min-h-screen bg-background p-6">
+    <div className="min-h-screen p-6">
       <div className="mx-auto max-w-5xl">
         <div className="mb-6 flex items-center justify-between">
           <h1 className="text-2xl font-bold text-foreground">Portfolio</h1>

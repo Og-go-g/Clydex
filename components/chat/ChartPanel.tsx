@@ -345,7 +345,7 @@ export function ChartPanel() {
       >
         {/* Panel content — flex-1 so it stops before the spacer */}
         <div className="flex-1 min-h-0 overflow-hidden">
-          <div ref={innerRef} className="flex h-full flex-col border-l border-[#262626] bg-[#111]" style={{ width: panelWidth }}>
+          <div ref={innerRef} className="flex h-full flex-col border-l border-[#262626] bg-[#0a0a0a]/15 backdrop-blur-sm" style={{ width: panelWidth }}>
             {/* Drag handle — left edge */}
             <div
               onMouseDown={onDragStart}
@@ -620,7 +620,7 @@ export function ChartPanel() {
           </div>
         </div>
         {/* Bottom spacer — matches input area height (border-t aligns with chat input border) */}
-        <div className="h-[78px] mt-px shrink-0 border-t border-border" />
+        <div className="h-[78px] mt-px shrink-0 border-t border-border/40 bg-[#0a0a0a]/15 backdrop-blur-sm" />
       </div>
 
       {/* Mobile: full-screen overlay */}

@@ -620,7 +620,7 @@ function ChatContent({ chatId, chatMode, onModeChange }: { chatId: string; chatM
       </div>
 
       {/* Input */}
-      <div className="border-t border-border bg-background p-4">
+      <div className="border-t border-border/40 bg-[#0a0a0a]/15 backdrop-blur-sm p-4">
         <form onSubmit={onSubmit} className="mx-auto flex max-w-2xl items-center gap-3">
           <input
             type="text"

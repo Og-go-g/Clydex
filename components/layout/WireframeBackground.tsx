@@ -26,9 +26,9 @@ export function WireframeBackground() {
       const gridRows = 45;
       const gridW = W * 2.8;
       const gridH = H * 3.2;
-      const camY = -280;
-      const camZ = 200;
-      const fov = 550;
+      const camY = -350;
+      const camZ = 150;
+      const fov = 500;
 
       function noise(x: number, y: number): number {
         return (
@@ -85,7 +85,7 @@ export function WireframeBackground() {
       ctx!.clearRect(0, 0, W, H);
 
       // Opacity multiplier — controls overall brightness
-      const brightness = 0.7;
+      const brightness = 0.5;
 
       for (let r = gridRows - 1; r >= 0; r--) {
         for (let c = 0; c < gridCols; c++) {
@@ -168,16 +168,7 @@ export function WireframeBackground() {
         style={{ zIndex: -1 }}
         aria-hidden="true"
       />
-      {/* Edge fade */}
-      <div
-        className="pointer-events-none fixed inset-0"
-        style={{
-          zIndex: -1,
-          background:
-            "linear-gradient(to bottom, #0a0a0a 0%, transparent 12%, transparent 85%, #0a0a0a 100%), linear-gradient(to right, #0a0a0a 0%, transparent 8%, transparent 92%, #0a0a0a 100%)",
-        }}
-        aria-hidden="true"
-      />
+{/* No edge fade — mesh goes edge to edge */}
     </>
   );
 }

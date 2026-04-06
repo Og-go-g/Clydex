@@ -119,7 +119,7 @@ export default function MarketsPage() {
   });
 
   return (
-    <div className="min-h-screen bg-background p-6">
+    <div className="min-h-screen p-6">
       <div className="mx-auto max-w-5xl">
         <h1 className="mb-6 text-2xl font-bold text-foreground">Markets</h1>
 
