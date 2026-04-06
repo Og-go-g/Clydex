@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import { Providers } from "@/components/Providers";
 import { Header } from "@/components/layout/Header";
+import { Footer } from "@/components/layout/Footer";
 import { LiquidationWarning } from "@/components/alerts/LiquidationWarning";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import "./globals.css";
@@ -28,19 +29,7 @@ export default function RootLayout({
           <main className="min-h-[calc(100vh-4rem)]">
             <ErrorBoundary>{children}</ErrorBoundary>
           </main>
-          <footer id="site-footer" className="flex justify-end px-6 py-4">
-            <a
-              href="https://x.com/ClydexAi"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-gray-600 transition-colors hover:text-gray-300"
-              aria-label="Follow on X"
-            >
-              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor">
-                <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
-              </svg>
-            </a>
-          </footer>
+          <Footer />
         </Providers>
       </body>
     </html>
