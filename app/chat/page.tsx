@@ -333,14 +333,20 @@ function ChatContent({ chatId }: { chatId: string }) {
   const addressRef = useRef(address);
   addressRef.current = address;
 
+  const [input, setInput] = useState("");
+  const [chatMode, setChatMode] = useState<ChatMode>("trading");
+  const modeConfig = CHAT_MODES[chatMode];
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const initialMessages = useMemo(() => getMessages(chatId) as any[], [chatId]);
 
-  // Intentionally memoized with empty deps — DefaultChatTransport is stateless
-  // (only holds the API endpoint URL), so it never needs to be recreated.
+  // Transport switches endpoint based on chat mode.
+  // Trading mode → /api/chat, Copy Trading mode → /api/chat/copytrade
   const transport = useMemo(
-    () => new DefaultChatTransport({ api: "/api/chat" }),
-    []
+    () => new DefaultChatTransport({
+      api: chatMode === "copytrade" ? "/api/chat/copytrade" : "/api/chat",
+    }),
+    [chatMode],
   );
 
   const { messages, sendMessage, status, error } = useChat({
@@ -348,10 +354,6 @@ function ChatContent({ chatId }: { chatId: string }) {
     id: chatId,
     messages: initialMessages.length > 0 ? initialMessages : undefined,
   });
-
-  const [input, setInput] = useState("");
-  const [chatMode, setChatMode] = useState<ChatMode>("trading");
-  const modeConfig = CHAT_MODES[chatMode];
   const { closePosition: doClosePosition } = useOrderActions();
   const [closeModalData, setCloseModalData] = useState<CloseModalData | null>(null);
 
