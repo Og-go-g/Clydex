@@ -957,7 +957,86 @@ function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, onOpen
     );
   }
 
-  // Default: don't render a card for info tools — the AI formats the response
+  if (toolName === "getMarketsList" && (result.markets as unknown[])?.length > 0) {
+    const markets = result.markets as Array<Record<string, unknown>>;
+    return (
+      <CollapsibleCard cardKey={cKey} label={`Markets (${markets.length})`} beforeText={beforeText} descriptionText={descriptionText}>
+        <div className="overflow-x-auto rounded-xl border border-border bg-card">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-border text-left text-muted">
+                <th className="px-3 py-2">Market</th>
+                <th className="px-3 py-2">Tier</th>
+                <th className="px-3 py-2 text-right">Price</th>
+                <th className="px-3 py-2 text-right">24h</th>
+                <th className="px-3 py-2 text-right">Leverage</th>
+                <th className="px-3 py-2 text-right">Funding</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border/50">
+              {markets.map((m) => {
+                const change = Number(m.change24h) || 0;
+                const funding = Number(m.fundingRate) || 0;
+                const price = Number(m.markPrice) || 0;
+                return (
+                  <tr key={String(m.symbol)} className="transition hover:bg-card/80">
+                    <td className="px-3 py-2 font-medium text-foreground">{String(m.baseAsset)}/USD</td>
+                    <td className="px-3 py-2 text-muted">{String(m.tier)}</td>
+                    <td className="px-3 py-2 text-right text-foreground">
+                      ${price < 1 ? price.toPrecision(4) : price < 100 ? price.toFixed(2) : price.toLocaleString(undefined, { maximumFractionDigits: 1 })}
+                    </td>
+                    <td className={`px-3 py-2 text-right ${change >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      {change >= 0 ? "+" : ""}{change.toFixed(2)}%
+                    </td>
+                    <td className="px-3 py-2 text-right text-muted">{String(m.maxLeverage)}x</td>
+                    <td className={`px-3 py-2 text-right ${funding >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      {(funding * 100).toFixed(4)}%
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </CollapsibleCard>
+    );
+  }
+  if (toolName === "getOrderbook") {
+    const bids = (result.bids as Array<Record<string, unknown>>) ?? [];
+    const asks = (result.asks as Array<Record<string, unknown>>) ?? [];
+    const sym = (result.symbol as string) ?? "Market";
+    return (
+      <CollapsibleCard cardKey={cKey} label={`Orderbook — ${sym}`} beforeText={beforeText} descriptionText={descriptionText}>
+        <div className="grid grid-cols-2 gap-2 rounded-xl border border-border bg-card p-3 text-xs">
+          <div>
+            <div className="mb-1 text-center font-medium text-emerald-400">Bids</div>
+            {bids.slice(0, 10).map((b, i) => (
+              <div key={i} className="flex justify-between px-1 py-0.5">
+                <span className="text-emerald-400">${Number(b.price).toLocaleString()}</span>
+                <span className="text-muted">{Number(b.size).toFixed(4)}</span>
+              </div>
+            ))}
+          </div>
+          <div>
+            <div className="mb-1 text-center font-medium text-red-400">Asks</div>
+            {asks.slice(0, 10).map((a, i) => (
+              <div key={i} className="flex justify-between px-1 py-0.5">
+                <span className="text-red-400">${Number(a.price).toLocaleString()}</span>
+                <span className="text-muted">{Number(a.size).toFixed(4)}</span>
+              </div>
+            ))}
+          </div>
+          {result.spread != null && (
+            <div className="col-span-2 mt-1 text-center text-muted">
+              Spread: ${Number(result.spread).toFixed(2)} ({Number(result.spreadPercent ?? 0).toFixed(4)}%)
+            </div>
+          )}
+        </div>
+      </CollapsibleCard>
+    );
+  }
+
+  // Default: don't render a card for unhandled tools — the AI formats the response as text
   return null;
 }
 
