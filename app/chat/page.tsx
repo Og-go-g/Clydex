@@ -524,6 +524,10 @@ function ChatContent({ chatId }: { chatId: string }) {
 
   return (
     <div className="flex h-[calc(100vh-4rem+1px)] flex-col">
+      {/* Mode toggle */}
+      <div className="border-b border-border bg-background px-4 py-2">
+        <ChatModeToggle mode={chatMode} onChange={setChatMode} />
+      </div>
       {/* Messages */}
       <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 py-6">
         <div className="mx-auto flex max-w-2xl flex-col gap-4">
@@ -606,10 +610,7 @@ function ChatContent({ chatId }: { chatId: string }) {
       </div>
 
       {/* Input */}
-      <div className="border-t border-border bg-background px-4 pb-4 pt-3">
-        <div className="mb-2">
-          <ChatModeToggle mode={chatMode} onChange={setChatMode} />
-        </div>
+      <div className="border-t border-border bg-background p-4">
         <form onSubmit={onSubmit} className="mx-auto flex max-w-2xl items-center gap-3">
           <input
             type="text"
