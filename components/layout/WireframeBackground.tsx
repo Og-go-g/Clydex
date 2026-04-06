@@ -26,8 +26,8 @@ export function WireframeBackground() {
       const isMobile = W < 768;
       const gridCols = isMobile ? 20 : 70;
       const gridRows = isMobile ? 15 : 45;
-      const gridW = W * (isMobile ? 3.5 : 2.8);
-      const gridH = H * (isMobile ? 4.0 : 3.2);
+      const gridW = W * (isMobile ? 4.5 : 2.8);
+      const gridH = H * (isMobile ? 2.5 : 3.2);
       const camY = isMobile ? -400 : -350;
       const camZ = isMobile ? 120 : 150;
       const fov = isMobile ? 400 : 500;
