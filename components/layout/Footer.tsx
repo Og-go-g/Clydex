@@ -18,7 +18,7 @@ export function Footer() {
     <footer id="site-footer" className="flex items-center justify-between px-6 py-4">
       {traders !== null ? (
         <span className="text-[11px] text-gray-600">
-          <span className="text-gray-400">{traders.toLocaleString()}</span> traders
+          <span className="text-gray-400">{traders.toLocaleString()}</span> users
         </span>
       ) : (
         <span />
