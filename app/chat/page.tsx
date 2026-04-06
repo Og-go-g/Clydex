@@ -962,6 +962,10 @@ function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, onOpen
     return (
       <CollapsibleCard cardKey={cKey} label={`Markets (${markets.length})`} beforeText={beforeText} descriptionText={descriptionText}>
         <div className="overflow-x-auto rounded-xl border border-border bg-card">
+          <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+            <span className="text-sm font-semibold text-foreground">Markets</span>
+            <span className="rounded-full bg-accent/20 px-1.5 py-0.5 text-[10px] font-semibold text-accent">{markets.length}</span>
+          </div>
           <table className="w-full text-xs">
             <thead>
               <tr className="border-b border-border text-left text-muted">
@@ -1007,7 +1011,12 @@ function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, onOpen
     const sym = (result.symbol as string) ?? "Market";
     return (
       <CollapsibleCard cardKey={cKey} label={`Orderbook — ${sym}`} beforeText={beforeText} descriptionText={descriptionText}>
-        <div className="grid grid-cols-2 gap-2 rounded-xl border border-border bg-card p-3 text-xs">
+        <div className="rounded-xl border border-border bg-card text-xs">
+          <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+            <span className="text-sm font-semibold text-foreground">Orderbook</span>
+            <span className="text-xs text-muted">{sym}</span>
+          </div>
+          <div className="grid grid-cols-2 gap-2 p-3">
           <div>
             <div className="mb-1 text-center font-medium text-emerald-400">Bids</div>
             {bids.slice(0, 10).map((b, i) => (
@@ -1031,6 +1040,7 @@ function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, onOpen
               Spread: ${Number(result.spread).toFixed(2)} ({Number(result.spreadPercent ?? 0).toFixed(4)}%)
             </div>
           )}
+          </div>
         </div>
       </CollapsibleCard>
     );
