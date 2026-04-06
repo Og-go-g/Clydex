@@ -543,7 +543,7 @@ function ChatContent({ chatId, chatMode, onModeChange }: { chatId: string; chatM
         <div className="mx-auto flex max-w-2xl flex-col gap-4">
           {/* Welcome message */}
           <div className="flex justify-start">
-            <div className="max-w-[80%] rounded-2xl border border-border bg-card px-4 py-3 text-sm leading-relaxed text-foreground">
+            <div className="max-w-[80%] rounded-2xl border border-border bg-card/50 backdrop-blur-sm px-4 py-3 text-sm leading-relaxed text-foreground">
               <div className="whitespace-pre-wrap">
                 {showWelcome ? modeConfig.welcome : ""}
                 {modeConfig.prompts.map((p, i) => (
@@ -581,8 +581,8 @@ function ChatContent({ chatId, chatMode, onModeChange }: { chatId: string; chatM
                 <div
                   className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
                     msg.role === "user"
-                      ? "border border-accent/30 bg-accent/10 text-foreground"
-                      : "border border-border bg-card text-foreground"
+                      ? "border border-accent/30 bg-accent/[0.06] backdrop-blur-sm text-foreground"
+                      : "border border-border bg-card/50 backdrop-blur-sm text-foreground"
                   }`}
                 >
                   <MessageContent
@@ -602,7 +602,7 @@ function ChatContent({ chatId, chatMode, onModeChange }: { chatId: string; chatM
 
           {isLoading && (
             <div className="flex justify-start">
-              <div className="rounded-2xl border border-border bg-card px-4 py-3">
+              <div className="rounded-2xl border border-border bg-card/50 backdrop-blur-sm px-4 py-3">
                 <Spinner />
               </div>
             </div>
