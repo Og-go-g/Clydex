@@ -160,10 +160,10 @@ export default function MarketsPage() {
         </div>
 
         {loading ? (
-          <div className="overflow-hidden rounded-xl border border-border">
+          <div className="overflow-hidden rounded-xl border border-border bg-[#0a0a0a]/15 backdrop-blur-sm">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-border bg-card text-xs text-muted">
+                <tr className="border-b border-border bg-card/50 text-xs text-muted">
                   <th className="px-4 py-3 text-left">Market</th>
                   <th className="px-4 py-3 text-right">Index Price</th>
                   <th className="hidden px-4 py-3 text-right md:table-cell">Mark Price</th>
@@ -192,10 +192,10 @@ export default function MarketsPage() {
             {error}
           </div>
         ) : (
-          <div className="overflow-hidden rounded-xl border border-border">
+          <div className="overflow-hidden rounded-xl border border-border bg-[#0a0a0a]/15 backdrop-blur-sm">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-border bg-card text-xs text-muted">
+                <tr className="border-b border-border bg-card/50 text-xs text-muted">
                   <th className="px-4 py-3 text-left">Market</th>
                   <th className="px-4 py-3 text-right">Index Price</th>
                   <th className="hidden px-4 py-3 text-right md:table-cell">Mark Price</th>
