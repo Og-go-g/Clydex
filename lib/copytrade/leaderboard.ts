@@ -45,8 +45,14 @@ type Period = "7d" | "30d" | "all";
 
 // ─── Period filter ──────────────────────────────────────────────
 
+const VALID_ALIASES = new Set(["pnl_history", "trade_history"]);
+const VALID_COLS = new Set(["time"]);
+
 function periodClause(period: Period, alias: string, col: string): string {
   if (period === "all") return "";
+  if (!VALID_ALIASES.has(alias) || !VALID_COLS.has(col)) {
+    throw new Error("Invalid period clause parameters");
+  }
   const days = period === "7d" ? 7 : 30;
   return ` AND ${alias}."${col}" >= NOW() - INTERVAL '${days} days'`;
 }
@@ -79,13 +85,16 @@ export async function getLeaderboard(
        WHERE 1=1 ${periodClause(period, "pnl_history", "time")}
        GROUP BY "walletAddr"`;
 
-  // Sort mapping
-  const sortMap: Record<SortField, string> = {
+  // Sort mapping — hardcoded SQL fragments, never from user input.
+  // Runtime guard as defense-in-depth against future refactors.
+  const SORT_MAP: Record<string, string> = {
     pnl: "pnl.total_pnl DESC",
     winrate: "win_rate DESC NULLS LAST",
     volume: "total_volume DESC",
     trades: "total_trades DESC",
   };
+  const orderClause = SORT_MAP[sort];
+  if (!orderClause) throw new Error("Invalid sort parameter");
 
   const sql = `
     WITH pnl AS (${pnlSource}),
@@ -136,7 +145,7 @@ export async function getLeaderboard(
     LEFT JOIN vol v ON v."walletAddr" = pnl."walletAddr"
     WHERE pnl."walletAddr" NOT LIKE 'account:%'
       AND COALESCE(tc.total_trades, 0) >= 5
-    ORDER BY ${sortMap[sort] ?? "pnl.total_pnl DESC"}
+    ORDER BY ${orderClause}
     LIMIT $1
   `;
 
