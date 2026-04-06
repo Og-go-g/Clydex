@@ -380,24 +380,27 @@ interface RealtimeParams extends PaginationParams {
 export async function getTradeHistoryRealtime(params: RealtimeParams): Promise<PagedResult<TradeWithPnlRow>> {
   const { walletAddr, accountId, marketId } = params;
 
-  // 1. Mini-sync: fetch fresh trades from API since last sync → insert into DB
+  // Mini-sync: fill the gap between last full sync and now.
+  // Only runs if user has been synced before (has a cursor).
+  // For new users, syncAllHistory handles the full download — mini-sync would
+  // be incomplete (capped at 500 records) and cause data gaps.
   const lastSync = await getLastSyncTime(walletAddr);
-  const since = lastSync?.toISOString() ?? new Date(Date.now() - 7 * 86400_000).toISOString();
+  if (lastSync) {
+    const since = lastSync.toISOString();
+    const [freshTrades, freshPnl] = await Promise.all([
+      fetchRecentTrades(accountId, walletAddr, since).catch(() => [] as TradeHistoryRow[]),
+      fetchRecentPnl(accountId, walletAddr, since).catch(() => [] as PnlHistoryRow[]),
+    ]);
 
-  const [freshTrades, freshPnl] = await Promise.all([
-    fetchRecentTrades(accountId, walletAddr, since).catch(() => [] as TradeHistoryRow[]),
-    fetchRecentPnl(accountId, walletAddr, since).catch(() => [] as PnlHistoryRow[]),
-  ]);
-
-  // Insert fresh trades into DB (ON CONFLICT DO NOTHING for dedup)
-  if (freshTrades.length > 0) {
-    await insertFreshTrades(freshTrades);
+    if (freshTrades.length > 0) {
+      await insertFreshTrades(freshTrades);
+    }
+    if (freshPnl.length > 0) {
+      await insertFreshPnl(freshPnl);
+    }
   }
-  if (freshPnl.length > 0) {
-    await insertFreshPnl(freshPnl);
-  }
 
-  // 2. Now paginate from DB (includes both old + freshly inserted data)
+  // Paginate from DB (includes both old + freshly inserted data)
   return getTradeHistoryWithPnl({ walletAddr, marketId, limit: params.limit, offset: params.offset });
 }
 
@@ -408,11 +411,12 @@ export async function getOrderHistoryRealtime(params: RealtimeParams): Promise<P
   const { walletAddr, accountId, marketId } = params;
 
   const lastSync = await getLastSyncTime(walletAddr);
-  const since = lastSync?.toISOString() ?? new Date(Date.now() - 7 * 86400_000).toISOString();
-
-  const freshOrders = await fetchRecentOrders(accountId, walletAddr, since).catch(() => [] as OrderHistoryRow[]);
-  if (freshOrders.length > 0) {
-    await insertFreshOrders(freshOrders);
+  if (lastSync) {
+    const since = lastSync.toISOString();
+    const freshOrders = await fetchRecentOrders(accountId, walletAddr, since).catch(() => [] as OrderHistoryRow[]);
+    if (freshOrders.length > 0) {
+      await insertFreshOrders(freshOrders);
+    }
   }
 
   return getOrderHistory({ walletAddr, marketId, limit: params.limit, offset: params.offset });
@@ -425,11 +429,12 @@ export async function getFundingHistoryRealtime(params: RealtimeParams): Promise
   const { walletAddr, accountId, marketId } = params;
 
   const lastSync = await getLastSyncTime(walletAddr);
-  const since = lastSync?.toISOString() ?? new Date(Date.now() - 7 * 86400_000).toISOString();
-
-  const freshFunding = await fetchRecentFunding(accountId, walletAddr, since).catch(() => [] as FundingHistoryRow[]);
-  if (freshFunding.length > 0) {
-    await insertFreshFunding(freshFunding);
+  if (lastSync) {
+    const since = lastSync.toISOString();
+    const freshFunding = await fetchRecentFunding(accountId, walletAddr, since).catch(() => [] as FundingHistoryRow[]);
+    if (freshFunding.length > 0) {
+      await insertFreshFunding(freshFunding);
+    }
   }
 
   return getFundingHistory({ walletAddr, marketId, limit: params.limit, offset: params.offset });

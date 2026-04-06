@@ -46,7 +46,7 @@ async function fetchPage<T>(url: string): Promise<PaginatedResponse<T>> {
   return { data, cursor, hasMore: data.length >= PAGE_SIZE && cursor != null };
 }
 
-async function fetchAll<T>(baseUrl: string, maxPages = 20): Promise<T[]> {
+async function fetchAll<T>(baseUrl: string, maxPages = 10): Promise<T[]> {
   const all: T[] = [];
   let cursor: string | undefined;
   let hasMore = true;

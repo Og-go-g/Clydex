@@ -250,14 +250,29 @@ export function HistoryModal({ isOpen, onClose }: HistoryModalProps) {
     }
   }, [checkSyncStatus]);
 
-  // Auto-sync on first open: always trigger sync to link bulk data + fetch fresh
+  // Auto-sync on first open: sync then fetch data.
+  // For new users (never synced): wait for full sync before showing data.
+  // For synced users: show DB data immediately, sync in background.
   useEffect(() => {
     if (!isOpen || initialSyncDone.current) return;
     initialSyncDone.current = true;
-    // Always sync on first open — this calls linkAccountToWallet (links bulk data)
-    // and fetches any new records since last sync
-    triggerSync();
-  }, [isOpen, triggerSync]);
+
+    (async () => {
+      // Check if user has been synced before
+      const status = await checkSyncStatus();
+      const alreadySynced = status?.synced ?? false;
+
+      if (alreadySynced) {
+        // Synced user: show data immediately from DB, sync in background
+        fetchData();
+        triggerSync(); // background — will refresh data when done
+      } else {
+        // New user: wait for full sync, then show data
+        await triggerSync();
+        // fetchData will be triggered by syncResults useEffect below
+      }
+    })();
+  }, [isOpen, triggerSync, checkSyncStatus]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ─── Fetch Data ───────────────────────────────────────────────
 
@@ -289,10 +304,12 @@ export function HistoryModal({ isOpen, onClose }: HistoryModalProps) {
     }
   }, [isOpen, tab, offset]);
 
+  // Re-fetch when tab or page changes (only if we have data or sync is done)
   useEffect(() => {
-    if (isOpen) fetchData();
-  }, [isOpen, fetchData]);
+    if (isOpen && (syncStatus?.synced || syncResults)) fetchData();
+  }, [isOpen, tab, offset]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Re-fetch after sync completes (covers both new and returning users)
   useEffect(() => {
     if (syncResults) fetchData();
   }, [syncResults]); // eslint-disable-line react-hooks/exhaustive-deps
