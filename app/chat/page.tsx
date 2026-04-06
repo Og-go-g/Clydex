@@ -299,6 +299,15 @@ function useStatusToast(
 export default function ChatPage() {
   const { activeId, createChat } = useChatSessions();
   const { setChatId } = useChartPanel();
+  // Chat mode lives here (parent) so it survives ChatContent remounts
+  const [chatMode, setChatMode] = useState<ChatMode>("trading");
+
+  const handleModeChange = useCallback((mode: ChatMode) => {
+    if (mode !== chatMode) {
+      setChatMode(mode);
+      createChat(); // new session → ChatContent remounts, but mode persists here
+    }
+  }, [chatMode, createChat]);
 
   // "Trade X" from markets: if pending exists and current chat has messages → create new chat
   const didCreateRef = useRef(false);
@@ -321,10 +330,10 @@ export default function ChatPage() {
   }, [activeId, setChatId]);
 
   if (!activeId) return null;
-  return <ChatContent key={activeId} chatId={activeId} />;
+  return <ChatContent key={activeId} chatId={activeId} chatMode={chatMode} onModeChange={handleModeChange} />;
 }
 
-function ChatContent({ chatId }: { chatId: string }) {
+function ChatContent({ chatId, chatMode, onModeChange }: { chatId: string; chatMode: ChatMode; onModeChange: (mode: ChatMode) => void }) {
   const { address } = useWallet();
   const { isAuthenticated } = useAuth();
   const { renameChat, touchChat, sessions } = useChatSessions();
@@ -334,18 +343,7 @@ function ChatContent({ chatId }: { chatId: string }) {
   addressRef.current = address;
 
   const [input, setInput] = useState("");
-  const [chatMode, setChatMode] = useState<ChatMode>("trading");
   const modeConfig = CHAT_MODES[chatMode];
-  const { createChat } = useChatSessions();
-
-  // When mode switches, start a fresh chat to avoid sending messages
-  // to the wrong endpoint. Trading and Copy Trading have different AI backends.
-  const handleModeChange = useCallback((mode: ChatMode) => {
-    if (mode !== chatMode) {
-      setChatMode(mode);
-      createChat(); // new session → ChatContent remounts via key={activeId}
-    }
-  }, [chatMode, createChat]);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const initialMessages = useMemo(() => getMessages(chatId) as any[], [chatId]);
@@ -538,7 +536,7 @@ function ChatContent({ chatId }: { chatId: string }) {
     <div className="flex h-[calc(100vh-4rem+1px)] flex-col">
       {/* Mode toggle */}
       <div className="flex justify-center px-4 py-1.5">
-        <ChatModeToggle mode={chatMode} onChange={handleModeChange} />
+        <ChatModeToggle mode={chatMode} onChange={onModeChange} />
       </div>
       {/* Messages */}
       <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 py-6">
