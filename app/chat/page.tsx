@@ -961,8 +961,8 @@ function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, onOpen
     const markets = result.markets as Array<Record<string, unknown>>;
     return (
       <CollapsibleCard cardKey={cKey} label={`Markets (${markets.length})`} beforeText={beforeText} descriptionText={descriptionText}>
-        <div className="overflow-x-auto rounded-xl border border-border bg-card">
-          <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+        <div className="max-h-[400px] overflow-y-auto overflow-x-auto rounded-xl border border-border bg-card/50 backdrop-blur-sm">
+          <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-border bg-card/80 backdrop-blur-sm px-3 py-2">
             <span className="text-sm font-semibold text-foreground">Markets</span>
             <span className="rounded-full bg-accent/20 px-1.5 py-0.5 text-[10px] font-semibold text-accent">{markets.length}</span>
           </div>
