@@ -3,6 +3,7 @@ import { Inter } from "next/font/google";
 import { Providers } from "@/components/Providers";
 import { Header } from "@/components/layout/Header";
 import { Footer } from "@/components/layout/Footer";
+import { WireframeBackground } from "@/components/layout/WireframeBackground";
 import { LiquidationWarning } from "@/components/alerts/LiquidationWarning";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import "./globals.css";
@@ -24,6 +25,7 @@ export default function RootLayout({
     <html lang="en" className="dark">
       <body className={`${inter.className} antialiased`}>
         <Providers>
+          <WireframeBackground />
           <Header />
           <LiquidationWarning />
           <main className="min-h-[calc(100vh-4rem)]">
