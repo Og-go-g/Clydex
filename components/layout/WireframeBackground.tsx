@@ -22,13 +22,15 @@ export function WireframeBackground() {
       canvas!.style.height = H + "px";
       ctx!.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-      const gridCols = 70;
-      const gridRows = 45;
-      const gridW = W * 2.8;
-      const gridH = H * 3.2;
-      const camY = -350;
-      const camZ = 150;
-      const fov = 500;
+      // Responsive: adapt grid density and camera to screen size
+      const isMobile = W < 768;
+      const gridCols = isMobile ? 40 : 70;
+      const gridRows = isMobile ? 30 : 45;
+      const gridW = W * (isMobile ? 3.5 : 2.8);
+      const gridH = H * (isMobile ? 4.0 : 3.2);
+      const camY = isMobile ? -400 : -350;
+      const camZ = isMobile ? 120 : 150;
+      const fov = isMobile ? 400 : 500;
 
       function noise(x: number, y: number): number {
         return (
