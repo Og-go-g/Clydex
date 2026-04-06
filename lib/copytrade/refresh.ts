@@ -77,7 +77,8 @@ export async function refreshAllPnlTotals(
       } else {
         failed++;
       }
-    } catch {
+    } catch (err) {
+      console.error(`[refreshPnlTotals] account ${accountId} (${walletAddr}) failed:`, err);
       failed++;
     }
 

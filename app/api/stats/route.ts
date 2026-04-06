@@ -14,6 +14,6 @@ export async function GET() {
     );
   } catch (error) {
     console.error("[api/stats] error:", error);
-    return NextResponse.json({ traders: null });
+    return NextResponse.json({ traders: null }, { status: 500 });
   }
 }
