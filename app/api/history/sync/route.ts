@@ -29,8 +29,10 @@ export async function POST() {
 
   // Rate limit: reject if last sync was < 60s ago
   const lastSync = await getLastSyncTime(address);
-  if (lastSync && Date.now() - lastSync.getTime() < SYNC_COOLDOWN_MS) {
-    const retryAfter = Math.ceil((SYNC_COOLDOWN_MS - (Date.now() - lastSync.getTime())) / 1000);
+  const now = Date.now();
+  const elapsed = lastSync ? now - lastSync.getTime() : Infinity;
+  if (lastSync && elapsed >= 0 && elapsed < SYNC_COOLDOWN_MS) {
+    const retryAfter = Math.ceil((SYNC_COOLDOWN_MS - elapsed) / 1000);
     return NextResponse.json(
       { error: "Sync throttled", retryAfter },
       { status: 429, headers: { "Retry-After": String(retryAfter) } },

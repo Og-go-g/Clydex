@@ -12,7 +12,8 @@ export async function GET() {
       { traders },
       { headers: { "Cache-Control": "public, s-maxage=300, stale-while-revalidate=60" } },
     );
-  } catch {
-    return NextResponse.json({ traders: 0 });
+  } catch (error) {
+    console.error("[api/stats] error:", error);
+    return NextResponse.json({ traders: null });
   }
 }

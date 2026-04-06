@@ -146,7 +146,8 @@ export async function POST(req: Request) {
               })),
             };
           } catch (err) {
-            return { error: "Failed to fetch leaderboard: " + (err instanceof Error ? err.message : String(err)) };
+            console.error("[copytrade] getLeaderboard failed:", err);
+            return { error: "Failed to fetch leaderboard. Please try again." };
           }
         },
       }),
@@ -197,7 +198,8 @@ export async function POST(req: Request) {
               })),
             };
           } catch (err) {
-            return { error: "Failed to fetch trader profile: " + (err instanceof Error ? err.message : String(err)) };
+            console.error("[copytrade] getTraderProfile failed:", err);
+            return { error: "Failed to fetch trader profile. Please try again." };
           }
         },
       }),

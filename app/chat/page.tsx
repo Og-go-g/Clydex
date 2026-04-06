@@ -336,12 +336,22 @@ function ChatContent({ chatId }: { chatId: string }) {
   const [input, setInput] = useState("");
   const [chatMode, setChatMode] = useState<ChatMode>("trading");
   const modeConfig = CHAT_MODES[chatMode];
+  const { createChat } = useChatSessions();
+
+  // When mode switches, start a fresh chat to avoid sending messages
+  // to the wrong endpoint. Trading and Copy Trading have different AI backends.
+  const handleModeChange = useCallback((mode: ChatMode) => {
+    if (mode !== chatMode) {
+      setChatMode(mode);
+      createChat(); // new session → ChatContent remounts via key={activeId}
+    }
+  }, [chatMode, createChat]);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const initialMessages = useMemo(() => getMessages(chatId) as any[], [chatId]);
 
-  // Transport switches endpoint based on chat mode.
-  // Trading mode → /api/chat, Copy Trading mode → /api/chat/copytrade
+  // Stable transport per chat mode — doesn't change mid-conversation
+  // because mode switch creates a new chat (handleModeChange above).
   const transport = useMemo(
     () => new DefaultChatTransport({
       api: chatMode === "copytrade" ? "/api/chat/copytrade" : "/api/chat",
@@ -528,7 +538,7 @@ function ChatContent({ chatId }: { chatId: string }) {
     <div className="flex h-[calc(100vh-4rem+1px)] flex-col">
       {/* Mode toggle */}
       <div className="flex justify-center px-4 py-1.5">
-        <ChatModeToggle mode={chatMode} onChange={setChatMode} />
+        <ChatModeToggle mode={chatMode} onChange={handleModeChange} />
       </div>
       {/* Messages */}
       <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 py-6">

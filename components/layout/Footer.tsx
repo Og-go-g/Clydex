@@ -9,7 +9,7 @@ export function Footer() {
     fetch("/api/stats")
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        if (d?.traders) setTraders(d.traders);
+        if (d && typeof d.traders === "number") setTraders(d.traders);
       })
       .catch(() => {});
   }, []);
