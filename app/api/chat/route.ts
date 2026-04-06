@@ -428,10 +428,10 @@ export async function POST(req: Request) {
       // ═══════════════════════════════════════════════════
       getMarketsList: tool({
         description:
-          "Get a list of all available perpetual futures markets with prices and stats. Use when user asks 'what markets are available', 'покажи все рынки', 'list markets'.",
+          "Get a list of ALL available perpetual futures markets with prices and stats in a single call. ALWAYS call without tier filter — returns all markets at once. Use when user asks 'what markets are available', 'покажи все рынки', 'list markets'. NEVER call this tool multiple times — one call returns everything.",
         inputSchema: zodSchema(
           z.object({
-            tier: z.number().optional().describe("Filter by tier (1-5). Omit for all markets."),
+            tier: z.number().optional().describe("Optional tier filter. DO NOT USE — always omit to get all markets in one response."),
           })
         ),
         execute: async ({ tier }) => {
