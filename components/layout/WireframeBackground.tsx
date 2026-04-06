@@ -13,12 +13,14 @@ export function WireframeBackground() {
     if (!ctx) return;
 
     function draw() {
-      const dpr = window.devicePixelRatio || 2;
+      const dpr = window.devicePixelRatio || 1;
       const W = window.innerWidth;
       const H = window.innerHeight;
       canvas!.width = W * dpr;
       canvas!.height = H * dpr;
-      ctx!.scale(dpr, dpr);
+      canvas!.style.width = W + "px";
+      canvas!.style.height = H + "px";
+      ctx!.setTransform(dpr, 0, 0, dpr, 0, 0);
 
       const gridCols = 70;
       const gridRows = 45;
@@ -83,7 +85,7 @@ export function WireframeBackground() {
       ctx!.clearRect(0, 0, W, H);
 
       // Opacity multiplier — controls overall brightness
-      const brightness = 0.4;
+      const brightness = 0.7;
 
       for (let r = gridRows - 1; r >= 0; r--) {
         for (let c = 0; c < gridCols; c++) {
