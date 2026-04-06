@@ -525,7 +525,7 @@ function ChatContent({ chatId }: { chatId: string }) {
   return (
     <div className="flex h-[calc(100vh-4rem+1px)] flex-col">
       {/* Mode toggle */}
-      <div className="border-b border-border bg-background px-4 py-2">
+      <div className="border-b border-border bg-background px-4 py-1.5">
         <ChatModeToggle mode={chatMode} onChange={setChatMode} />
       </div>
       {/* Messages */}
