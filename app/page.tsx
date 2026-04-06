@@ -28,7 +28,7 @@ export default function Home() {
     <div className="flex flex-col items-center px-6">
       {/* Hero */}
       <section className="flex max-w-3xl flex-col items-center gap-6 pb-20 pt-24 text-center">
-        <div className="rounded-full border border-border bg-card px-4 py-1.5 text-sm text-muted">
+        <div className="rounded-full border border-border bg-card/50 backdrop-blur-sm px-4 py-1.5 text-sm text-muted">
           Clydex &middot; 01 Exchange &middot; Perpetual Futures
         </div>
         <h1 className="text-5xl font-bold leading-tight tracking-tight md:text-6xl">
@@ -61,7 +61,7 @@ export default function Home() {
         {features.map((f) => (
           <div
             key={f.title}
-            className="rounded-2xl border border-border bg-card p-6 transition-colors hover:bg-card-hover"
+            className="rounded-2xl border border-border bg-card/50 backdrop-blur-sm p-6 transition-colors hover:bg-card/70"
           >
             <h3 className="mb-2 text-lg font-semibold">{f.title}</h3>
             <p className="text-sm leading-relaxed text-muted">
