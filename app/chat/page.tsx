@@ -16,6 +16,7 @@ import { ClosePositionModal } from "@/components/collateral/ClosePositionModal";
 import { useToast } from "@/components/alerts/ToastProvider";
 import { usePageActive } from "@/hooks/usePageActive";
 import { useChartPanel, useChartPanelSafe } from "@/lib/chat/chart-panel-context";
+import { ChatModeToggle, type ChatMode } from "@/components/chat/ChatModeToggle";
 
 const PriceChart = lazy(() =>
   import("@/components/charts/PriceChart").then((m) => ({ default: m.PriceChart }))
@@ -45,8 +46,41 @@ export function openCloseModal(data: CloseModalData) { openCloseModalFn?.(data);
 
 /** Minimum position size threshold — below this, position is considered empty */
 const MIN_POS_SIZE = 1e-12;
-const WELCOME_MESSAGE = "Hey! I'm Clydex, your AI trading assistant for 01 Exchange perpetual futures on Solana.\n\n";
-const WELCOME_FOOTER = "\n\nWhat would you like to do?";
+// ─── Chat Mode Config ───────────────────────────────────────────
+
+interface ModeConfig {
+  welcome: string;
+  footer: string;
+  placeholder: string;
+  prompts: { label: string; example: string }[];
+}
+
+const CHAT_MODES: Record<ChatMode, ModeConfig> = {
+  trading: {
+    welcome: "Hey! I'm Clydex, your AI trading assistant for 01 Exchange perpetual futures on Solana.\n\n",
+    footer: "\n\nWhat would you like to do?",
+    placeholder: "Trade, check prices, ask anything...",
+    prompts: [
+      { label: "Check prices", example: "price of BTC" },
+      { label: "Trade perps", example: "long ETH 5x $500" },
+      { label: "My positions", example: "show my positions" },
+      { label: "Funding rates", example: "funding rates" },
+      { label: "Markets", example: "list all markets" },
+    ],
+  },
+  copytrade: {
+    welcome: "Copy-trading mode — analyze top performers on 01 Exchange and mirror their strategies.\n\n",
+    footer: "\n\nWhat would you like to explore?",
+    placeholder: "Analyze traders, copy strategies...",
+    prompts: [
+      { label: "Top traders", example: "top traders this week" },
+      { label: "Leaderboard", example: "show leaderboard" },
+      { label: "Analyze trader", example: "analyze best trader on SOL" },
+      { label: "Copy strategy", example: "copy top BTC trader" },
+      { label: "My copies", example: "show my active copies" },
+    ],
+  },
+};
 function formatTxHash(hash: string): string {
   return hash.length > 14 ? hash.slice(0, 8) + "..." + hash.slice(-6) : hash;
 }
@@ -316,6 +350,8 @@ function ChatContent({ chatId }: { chatId: string }) {
   });
 
   const [input, setInput] = useState("");
+  const [chatMode, setChatMode] = useState<ChatMode>("trading");
+  const modeConfig = CHAT_MODES[chatMode];
   const { closePosition: doClosePosition } = useOrderActions();
   const [closeModalData, setCloseModalData] = useState<CloseModalData | null>(null);
 
@@ -495,28 +531,16 @@ function ChatContent({ chatId }: { chatId: string }) {
           <div className="flex justify-start">
             <div className="max-w-[80%] rounded-2xl border border-border bg-card px-4 py-3 text-sm leading-relaxed text-foreground">
               <div className="whitespace-pre-wrap">
-                {showWelcome ? WELCOME_MESSAGE : ""}
-                {"- "}
-                <strong>Check prices</strong>
-                {" — "}
-                <button type="button" onClick={() => setInput("price of BTC")} className="text-muted underline hover:text-foreground transition-colors">{'"price of BTC"'}</button>
-                {"\n- "}
-                <strong>Trade perps</strong>
-                {" — "}
-                <button type="button" onClick={() => setInput("long ETH 5x $500")} className="text-muted underline hover:text-foreground transition-colors">{'"long ETH 5x $500"'}</button>
-                {"\n- "}
-                <strong>My positions</strong>
-                {" — "}
-                <button type="button" onClick={() => setInput("show my positions")} className="text-muted underline hover:text-foreground transition-colors">{'"show my positions"'}</button>
-                {"\n- "}
-                <strong>Funding rates</strong>
-                {" — "}
-                <button type="button" onClick={() => setInput("funding rates")} className="text-muted underline hover:text-foreground transition-colors">{'"funding rates"'}</button>
-                {"\n- "}
-                <strong>Markets</strong>
-                {" — "}
-                <button type="button" onClick={() => setInput("list all markets")} className="text-muted underline hover:text-foreground transition-colors">{'"list all markets"'}</button>
-                {showWelcome ? WELCOME_FOOTER : ""}
+                {showWelcome ? modeConfig.welcome : ""}
+                {modeConfig.prompts.map((p, i) => (
+                  <span key={p.example}>
+                    {i > 0 ? "\n" : ""}{"- "}
+                    <strong>{p.label}</strong>
+                    {" — "}
+                    <button type="button" onClick={() => setInput(p.example)} className="text-muted underline hover:text-foreground transition-colors">{`"${p.example}"`}</button>
+                  </span>
+                ))}
+                {showWelcome ? modeConfig.footer : ""}
               </div>
             </div>
           </div>
@@ -582,13 +606,16 @@ function ChatContent({ chatId }: { chatId: string }) {
       </div>
 
       {/* Input */}
-      <div className="border-t border-border bg-background p-4">
+      <div className="border-t border-border bg-background px-4 pb-4 pt-3">
+        <div className="mb-2">
+          <ChatModeToggle mode={chatMode} onChange={setChatMode} />
+        </div>
         <form onSubmit={onSubmit} className="mx-auto flex max-w-2xl items-center gap-3">
           <input
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Trade, check prices, ask anything..."
+            placeholder={modeConfig.placeholder}
             className="flex-1 rounded-xl border border-border bg-card px-4 py-3 text-sm text-foreground placeholder:text-muted focus:border-accent focus:outline-none"
           />
           <button
