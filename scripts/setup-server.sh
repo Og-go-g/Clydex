@@ -100,13 +100,17 @@ if [ -n "${CRON_SECRET:-}" ]; then
   # Price collection every 15 minutes
   CRON_PRICES="*/15 * * * * curl -s -H 'Authorization: Bearer ${CRON_SECRET}' https://${DOMAIN}/api/cron/collect-prices > /dev/null 2>&1"
 
+  # Leaderboard PnL refresh daily at 4am UTC (after sync-history)
+  CRON_LEADERBOARD="0 4 * * * curl -s -H 'Authorization: Bearer ${CRON_SECRET}' https://${DOMAIN}/api/cron/update-leaderboard > /dev/null 2>&1"
+
   # SSL renewal monthly
   CRON_SSL="0 0 1 * * certbot renew --quiet && docker compose -f ${APP_DIR}/docker-compose.yml restart nginx"
 
-  (crontab -l 2>/dev/null | grep -v 'sync-history' | grep -v 'collect-prices' | grep -v 'certbot renew'; echo "${CRON_SYNC}"; echo "${CRON_PRICES}"; echo "${CRON_SSL}") | crontab -
+  (crontab -l 2>/dev/null | grep -v 'sync-history' | grep -v 'collect-prices' | grep -v 'update-leaderboard' | grep -v 'certbot renew'; echo "${CRON_SYNC}"; echo "${CRON_PRICES}"; echo "${CRON_LEADERBOARD}"; echo "${CRON_SSL}") | crontab -
 
   echo "  Cron jobs installed:"
   echo "    - History sync: daily 3am UTC"
+  echo "    - Leaderboard refresh: daily 4am UTC"
   echo "    - Price collection: every 15 min"
   echo "    - SSL renewal: monthly"
 else
