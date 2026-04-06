@@ -24,8 +24,8 @@ export function WireframeBackground() {
 
       // Responsive: adapt grid density and camera to screen size
       const isMobile = W < 768;
-      const gridCols = isMobile ? 40 : 70;
-      const gridRows = isMobile ? 30 : 45;
+      const gridCols = isMobile ? 20 : 70;
+      const gridRows = isMobile ? 15 : 45;
       const gridW = W * (isMobile ? 3.5 : 2.8);
       const gridH = H * (isMobile ? 4.0 : 3.2);
       const camY = isMobile ? -400 : -350;
