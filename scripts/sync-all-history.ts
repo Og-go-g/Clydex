@@ -33,7 +33,7 @@ const FRONTEND_API = "https://01.xyz/api";
 const MAX_ID = Number(process.argv.find(a => a.startsWith("--to="))?.split("=")[1] || "12000");
 const FROM_ID = Number(process.argv.find(a => a.startsWith("--from="))?.split("=")[1] || "0");
 const PAGE = 250;
-const CONCURRENCY = Number(process.env.SYNC_CONCURRENCY || "3");
+const CONCURRENCY = Number(process.env.SYNC_CONCURRENCY || "1");
 const FORCE = process.argv.includes("--force");
 
 // Rate limiting — respect 01 API limits
@@ -100,18 +100,23 @@ async function get(url: string): Promise<Record<string, unknown> | null> {
       if (res.status === 429) {
         const retryAfter = Number(res.headers.get("retry-after") || "10");
         const waitMs = Math.max(retryAfter * 1000, RETRY_BACKOFF_MS * (i + 1));
-        process.stdout.write(`\n    [429] Rate limited, waiting ${Math.round(waitMs / 1000)}s...\n`);
+        process.stdout.write(`\n    [429] Rate limited on ${url.slice(0, 80)}, waiting ${Math.round(waitMs / 1000)}s... (attempt ${i + 1}/${RETRY_COUNT})\n`);
         await sleep(waitMs);
         continue;
       }
       if (res.status === 404 || res.status === 400) return null;
       if (!res.ok) {
+        process.stdout.write(`\n    [${res.status}] ${url.slice(0, 80)} (attempt ${i + 1}/${RETRY_COUNT})\n`);
         if (i < RETRY_COUNT - 1) { await sleep(RETRY_BACKOFF_MS); continue; }
         return null;
       }
       return await res.json() as Record<string, unknown>;
-    } catch {
-      if (i < RETRY_COUNT - 1) await sleep(RETRY_BACKOFF_MS * (i + 1));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message.slice(0, 60) : String(err);
+      if (i < RETRY_COUNT - 1) {
+        process.stdout.write(`\n    [ERR] ${msg} — ${url.slice(0, 60)} (attempt ${i + 1}/${RETRY_COUNT})\n`);
+        await sleep(RETRY_BACKOFF_MS * (i + 1));
+      }
     }
   }
   return null;
@@ -191,7 +196,12 @@ async function streamPages(
     if (cursor) url += `&startInclusive=${encodeURIComponent(cursor)}`;
 
     const body = await get(url);
-    if (!body) break;
+    if (!body) {
+      if (pages === 0 && label) {
+        process.stdout.write(`\n    [!] ${label}: API returned null on first page\n`);
+      }
+      break;
+    }
 
     const items: R[] = Array.isArray(body) ? body as R[] : ((body.items ?? body.data ?? body.results ?? []) as R[]);
     if (items.length === 0) break;
@@ -536,21 +546,33 @@ async function processAccount(id: number, logPrefix: string): Promise<{
   // Skip empty accounts to avoid hammering Vercel WAF for nothing
   if (!shuttingDown && sdkTotal > 0) {
     process.stdout.write(`\r${logPrefix} syncing volume-calendar    `);
-    try { counts.volume = await syncVolumeCalendar(id, wallet); } catch { counts.volume = 0; }
+    try { counts.volume = await syncVolumeCalendar(id, wallet); } catch (err) {
+      const msg = err instanceof Error ? err.message.slice(0, 60) : String(err);
+      process.stdout.write(`\n    [!] volume-calendar failed: ${msg}\n`);
+      counts.volume = 0;
+    }
     await sleep(FRONTEND_API_DELAY_MS);
 
     if (!shuttingDown) {
       process.stdout.write(`\r${logPrefix} syncing pnl-totals         `);
-      try { await syncPnlTotals(id, wallet); } catch { /* non-critical */ }
+      try { await syncPnlTotals(id, wallet); } catch (err) {
+        const msg = err instanceof Error ? err.message.slice(0, 60) : String(err);
+        process.stdout.write(`\n    [!] pnl-totals failed: ${msg}\n`);
+      }
       await sleep(FRONTEND_API_DELAY_MS);
     }
   }
 
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
 
-  // Mark synced only if we completed everything
+  // Mark synced only if we completed everything and actually processed data
+  // (or confirmed the account truly has no history)
   if (!shuttingDown) {
-    await markSynced(wallet);
+    if (total > 0 || sdkTotal === 0) {
+      await markSynced(wallet);
+    } else {
+      process.stdout.write(`\n    [!] Account ${id} had data but 0 records inserted — NOT marking synced\n`);
+    }
   }
 
   return { ok: true, records: total, wallet };
