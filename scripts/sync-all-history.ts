@@ -402,7 +402,11 @@ async function syncVolumeCalendar(id: number, w: string): Promise<number> {
       ],
     );
     return result.rowCount ?? 0;
-  } catch { return 0; }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message.slice(0, 60) : String(err);
+    process.stdout.write(`\n    [!] volume-calendar DB insert failed: ${msg}\n`);
+    return 0;
+  }
 }
 
 async function syncPnlTotals(id: number, w: string): Promise<boolean> {
@@ -425,7 +429,11 @@ async function syncPnlTotals(id: number, w: string): Promise<boolean> {
       ],
     );
     return true;
-  } catch { return false; }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message.slice(0, 60) : String(err);
+    process.stdout.write(`\n    [!] pnl-totals DB insert failed: ${msg}\n`);
+    return false;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════
