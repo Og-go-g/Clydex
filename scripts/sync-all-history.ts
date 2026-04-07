@@ -37,7 +37,7 @@ const CONCURRENCY = Number(process.env.SYNC_CONCURRENCY || "1");
 const FORCE = process.argv.includes("--force");
 
 // Rate limiting — respect 01 API limits
-const API_DELAY_MS = 200;          // 200ms between API calls (~5 req/s)
+const API_DELAY_MS = 100;          // 100ms between API calls (~10 req/s, safe with proxies)
 const BETWEEN_ACCOUNTS_MS = 500;   // 500ms pause between accounts
 const FRONTEND_API_DELAY_MS = 3000; // 3s between 01.xyz frontend API calls (behind Vercel WAF)
 const RETRY_COUNT = 3;
@@ -181,6 +181,8 @@ function safeDate(v: unknown): Date {
 
 type R = Record<string, unknown>;
 
+const MAX_PAGES_PER_TYPE = 200; // 200 pages × 250 = 50K records max per data type per account
+
 async function streamPages(
   baseUrl: string,
   sql: string,
@@ -191,7 +193,7 @@ async function streamPages(
   let cursor: string | undefined;
   let pages = 0;
 
-  while (!shuttingDown) {
+  while (!shuttingDown && pages < MAX_PAGES_PER_TYPE) {
     let url = baseUrl + (baseUrl.includes("?") ? "&" : "?") + `pageSize=${PAGE}`;
     if (cursor) url += `&startInclusive=${encodeURIComponent(cursor)}`;
 
@@ -220,6 +222,11 @@ async function streamPages(
     pages++;
     cursor = (body.nextStartInclusive ?? body.cursor ?? body.nextCursor) as string | undefined;
     if (!cursor || items.length < PAGE) break;
+
+    if (pages >= MAX_PAGES_PER_TYPE) {
+      if (label) process.stdout.write(`\n    [!] ${label}: hit ${MAX_PAGES_PER_TYPE} page limit (${total} records) — skipping rest\n`);
+      break;
+    }
 
     await sleep(API_DELAY_MS); // Rate limit between pages
   }
