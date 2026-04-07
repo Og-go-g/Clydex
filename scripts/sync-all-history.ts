@@ -449,10 +449,16 @@ async function markSynced(w: string): Promise<void> {
  * When a user logs in, link.ts re-labels data to their real Solana address.
  */
 async function getAccountKey(id: number): Promise<string | null> {
-  const body = await get(`${API}/account/${id}`);
-  if (!body || typeof body !== "object") return null;
-  if (Object.keys(body).length === 0) return null;
-  return `account:${id}`;
+  // Retry up to 3 times — a single 429/timeout should not skip an account
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const body = await get(`${API}/account/${id}`);
+    if (body && typeof body === "object" && Object.keys(body).length > 0) {
+      return `account:${id}`;
+    }
+    // null means API error or empty account — retry once to be sure
+    if (attempt < 2) await sleep(2000);
+  }
+  return null;
 }
 
 // ═══════════════════════════════════════════════════════════════════
