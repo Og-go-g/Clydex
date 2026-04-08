@@ -525,9 +525,10 @@ async function processAccount(id: number, logPrefix: string): Promise<{
   // Step 3: Sync each data type sequentially with progress
   const counts: Record<string, number> = {};
 
+  // Orders excluded from bulk sync — too large for market-makers (25M+ rows).
+  // Individual user orders are fetched on-demand via syncAllHistory when they open History.
   const syncFns: Array<{ name: string; fn: () => Promise<number> }> = [
     { name: "trades", fn: () => syncTrades(id, wallet) },
-    { name: "orders", fn: () => syncOrders(id, wallet) },
     { name: "pnl", fn: () => syncPnl(id, wallet) },
     { name: "funding", fn: () => syncFunding(id, wallet) },
     { name: "deposits", fn: () => syncDeposits(id, wallet) },
