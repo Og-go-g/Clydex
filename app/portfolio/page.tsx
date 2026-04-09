@@ -6,6 +6,7 @@ import { useAuth } from "@/lib/auth/context";
 import { DepositWithdrawModal } from "@/components/collateral/DepositWithdrawModal";
 import { ClosePositionModal } from "@/components/collateral/ClosePositionModal";
 import { HistoryModal } from "@/components/history/HistoryModal";
+import { EquityChart } from "@/components/charts/EquityChart";
 import { useRealtimePrices } from "@/hooks/useRealtimePrices";
 import { usePageActive } from "@/hooks/usePageActive";
 import { useOrderActions } from "@/hooks/useOrderActions";
@@ -543,6 +544,11 @@ export default function PortfolioPage() {
               {margins?.bankruptcy ? "DANGER" : marginUsage > 0 ? marginUsage.toFixed(2) + "%" : "—"}
             </div>
           </div>
+        </div>
+
+        {/* Equity Chart */}
+        <div className="mb-6">
+          <EquityChart />
         </div>
 
         {/* Positions */}
