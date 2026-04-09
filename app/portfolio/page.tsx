@@ -6,7 +6,7 @@ import { useAuth } from "@/lib/auth/context";
 import { DepositWithdrawModal } from "@/components/collateral/DepositWithdrawModal";
 import { ClosePositionModal } from "@/components/collateral/ClosePositionModal";
 import { HistoryModal } from "@/components/history/HistoryModal";
-import { EquityChart } from "@/components/charts/EquityChart";
+import { EquityChart, invalidateEquityCache } from "@/components/charts/EquityChart";
 import { useRealtimePrices } from "@/hooks/useRealtimePrices";
 import { usePageActive } from "@/hooks/usePageActive";
 import { useOrderActions } from "@/hooks/useOrderActions";
@@ -196,6 +196,7 @@ export default function PortfolioPage() {
 
   // Initial load — shows spinner, retries up to 3 times on failure
   const fetchAccount = useCallback(async () => {
+    invalidateEquityCache(); // clear chart cache so it refreshes after deposit/withdraw
     refreshingRef.current = true; // prevent overlap with refreshAccount
     setLoading(true);
     for (let attempt = 0; attempt < 3; attempt++) {
