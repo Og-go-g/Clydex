@@ -140,11 +140,43 @@ export async function GET(req: NextRequest) {
         points.push({ time: now, balance: round(currentBalance) });
       }
     } else {
-      // Reconstruct: work backwards from current balance
-      // currentBalance = startBalance + sum(all PnL deltas) + sum(deposit amounts) - sum(withdrawal amounts)
-      // But deposits/withdrawals have balance-after snapshots, so use those as anchors.
+      // Reconstruct balance backwards from current known balance.
+      // Sum all deltas (PnL + deposit/withdrawal changes) to find start balance.
+      // For deposits/withdrawals: delta = change in balance at that event.
+      // For PnL: delta = tradingPnl + fundingPnl.
 
-      let bal = 0;
+      // First pass: compute total change from all events
+      let totalChange = 0;
+      let lastKnownBalance: number | null = null;
+      for (const ev of events) {
+        if (ev.balance !== undefined) {
+          if (lastKnownBalance !== null) {
+            totalChange += ev.balance - lastKnownBalance;
+          }
+          lastKnownBalance = ev.balance;
+        } else if (ev.pnlDelta !== undefined) {
+          totalChange += ev.pnlDelta;
+        }
+      }
+
+      // Start balance = current balance minus all changes since first event
+      // If we have deposit/withdrawal anchors, use the first one
+      // Otherwise work backwards from current balance using PnL deltas
+      let bal: number;
+      const firstBalanceEvent = events.find(e => e.balance !== undefined);
+      if (firstBalanceEvent) {
+        // We have a deposit/withdrawal anchor — start from there
+        bal = 0; // will be set by first balance event
+      } else {
+        // Only PnL events — work backwards from current balance
+        let totalPnlDelta = 0;
+        for (const ev of events) {
+          if (ev.pnlDelta !== undefined) totalPnlDelta += ev.pnlDelta;
+        }
+        bal = currentBalance - totalPnlDelta;
+      }
+
+      // Second pass: build points forward
       for (const ev of events) {
         if (ev.balance !== undefined) {
           bal = ev.balance;
