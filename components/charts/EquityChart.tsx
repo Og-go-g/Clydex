@@ -19,13 +19,12 @@ interface EquityPoint {
   balance: number;
 }
 
-type Period = "7d" | "30d" | "90d" | "all";
+type Period = "1d" | "3d" | "7d";
 
 const PERIODS: { key: Period; label: string }[] = [
+  { key: "1d", label: "1D" },
+  { key: "3d", label: "3D" },
   { key: "7d", label: "7D" },
-  { key: "30d", label: "30D" },
-  { key: "90d", label: "90D" },
-  { key: "all", label: "All" },
 ];
 
 // ─── Component ──────────────────────────────────────────────────
@@ -33,7 +32,7 @@ const PERIODS: { key: Period; label: string }[] = [
 /** Clear equity cache — call after deposit/withdraw/close position */
 export function invalidateEquityCache() {
   try {
-    for (const key of ["equity_7d", "equity_30d", "equity_90d", "equity_all"]) {
+    for (const key of ["equity_1d", "equity_3d", "equity_7d"]) {
       sessionStorage.removeItem(key);
     }
   } catch { /* ignore */ }
@@ -43,7 +42,7 @@ export function EquityChart() {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Area"> | null>(null);
-  const [period, setPeriod] = useState<Period>("30d");
+  const [period, setPeriod] = useState<Period>("7d");
   const [points, setPoints] = useState<EquityPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
@@ -182,6 +181,11 @@ export function EquityChart() {
     }));
 
     seriesRef.current.setData(chartData);
+    // Ensure chart has correct width before fitting
+    const container = containerRef.current;
+    if (container) {
+      chartRef.current.applyOptions({ width: container.clientWidth });
+    }
     chartRef.current.timeScale().fitContent();
   }, [points]);
 

@@ -19,7 +19,7 @@ import { N1_MAINNET_URL } from "@/lib/n1/constants";
 const API = N1_MAINNET_URL;
 const PAGE_SIZE = 250;
 
-type Period = "7d" | "30d" | "90d" | "all";
+type Period = "1d" | "3d" | "7d";
 
 interface EquityPoint {
   time: number; // unix seconds
@@ -27,10 +27,9 @@ interface EquityPoint {
 }
 
 function periodToMs(period: Period): number {
-  if (period === "7d") return 7 * 86400_000;
-  if (period === "30d") return 30 * 86400_000;
-  if (period === "90d") return 90 * 86400_000;
-  return 0; // all
+  if (period === "1d") return 1 * 86400_000;
+  if (period === "3d") return 3 * 86400_000;
+  return 7 * 86400_000; // 7d default
 }
 
 // Fetch paginated data from 01 API
@@ -70,10 +69,10 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
 
-  const periodRaw = req.nextUrl.searchParams.get("period") ?? "30d";
-  const period: Period = (["7d", "30d", "90d", "all"] as const).includes(periodRaw as Period)
+  const periodRaw = req.nextUrl.searchParams.get("period") ?? "7d";
+  const period: Period = (["1d", "3d", "7d"] as const).includes(periodRaw as Period)
     ? (periodRaw as Period)
-    : "30d";
+    : "7d";
 
   try {
     const accountId = await getCachedAccountId(address);
@@ -88,9 +87,7 @@ export async function GET(req: NextRequest) {
       currentBalance = account?.balances?.[0]?.amount ?? 0;
     } catch { /* use 0 */ }
 
-    const since = period !== "all"
-      ? new Date(Date.now() - periodToMs(period)).toISOString()
-      : undefined;
+    const since = new Date(Date.now() - periodToMs(period)).toISOString();
 
     // Fetch deposit, withdrawal, PnL history from 01 API in parallel
     interface DepositRaw { time: string; amount: number; balance: number }
