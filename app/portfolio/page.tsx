@@ -196,7 +196,6 @@ export default function PortfolioPage() {
 
   // Initial load — shows spinner, retries up to 3 times on failure
   const fetchAccount = useCallback(async () => {
-    invalidateEquityCache(); // clear chart cache so it refreshes after deposit/withdraw
     refreshingRef.current = true; // prevent overlap with refreshAccount
     setLoading(true);
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -408,8 +407,9 @@ export default function PortfolioPage() {
   // imf = SDK initial margin (includes positions + orders)
   // mmf = maintenance margin requirement (matches 01's "Maint. Margin")
 
-  // Total Value = omf (matches 01 Exchange's "Total Value")
-  const totalValue = margins?.omf ?? (usdcBalance + totalUnrealizedPnl);
+  // Total Value = USDC balance + unrealized PnL (matches 01 Exchange frontend).
+  // NOT margins.omf — that's discounted by token weight and slightly lower.
+  const totalValue = usdcBalance + totalUnrealizedPnl;
 
   // Used Margin: computed from open POSITIONS only (entry-based, not mark-based).
   // This matches 01 Exchange's per-position "Used Margin" = abs(size) * entryPrice * marketIMF.
@@ -496,7 +496,7 @@ export default function PortfolioPage() {
         <DepositWithdrawModal
           isOpen={collateralModalOpen}
           onClose={() => setCollateralModalOpen(false)}
-          onSuccess={fetchAccount}
+          onSuccess={() => { invalidateEquityCache(); fetchAccount(); }}
         />
 
         <HistoryModal
@@ -510,7 +510,7 @@ export default function PortfolioPage() {
             position={closeModalPos}
             doClose={doClosePosition}
             onClose={() => setCloseModalPos(null)}
-            onSuccess={fetchAccount}
+            onSuccess={() => { invalidateEquityCache(); fetchAccount(); }}
           />
         )}
 

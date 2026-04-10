@@ -46,6 +46,7 @@ export function EquityChart() {
   const [period, setPeriod] = useState<Period>("30d");
   const [points, setPoints] = useState<EquityPoint[]>([]);
   const [loading, setLoading] = useState(true);
+  const [initialLoadDone, setInitialLoadDone] = useState(false);
   const [hoverValue, setHoverValue] = useState<{ time: string; balance: string } | null>(null);
 
   // ─── Fetch data ─────────────────────────────────────────────
@@ -60,6 +61,7 @@ export function EquityChart() {
         if (Date.now() - ts < 5 * 60_000 && Array.isArray(data) && data.length > 0) {
           setPoints(data);
           setLoading(false);
+          setInitialLoadDone(true);
           return;
         }
       }
@@ -81,6 +83,7 @@ export function EquityChart() {
       setPoints([]);
     } finally {
       setLoading(false);
+      setInitialLoadDone(true);
     }
   }, [period]);
 
@@ -182,10 +185,9 @@ export function EquityChart() {
     chartRef.current.timeScale().fitContent();
   }, [points]);
 
-  // ─── Empty state ────────────────────────────────────────────
-  if (!loading && points.length === 0) {
-    return null; // Don't render chart if no data
-  }
+  // Don't render until first fetch completes and we have data
+  if (!initialLoadDone) return null;
+  if (points.length === 0) return null;
 
   return (
     <div className="rounded-2xl border border-border bg-card/50 backdrop-blur-sm p-4">
