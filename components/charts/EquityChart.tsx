@@ -189,12 +189,11 @@ export function EquityChart() {
     chartRef.current.timeScale().fitContent();
   }, [points]);
 
-  // Don't render until first fetch completes and we have data
-  if (!initialLoadDone) return null;
-  if (points.length === 0) return null;
+  // Always render DOM (chart needs containerRef), hide via CSS until data arrives
+  const visible = initialLoadDone && points.length > 0;
 
   return (
-    <div className="rounded-2xl border border-border bg-card/50 backdrop-blur-sm p-4">
+    <div className={`rounded-2xl border border-border bg-card/50 backdrop-blur-sm p-4 transition-opacity duration-300 ${visible ? "opacity-100" : "opacity-0 h-0 overflow-hidden p-0 border-0"}`}>
       {/* Header */}
       <div className="mb-3 flex items-center justify-between">
         <div>
