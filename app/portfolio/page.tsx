@@ -6,7 +6,7 @@ import { useAuth } from "@/lib/auth/context";
 import { DepositWithdrawModal } from "@/components/collateral/DepositWithdrawModal";
 import { ClosePositionModal } from "@/components/collateral/ClosePositionModal";
 import { HistoryModal } from "@/components/history/HistoryModal";
-import { EquityChart } from "@/components/charts/EquityChart";
+import { EquityChart, invalidateEquityCache } from "@/components/charts/EquityChart";
 import { useRealtimePrices } from "@/hooks/useRealtimePrices";
 import { usePageActive } from "@/hooks/usePageActive";
 import { useOrderActions } from "@/hooks/useOrderActions";
@@ -352,7 +352,7 @@ export default function PortfolioPage() {
         <DepositWithdrawModal
           isOpen={collateralModalOpen}
           onClose={() => setCollateralModalOpen(false)}
-          onSuccess={fetchAccount}
+          onSuccess={() => { invalidateEquityCache(); fetchAccount(); }}
         />
       </>
     );
@@ -496,7 +496,7 @@ export default function PortfolioPage() {
         <DepositWithdrawModal
           isOpen={collateralModalOpen}
           onClose={() => setCollateralModalOpen(false)}
-          onSuccess={fetchAccount}
+          onSuccess={() => { invalidateEquityCache(); fetchAccount(); }}
         />
 
         <HistoryModal
@@ -510,7 +510,7 @@ export default function PortfolioPage() {
             position={closeModalPos}
             doClose={doClosePosition}
             onClose={() => setCloseModalPos(null)}
-            onSuccess={fetchAccount}
+            onSuccess={() => { invalidateEquityCache(); fetchAccount(); }}
           />
         )}
 

@@ -29,6 +29,15 @@ const PERIODS: { key: Period; label: string }[] = [
 
 // ─── Component ──────────────────────────────────────────────────
 
+/** Clear equity cache — call after deposit/withdraw/close position */
+export function invalidateEquityCache() {
+  try {
+    for (const key of ["equity_1d", "equity_3d", "equity_7d"]) {
+      sessionStorage.removeItem(key);
+    }
+  } catch { /* ignore */ }
+}
+
 export function EquityChart() {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -41,12 +50,31 @@ export function EquityChart() {
 
   // ─── Fetch data ─────────────────────────────────────────────
   const fetchData = useCallback(async () => {
+    // Check sessionStorage cache first
+    const cacheKey = `equity_${period}`;
+    try {
+      const cached = sessionStorage.getItem(cacheKey);
+      if (cached) {
+        const { data, ts } = JSON.parse(cached);
+        if (Date.now() - ts < 5 * 60_000 && Array.isArray(data) && data.length > 0) {
+          setPoints(data);
+          setLoading(false);
+          setInitialLoadDone(true);
+          return;
+        }
+      }
+    } catch { /* ignore */ }
+
     setLoading(true);
     try {
       const res = await fetch(`/api/account/equity?period=${period}`);
       if (res.ok) {
         const result = await res.json();
-        setPoints(result.points ?? []);
+        const pts = result.points ?? [];
+        setPoints(pts);
+        try {
+          sessionStorage.setItem(cacheKey, JSON.stringify({ data: pts, ts: Date.now() }));
+        } catch { /* storage full */ }
       }
     } catch {
       setPoints([]);
