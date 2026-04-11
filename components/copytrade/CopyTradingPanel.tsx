@@ -159,7 +159,7 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
 
   const handleUnfollow = async (leaderAddr: string) => {
     try {
-      await fetch(`/api/copy/subscribe?leader=${leaderAddr}`, { method: "DELETE" });
+      await fetch(`/api/copy/subscribe?leader=${encodeURIComponent(leaderAddr)}`, { method: "DELETE" });
       await fetchStatus();
     } catch {
       // ignore

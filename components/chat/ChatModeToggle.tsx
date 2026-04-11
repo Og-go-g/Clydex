@@ -19,7 +19,7 @@ export function ChatModeToggle({ mode, onChange }: ChatModeToggleProps) {
             : "text-muted hover:text-foreground"
         }`}
       >
-        Trading
+        Trade
       </button>
       <button
         type="button"
@@ -30,7 +30,7 @@ export function ChatModeToggle({ mode, onChange }: ChatModeToggleProps) {
             : "text-muted hover:text-foreground"
         }`}
       >
-        Copy Trading
+        Analyze
       </button>
     </div>
   );
