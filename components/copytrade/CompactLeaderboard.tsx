@@ -39,7 +39,9 @@ function fmtVol(n: number): string {
 }
 
 function fmtAddr(addr: string): string {
-  if (!addr || addr.length < 10) return addr || "—";
+  if (!addr) return "—";
+  if (addr.startsWith("account:")) return "#" + addr.slice(8);
+  if (addr.length < 10) return addr;
   return addr.slice(0, 4) + "…" + addr.slice(-4);
 }
 

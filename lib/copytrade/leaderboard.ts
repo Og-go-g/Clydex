@@ -143,8 +143,7 @@ export async function getLeaderboard(
     LEFT JOIN win_loss wl ON wl."walletAddr" = pnl."walletAddr"
     LEFT JOIN liqs lq ON lq."walletAddr" = pnl."walletAddr"
     LEFT JOIN vol v ON v."walletAddr" = pnl."walletAddr"
-    WHERE pnl."walletAddr" NOT LIKE 'account:%'
-      AND COALESCE(tc.total_trades, 0) >= 5
+    WHERE COALESCE(tc.total_trades, 0) >= 5
     ORDER BY ${orderClause}
     LIMIT $1
   `;
