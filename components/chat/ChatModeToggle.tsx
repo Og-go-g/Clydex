@@ -31,7 +31,6 @@ export function ChatModeToggle({ mode, onChange }: ChatModeToggleProps) {
         }`}
       >
         Copy Trading
-        <span className="rounded bg-accent/20 px-0.5 text-[8px] font-semibold uppercase leading-tight text-accent">Soon</span>
       </button>
     </div>
   );

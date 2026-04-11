@@ -257,6 +257,64 @@ export async function getRecentCopyTrades(
 
 // ─── Stats ───────────────────────────────────────────────────────
 
+// ─── Engine Queries ──────────────────────────────────────────────
+
+/** Get unique leader addresses that have at least one active follower */
+export async function getActiveLeaders(): Promise<string[]> {
+  const rows = await query<{ leaderAddr: string }>(
+    `SELECT DISTINCT leader_addr AS "leaderAddr"
+     FROM copy_subscriptions
+     WHERE active = TRUE`,
+    [],
+  );
+  return rows.map((r) => r.leaderAddr);
+}
+
+/** Get all active followers for a specific leader */
+export async function getFollowersForLeader(leaderAddr: string): Promise<CopySubscription[]> {
+  return query<CopySubscription>(
+    `SELECT id, follower_addr AS "followerAddr", leader_addr AS "leaderAddr",
+            allocation_usdc AS "allocationUsdc", leverage_mult AS "leverageMult",
+            max_position_usdc AS "maxPositionUsdc", stop_loss_pct AS "stopLossPct",
+            active, created_at AS "createdAt", updated_at AS "updatedAt"
+     FROM copy_subscriptions
+     WHERE leader_addr = $1 AND active = TRUE`,
+    [leaderAddr],
+  );
+}
+
+/** Get recent copy trades since a timestamp (for toast notifications) */
+export async function getRecentCopyTradesSince(
+  followerAddr: string,
+  since: Date,
+): Promise<CopyTrade[]> {
+  return query<CopyTrade>(
+    `SELECT id, subscription_id AS "subscriptionId", follower_addr AS "followerAddr",
+            leader_addr AS "leaderAddr", market_id AS "marketId", symbol, side, size,
+            price, status, error, orig_trade_id AS "origTradeId", order_id AS "orderId",
+            created_at AS "createdAt", filled_at AS "filledAt"
+     FROM copy_trades
+     WHERE follower_addr = $1 AND created_at > $2
+     ORDER BY created_at DESC`,
+    [followerAddr, since],
+  );
+}
+
+/** Count consecutive failures for circuit breaker */
+export async function getConsecutiveFailures(subscriptionId: string): Promise<number> {
+  const rows = await query<{ cnt: string }>(
+    `SELECT COUNT(*)::text AS cnt FROM (
+       SELECT status FROM copy_trades
+       WHERE subscription_id = $1
+       ORDER BY created_at DESC LIMIT 5
+     ) recent WHERE status = 'failed'`,
+    [subscriptionId],
+  );
+  return parseInt(rows[0]?.cnt ?? "0");
+}
+
+// ─── Stats ───────────────────────────────────────────────────────
+
 export async function getCopyStats(followerAddr: string): Promise<{
   totalTrades: number;
   filledTrades: number;

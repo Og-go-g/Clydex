@@ -1,10 +1,11 @@
 "use client";
 
-import { useState, useEffect, useCallback, type MutableRefObject } from "react";
+import { useState, useEffect, useCallback, useRef, type MutableRefObject } from "react";
 import { useAuth } from "@/lib/auth/context";
 import { useWallet as useSolanaWallet } from "@solana/wallet-adapter-react";
 import { PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
+import { useToast } from "@/components/alerts/ToastProvider";
 
 interface CopySubscriptionUI {
   id: string;
@@ -40,22 +41,54 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
   const [loading, setLoading] = useState(false);
   const [activating, setActivating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { addToast } = useToast();
+  const prevTradeCountRef = useRef<number>(0);
 
   const fetchStatus = useCallback(async () => {
     if (!isAuthenticated) return;
     try {
       const res = await fetch("/api/copy/status");
       if (!res.ok) return;
-      const data = await res.json();
+      const data = await res.json() as CopyStatus;
+
+      // Detect new trades for toast notifications
+      const newTotal = data.stats.totalTrades;
+      const prevTotal = prevTradeCountRef.current;
+      if (prevTotal > 0 && newTotal > prevTotal) {
+        // Fetch recent trades to show in toasts
+        try {
+          const tradesRes = await fetch("/api/copy/subscribe");
+          if (tradesRes.ok) {
+            const diff = newTotal - prevTotal;
+            const filledDiff = data.stats.filledTrades - (status?.stats.filledTrades ?? 0);
+            const failedDiff = data.stats.failedTrades - (status?.stats.failedTrades ?? 0);
+            if (filledDiff > 0) {
+              addToast({ type: "success", title: "Copy Trade Executed", message: `${filledDiff} new trade(s) filled` });
+            }
+            if (failedDiff > 0) {
+              addToast({ type: "error", title: "Copy Trade Failed", message: `${failedDiff} trade(s) failed` });
+            }
+          }
+        } catch { /* silent */ }
+      }
+      prevTradeCountRef.current = newTotal;
+
       setStatus(data);
     } catch {
       // silently fail
     }
-  }, [isAuthenticated]);
+  }, [isAuthenticated, addToast, status?.stats.filledTrades, status?.stats.failedTrades]);
 
   useEffect(() => {
     fetchStatus();
   }, [fetchStatus]);
+
+  // Poll for updates every 30s when session is active
+  useEffect(() => {
+    if (!isAuthenticated || !status?.sessionActive) return;
+    const interval = setInterval(fetchStatus, 30_000);
+    return () => clearInterval(interval);
+  }, [isAuthenticated, status?.sessionActive, fetchStatus]);
 
   // Expose refresh function to parent via ref
   useEffect(() => {
