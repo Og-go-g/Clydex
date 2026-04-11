@@ -22,8 +22,10 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { leaderAddr, allocationUsdc, leverageMult, maxPositionUsdc, stopLossPct } = body;
 
-    if (!leaderAddr || typeof leaderAddr !== "string" || leaderAddr.length < 32 || leaderAddr.length > 44) {
-      return NextResponse.json({ error: "leaderAddr must be a valid Solana address" }, { status: 400 });
+    const isAccountId = typeof leaderAddr === "string" && leaderAddr.startsWith("account:");
+    const isSolanaAddr = typeof leaderAddr === "string" && leaderAddr.length >= 32 && leaderAddr.length <= 44;
+    if (!leaderAddr || (!isAccountId && !isSolanaAddr)) {
+      return NextResponse.json({ error: "leaderAddr must be a valid address" }, { status: 400 });
     }
     if (!allocationUsdc || typeof allocationUsdc !== "number" || allocationUsdc <= 0) {
       return NextResponse.json({ error: "allocationUsdc must be a positive number" }, { status: 400 });

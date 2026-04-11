@@ -75,8 +75,8 @@ const CHAT_MODES: Record<ChatMode, ModeConfig> = {
     prompts: [
       { label: "Top traders", example: "top traders this week" },
       { label: "Leaderboard", example: "show leaderboard" },
-      { label: "Analyze trader", example: "analyze best trader on SOL" },
-      { label: "Copy strategy", example: "copy top BTC trader" },
+      { label: "Analyze trader", example: "analyze best BTC trader" },
+      { label: "Copy strategy", example: "copy top trader on BTC" },
       { label: "My copies", example: "show my active copies" },
     ],
   },

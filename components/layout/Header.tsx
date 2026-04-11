@@ -63,7 +63,7 @@ export function Header() {
                 href={href}
                 className={`relative text-sm transition-colors hover:text-white ${
                   pathname === href || (href !== "/" && pathname.startsWith(href))
-                    ? "text-white after:absolute after:bottom-[-1.19rem] after:left-0 after:right-0 after:h-[2px] after:bg-gradient-to-r after:from-emerald-400 after:to-emerald-400/10"
+                    ? "text-white after:absolute after:bottom-[-0.25rem] after:left-0 after:right-0 after:h-[2px] after:bg-gradient-to-r after:from-emerald-400 after:to-emerald-400/10 after:animate-[tab-fill_0.3s_ease-out]"
                     : "text-gray-500"
                 }`}
               >
