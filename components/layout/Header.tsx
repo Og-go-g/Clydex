@@ -61,8 +61,10 @@ export function Header() {
               <Link
                 key={href}
                 href={href}
-                className={`text-sm transition-colors hover:text-white ${
-                  pathname === href ? "text-white" : "text-gray-500"
+                className={`relative text-sm transition-colors hover:text-white ${
+                  pathname === href || (href !== "/" && pathname.startsWith(href))
+                    ? "text-white after:absolute after:bottom-[-1.19rem] after:left-0 after:right-0 after:h-[2px] after:bg-gradient-to-r after:from-emerald-400 after:to-emerald-400/10"
+                    : "text-gray-500"
                 }`}
               >
                 {label}

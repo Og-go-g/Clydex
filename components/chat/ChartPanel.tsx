@@ -8,6 +8,7 @@ import { useCandleStream } from "@/hooks/useCandleStream";
 import { useAuth } from "@/lib/auth/context";
 import { INTERVAL_TO_N1, type Interval } from "@/lib/n1/candles";
 import type { PriceChartHandle, IndicatorId } from "@/components/charts/PriceChart";
+import { CompactLeaderboard } from "@/components/copytrade/CompactLeaderboard";
 
 const MIN_WIDTH = 320;
 const MAX_WIDTH = 1200;
@@ -478,8 +479,8 @@ export function ChartPanel() {
               </div>
             )}
 
-            {/* Chart area */}
-            <div className="flex-1 min-h-0">
+            {/* Chart area — capped to leave room for leaderboard */}
+            <div className="flex-1 min-h-0 max-h-[55%]">
               <Suspense fallback={<div className="flex h-full items-center justify-center"><div className="h-6 w-6 animate-spin rounded-full border-2 border-accent border-t-transparent" /></div>}>
                 <PriceChart
                   ref={chartHandleRef}
@@ -500,7 +501,7 @@ export function ChartPanel() {
               </Suspense>
             </div>
 
-            {/* Chart tools toolbar — height must complement spacer to equal input bar (79px) */}
+            {/* Chart tools toolbar */}
             <div className="flex items-center gap-1 border-t border-[#262626] px-3 py-2 relative">
               {/* Crosshair toggle */}
               <button
@@ -617,6 +618,9 @@ export function ChartPanel() {
                 </div>
               )}
             </div>
+
+            {/* Compact Leaderboard */}
+            <CompactLeaderboard />
           </div>
         </div>
         {/* Bottom spacer — matches input area height (border-t aligns with chat input border) */}
