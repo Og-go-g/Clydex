@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 
 // ─── Types ──────────────────────────────────────────────────────
 
-interface LeaderboardEntry {
+export interface LeaderboardEntry {
   walletAddr: string;
   totalPnl: number;
   tradingPnl: number;
@@ -48,7 +48,7 @@ function fmtAddr(addr: string): string {
 // ─── Component ──────────────────────────────────────────────────
 
 /** Leaderboard content without wrapper — used inside CopyTradeSection tabs */
-export function LeaderboardContent() {
+export function LeaderboardContent({ onCopyTrader }: { onCopyTrader?: (entry: LeaderboardEntry) => void }) {
   const [period, setPeriod] = useState<Period>("7d");
   const [data, setData] = useState<LeaderboardEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -139,6 +139,7 @@ export function LeaderboardContent() {
                     </td>
                     <td className="px-3 py-1.5 text-right">
                       <button
+                        onClick={(e) => { e.stopPropagation(); onCopyTrader?.(entry); }}
                         className="rounded bg-emerald-500/10 px-2 py-0.5 text-[9px] font-semibold text-emerald-400 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-emerald-500/20"
                       >
                         Copy

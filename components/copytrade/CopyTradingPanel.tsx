@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, type MutableRefObject } from "react";
 import { useAuth } from "@/lib/auth/context";
 import { useWallet as useSolanaWallet } from "@solana/wallet-adapter-react";
 import { PublicKey } from "@solana/web3.js";
@@ -33,7 +33,7 @@ function shortenAddr(addr: string): string {
 }
 
 /** Copy trading content without wrapper — used inside CopyTradeSection tabs */
-export function CopyTradingContent() {
+export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRefObject<(() => void) | null> }) {
   const { isAuthenticated } = useAuth();
   const { publicKey, signMessage, signTransaction } = useSolanaWallet();
   const [status, setStatus] = useState<CopyStatus | null>(null);
@@ -56,6 +56,13 @@ export function CopyTradingContent() {
   useEffect(() => {
     fetchStatus();
   }, [fetchStatus]);
+
+  // Expose refresh function to parent via ref
+  useEffect(() => {
+    if (onRefreshRef) {
+      onRefreshRef.current = fetchStatus;
+    }
+  }, [onRefreshRef, fetchStatus]);
 
   const handleActivate = async () => {
     if (!publicKey || !signMessage || !signTransaction) {

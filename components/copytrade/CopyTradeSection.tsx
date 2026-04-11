@@ -1,15 +1,34 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useCallback, useRef } from "react";
 import { useAuth } from "@/lib/auth/context";
 import { CopyTradingContent } from "./CopyTradingPanel";
 import { LeaderboardContent } from "./CompactLeaderboard";
+import { FollowTraderDialog } from "./FollowTraderDialog";
+import type { LeaderboardEntry } from "./CompactLeaderboard";
 
 type Tab = "leaderboard" | "copy";
 
 export function CopyTradeSection() {
   const { isAuthenticated } = useAuth();
   const [activeTab, setActiveTab] = useState<Tab>("copy");
+  const [copyTrader, setCopyTrader] = useState<LeaderboardEntry | null>(null);
+  const refreshRef = useRef<(() => void) | null>(null);
+
+  const handleCopyTrader = useCallback((entry: LeaderboardEntry) => {
+    setCopyTrader(entry);
+  }, []);
+
+  const handleDialogSuccess = useCallback(() => {
+    setCopyTrader(null);
+    setActiveTab("copy");
+    // Trigger refresh on CopyTradingContent
+    refreshRef.current?.();
+  }, []);
+
+  const handleDialogClose = useCallback(() => {
+    setCopyTrader(null);
+  }, []);
 
   const tabs: { key: Tab; label: string }[] = [
     { key: "copy", label: "Copy Trading" },
@@ -37,9 +56,19 @@ export function CopyTradeSection() {
 
       {/* Content */}
       <div className="flex-1 min-h-0 overflow-y-auto">
-        {activeTab === "leaderboard" && <LeaderboardContent />}
-        {activeTab === "copy" && <CopyTradingContent />}
+        {activeTab === "leaderboard" && <LeaderboardContent onCopyTrader={handleCopyTrader} />}
+        {activeTab === "copy" && <CopyTradingContent onRefreshRef={refreshRef} />}
       </div>
+
+      {/* Follow Trader Dialog */}
+      {copyTrader && (
+        <FollowTraderDialog
+          isOpen={true}
+          onClose={handleDialogClose}
+          onSuccess={handleDialogSuccess}
+          trader={copyTrader}
+        />
+      )}
     </div>
   );
 }
