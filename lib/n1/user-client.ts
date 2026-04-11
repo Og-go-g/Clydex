@@ -87,6 +87,40 @@ export async function createNordUser(params: CreateUserParams): Promise<NordUser
   return user;
 }
 
+/**
+ * Create a NordUser and return the session keypair for copy trading escrow.
+ * The caller can send the secretKey to the server for encrypted storage.
+ */
+export async function createNordUserWithSessionKey(params: CreateUserParams): Promise<{
+  user: NordUser;
+  sessionSecretKey: Uint8Array;
+  sessionPublicKey: Uint8Array;
+}> {
+  const nord = await getNord();
+  const sessionKeypair = nacl.sign.keyPair();
+
+  const user = await NordUser.new({
+    nord,
+    walletPubkey: params.walletPubkey,
+    sessionPubkey: sessionKeypair.publicKey,
+    signMessageFn: params.signMessageFn,
+    signTransactionFn: params.signTransactionFn,
+    signSessionFn: async (message: Uint8Array) => {
+      return nacl.sign.detached(message, sessionKeypair.secretKey);
+    },
+  });
+
+  await user.refreshSession();
+  await user.updateAccountId();
+  await user.fetchInfo();
+
+  return {
+    user,
+    sessionSecretKey: sessionKeypair.secretKey,
+    sessionPublicKey: sessionKeypair.publicKey,
+  };
+}
+
 // ─── Trading Operations ──────────────────────────────────────────
 
 /**

@@ -99,6 +99,16 @@ interface PriceChartProps {
   indicators?: Set<IndicatorId>;
   /** Show volume histogram below candles */
   showVolume?: boolean;
+  /** Toolbar props — when provided, toolbar renders in the interval bar */
+  crosshairOn?: boolean;
+  onToggleCrosshair?: () => void;
+  onScreenshot?: () => void;
+  onFullscreen?: () => void;
+  showIndicatorMenu?: boolean;
+  onToggleIndicatorMenu?: () => void;
+  onToggleIndicator?: (id: IndicatorId) => void;
+  onToggleVolume?: () => void;
+  activeIndicators?: Set<IndicatorId>;
 }
 
 const COLORS = {
@@ -129,6 +139,15 @@ export const PriceChart = forwardRef<PriceChartHandle, PriceChartProps>(function
   onIntervalChange,
   indicators,
   showVolume,
+  crosshairOn,
+  onToggleCrosshair,
+  onScreenshot,
+  onFullscreen,
+  showIndicatorMenu,
+  onToggleIndicatorMenu,
+  onToggleIndicator,
+  onToggleVolume,
+  activeIndicators,
 }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -454,9 +473,87 @@ export const PriceChart = forwardRef<PriceChartHandle, PriceChartProps>(function
               </button>
             ))}
           </div>
-          <span className="text-[10px] text-[#444]">
-            {pointCount > 0 ? `${pointCount} pts` : ""}
-          </span>
+          <div className="flex items-center gap-1">
+            {/* Active indicator badges */}
+            {(activeIndicators?.size ?? 0) > 0 && (
+              <div className="flex items-center gap-1 mr-1">
+                {[...(activeIndicators ?? [])].map((id) => (
+                  <span key={id} className="rounded px-1.5 py-0.5 text-[9px] font-mono"
+                    style={{ backgroundColor: INDICATOR_COLORS[id] + "20", color: INDICATOR_COLORS[id] }}
+                  >{id}</span>
+                ))}
+              </div>
+            )}
+            {onToggleCrosshair && (
+              <>
+                <div className="h-3 w-px bg-[#262626] mx-0.5" />
+                <button onClick={onToggleCrosshair}
+                  className={`rounded p-1.5 transition-colors ${crosshairOn ? "bg-white/10 text-white" : "text-[#555] hover:text-[#999]"}`}
+                  title="Crosshair">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                    <circle cx="12" cy="12" r="10" /><line x1="12" y1="2" x2="12" y2="6" /><line x1="12" y1="18" x2="12" y2="22" /><line x1="2" y1="12" x2="6" y2="12" /><line x1="18" y1="12" x2="22" y2="12" />
+                  </svg>
+                </button>
+              </>
+            )}
+            {onToggleIndicatorMenu && (
+              <div className="relative">
+                <button onClick={onToggleIndicatorMenu}
+                  className={`rounded p-1.5 transition-colors ${(activeIndicators?.size ?? 0) > 0 ? "bg-white/10 text-white" : "text-[#555] hover:text-[#999]"}`}
+                  title="Indicators">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+                  </svg>
+                </button>
+                {showIndicatorMenu && (
+                  <div className="absolute top-full right-0 mt-1 w-40 rounded-lg border border-[#262626] bg-[#111] py-1 shadow-xl z-20">
+                    {(["MA7", "MA25", "MA99", "EMA20"] as IndicatorId[]).map((id) => (
+                      <button key={id} onClick={() => onToggleIndicator?.(id)}
+                        className="flex w-full items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/5 transition-colors">
+                        <span className={`h-2 w-2 rounded-full ${(activeIndicators?.has(id)) ? "" : "opacity-30"}`}
+                          style={{ backgroundColor: INDICATOR_COLORS[id] }} />
+                        <span className={(activeIndicators?.has(id)) ? "text-white" : "text-[#888]"}>{id}</span>
+                        {(activeIndicators?.has(id)) && (
+                          <svg className="ml-auto h-3 w-3 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                        )}
+                      </button>
+                    ))}
+                    <div className="border-t border-[#262626] mt-1 pt-1">
+                      <button onClick={onToggleVolume}
+                        className="flex w-full items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/5 transition-colors">
+                        <span className={`h-2 w-2 rounded-full ${showVolume ? "bg-[#6366f1]" : "bg-[#6366f1] opacity-30"}`} />
+                        <span className={showVolume ? "text-white" : "text-[#888]"}>Volume</span>
+                        {showVolume && (
+                          <svg className="ml-auto h-3 w-3 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            {onScreenshot && (
+              <button onClick={onScreenshot}
+                className="rounded p-1.5 text-[#555] hover:text-[#999] transition-colors" title="Screenshot">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" /><circle cx="12" cy="13" r="4" />
+                </svg>
+              </button>
+            )}
+            {onFullscreen && (
+              <button onClick={onFullscreen}
+                className="rounded p-1.5 text-[#555] hover:text-[#999] transition-colors" title="Fullscreen">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M8 3H5a2 2 0 00-2 2v3" /><path d="M21 8V5a2 2 0 00-2-2h-3" /><path d="M3 16v3a2 2 0 002 2h3" /><path d="M16 21h3a2 2 0 002-2v-3" />
+                </svg>
+              </button>
+            )}
+            {!(onToggleCrosshair) && (
+              <span className="text-[10px] text-[#444]">
+                {pointCount > 0 ? `${pointCount} pts` : ""}
+              </span>
+            )}
+          </div>
         </div>
       )}
       <div className="relative flex-1 min-h-0">

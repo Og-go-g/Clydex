@@ -46,7 +46,8 @@ function getTierKey(pathname: string): TierKey {
     pathname.startsWith("/api/chat") ||
     pathname.startsWith("/api/collateral") ||
     pathname.includes("/candles") ||
-    pathname.includes("/orderbook")
+    pathname.includes("/orderbook") ||
+    pathname.startsWith("/api/copy")
   ) {
     return "expensive";
   }

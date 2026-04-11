@@ -8,7 +8,7 @@ import { useCandleStream } from "@/hooks/useCandleStream";
 import { useAuth } from "@/lib/auth/context";
 import { INTERVAL_TO_N1, type Interval } from "@/lib/n1/candles";
 import type { PriceChartHandle, IndicatorId } from "@/components/charts/PriceChart";
-import { CompactLeaderboard } from "@/components/copytrade/CompactLeaderboard";
+import { CopyTradeSection } from "@/components/copytrade/CopyTradeSection";
 
 const MIN_WIDTH = 320;
 const MAX_WIDTH = 1200;
@@ -355,10 +355,10 @@ export function ChartPanel() {
             />
 
             {/* Header */}
-            <div className="flex items-center gap-2 p-3">
+            <div className="flex items-center gap-2 px-3 py-1.5">
               <button
                 onClick={() => setShowSelector((v) => !v)}
-                className="flex flex-1 items-center gap-2 rounded-lg border border-[#262626] bg-[#1a1a1a] px-3 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#222]"
+                className="flex flex-1 items-center gap-2 rounded-lg border border-[#262626] bg-[#1a1a1a] px-3 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-[#222]"
               >
                 <span>{baseAsset}/USD</span>
                 {livePrice && (
@@ -436,51 +436,30 @@ export function ChartPanel() {
               </div>
             )}
 
-            {/* Market stats bar */}
+            {/* Market stats bar — compact single line */}
             {stats && (
-              <div className="border-b border-[#262626] px-3 py-1.5">
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
-                  <div>
-                    <span className="text-[#555]">24h Change </span>
-                    <span className={stats.change24hPct >= 0 ? "text-green-400" : "text-red-400"}>
-                      {stats.change24hPct >= 0 ? "+" : ""}{stats.change24hPct.toFixed(2)}%
-                      <span className="ml-1 text-[10px]">
-                        / {stats.change24hUsd >= 0 ? "+" : ""}{Math.abs(stats.change24hUsd) >= 100 ? `$${stats.change24hUsd.toFixed(0)}` : `$${stats.change24hUsd.toFixed(2)}`}
-                      </span>
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-[#555]">Open Interest </span>
-                    <span className="text-[#bbb] font-mono">{fmtCompact(stats.openInterest * (livePrice ?? stats.markPrice))}</span>
-                  </div>
-                  <div>
-                    <span className="text-[#555]">24h Volume </span>
-                    <span className="text-[#bbb] font-mono">{fmtCompact(stats.volume24h)}</span>
-                  </div>
-                  <div>
-                    <span className="text-[#555]">Funding </span>
-                    <span className={stats.fundingRate >= 0 ? "text-green-400" : "text-red-400"}>
-                      {(stats.fundingRate * 100).toFixed(4)}%
-                    </span>
-                    {fundingCountdown && (
-                      <span className="ml-1 text-[#555]">{fundingCountdown}</span>
-                    )}
-                  </div>
+              <div className="border-b border-[#262626] px-3 py-1 flex items-center gap-x-3 text-[10px] overflow-x-auto">
+                <span className={stats.change24hPct >= 0 ? "text-green-400" : "text-red-400"}>
+                  {stats.change24hPct >= 0 ? "+" : ""}{stats.change24hPct.toFixed(2)}%
+                  <span className="ml-0.5">/ {stats.change24hUsd >= 0 ? "+" : ""}${Math.abs(stats.change24hUsd) >= 100 ? stats.change24hUsd.toFixed(0) : stats.change24hUsd.toFixed(2)}</span>
+                </span>
+                <span className="text-[#555]">OI <span className="text-[#bbb] font-mono">{fmtCompact(stats.openInterest * (livePrice ?? stats.markPrice))}</span></span>
+                <span className="text-[#555]">Vol <span className="text-[#bbb] font-mono">{fmtCompact(stats.volume24h)}</span></span>
+                <span className={stats.fundingRate >= 0 ? "text-green-400" : "text-red-400"}>
+                  {(stats.fundingRate * 100).toFixed(4)}%
+                  {fundingCountdown && <span className="ml-0.5 text-[#555]">{fundingCountdown}</span>}
+                </span>
+                <span className="text-green-400 font-mono">{wsRatio.bidPct.toFixed(0)}%</span>
+                <div className="flex h-1 w-12 rounded-full overflow-hidden shrink-0">
+                  <div className="bg-green-500/70" style={{ width: `${wsRatio.bidPct}%` }} />
+                  <div className="bg-red-500/70" style={{ width: `${wsRatio.askPct}%` }} />
                 </div>
-                {/* Bid-Ask ratio bar */}
-                <div className="mt-1.5 flex items-center gap-2 text-[10px]">
-                  <span className="text-green-400 font-mono w-10 text-right">{wsRatio.bidPct.toFixed(1)}%</span>
-                  <div className="flex-1 flex h-1.5 rounded-full overflow-hidden">
-                    <div className="bg-green-500/70 transition-all duration-300" style={{ width: `${wsRatio.bidPct}%` }} />
-                    <div className="bg-red-500/70 transition-all duration-300" style={{ width: `${wsRatio.askPct}%` }} />
-                  </div>
-                  <span className="text-red-400 font-mono w-10">{wsRatio.askPct.toFixed(1)}%</span>
-                </div>
+                <span className="text-red-400 font-mono">{wsRatio.askPct.toFixed(0)}%</span>
               </div>
             )}
 
-            {/* Chart area — capped to leave room for leaderboard */}
-            <div className="flex-1 min-h-0 max-h-[55%]">
+            {/* Chart area — capped to leave room for copy trading section */}
+            <div className="flex-1 min-h-0 max-h-[65%]">
               <Suspense fallback={<div className="flex h-full items-center justify-center"><div className="h-6 w-6 animate-spin rounded-full border-2 border-accent border-t-transparent" /></div>}>
                 <PriceChart
                   ref={chartHandleRef}
@@ -497,130 +476,33 @@ export function ChartPanel() {
                   triggerOrders={positionOverlay?.triggerOrders}
                   indicators={activeIndicators}
                   showVolume={showVolume}
+                  crosshairOn={crosshairOn}
+                  onToggleCrosshair={() => { const on = chartHandleRef.current?.toggleCrosshair(); setCrosshairOn(on ?? true); }}
+                  onScreenshot={() => {
+                    const dataUrl = chartHandleRef.current?.screenshot();
+                    if (!dataUrl) return;
+                    const a = document.createElement("a");
+                    a.href = dataUrl;
+                    a.download = `${baseAsset}-${chartInterval}.png`;
+                    a.click();
+                  }}
+                  onFullscreen={() => {
+                    const el = innerRef.current;
+                    if (!el) return;
+                    if (document.fullscreenElement) document.exitFullscreen();
+                    else el.requestFullscreen().catch(() => {});
+                  }}
+                  showIndicatorMenu={showIndicatorMenu}
+                  onToggleIndicatorMenu={() => setShowIndicatorMenu((v) => !v)}
+                  onToggleIndicator={toggleIndicator}
+                  onToggleVolume={() => setShowVolume((v) => !v)}
+                  activeIndicators={activeIndicators}
                 />
               </Suspense>
             </div>
 
-            {/* Chart tools toolbar */}
-            <div className="flex items-center gap-1 border-t border-[#262626] px-3 py-2 relative">
-              {/* Crosshair toggle */}
-              <button
-                onClick={() => { const on = chartHandleRef.current?.toggleCrosshair(); setCrosshairOn(on ?? true); }}
-                className={`rounded p-1.5 transition-colors ${crosshairOn ? "bg-white/10 text-white" : "text-[#555] hover:text-[#999]"}`}
-                title="Crosshair"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                  <circle cx="12" cy="12" r="10" /><line x1="12" y1="2" x2="12" y2="6" /><line x1="12" y1="18" x2="12" y2="22" /><line x1="2" y1="12" x2="6" y2="12" /><line x1="18" y1="12" x2="22" y2="12" />
-                </svg>
-              </button>
-
-              {/* Indicators dropdown */}
-              <div className="relative">
-                <button
-                  onClick={() => setShowIndicatorMenu((v) => !v)}
-                  className={`rounded p-1.5 transition-colors ${activeIndicators.size > 0 ? "bg-white/10 text-white" : "text-[#555] hover:text-[#999]"}`}
-                  title="Indicators"
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-                  </svg>
-                </button>
-                {showIndicatorMenu && (
-                  <div className="absolute bottom-full left-0 mb-1 w-40 rounded-lg border border-[#262626] bg-[#111] py-1 shadow-xl z-20">
-                    {(["MA7", "MA25", "MA99", "EMA20"] as IndicatorId[]).map((id) => (
-                      <button
-                        key={id}
-                        onClick={() => toggleIndicator(id)}
-                        className="flex w-full items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/5 transition-colors"
-                      >
-                        <span className={`h-2 w-2 rounded-full ${activeIndicators.has(id) ? "" : "opacity-30"}`}
-                          style={{ backgroundColor: id === "MA7" ? "#f59e0b" : id === "MA25" ? "#6366f1" : id === "MA99" ? "#ec4899" : "#06b6d4" }}
-                        />
-                        <span className={activeIndicators.has(id) ? "text-white" : "text-[#888]"}>{id}</span>
-                        {activeIndicators.has(id) && (
-                          <svg className="ml-auto h-3 w-3 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
-                        )}
-                      </button>
-                    ))}
-                    <div className="border-t border-[#262626] mt-1 pt-1">
-                      <button
-                        onClick={() => setShowVolume((v) => !v)}
-                        className="flex w-full items-center gap-2 px-3 py-1.5 text-xs hover:bg-white/5 transition-colors"
-                      >
-                        <span className={`h-2 w-2 rounded-full ${showVolume ? "bg-[#6366f1]" : "bg-[#6366f1] opacity-30"}`} />
-                        <span className={showVolume ? "text-white" : "text-[#888]"}>Volume</span>
-                        {showVolume && (
-                          <svg className="ml-auto h-3 w-3 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
-                        )}
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div className="h-3 w-px bg-[#262626] mx-0.5" />
-
-              {/* Fit content / reset zoom */}
-              <button
-                onClick={() => chartHandleRef.current?.fitContent()}
-                className="rounded p-1.5 text-[#555] hover:text-[#999] transition-colors"
-                title="Fit to screen"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M15 3h6v6" /><path d="M9 21H3v-6" /><path d="M21 3l-7 7" /><path d="M3 21l7-7" />
-                </svg>
-              </button>
-
-              {/* Screenshot */}
-              <button
-                onClick={() => {
-                  const dataUrl = chartHandleRef.current?.screenshot();
-                  if (!dataUrl) return;
-                  const a = document.createElement("a");
-                  a.href = dataUrl;
-                  a.download = `${baseAsset}-${chartInterval}.png`;
-                  a.click();
-                }}
-                className="rounded p-1.5 text-[#555] hover:text-[#999] transition-colors"
-                title="Screenshot"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z" /><circle cx="12" cy="13" r="4" />
-                </svg>
-              </button>
-
-              {/* Fullscreen */}
-              <button
-                onClick={() => {
-                  const el = innerRef.current;
-                  if (!el) return;
-                  if (document.fullscreenElement) document.exitFullscreen();
-                  else el.requestFullscreen().catch(() => {});
-                }}
-                className="rounded p-1.5 text-[#555] hover:text-[#999] transition-colors"
-                title="Fullscreen"
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M8 3H5a2 2 0 00-2 2v3" /><path d="M21 8V5a2 2 0 00-2-2h-3" /><path d="M3 16v3a2 2 0 002 2h3" /><path d="M16 21h3a2 2 0 002-2v-3" />
-                </svg>
-              </button>
-
-              <div className="flex-1" />
-
-              {/* Active indicator badges */}
-              {activeIndicators.size > 0 && (
-                <div className="flex items-center gap-1">
-                  {[...activeIndicators].map((id) => (
-                    <span key={id} className="rounded px-1.5 py-0.5 text-[9px] font-mono"
-                      style={{ backgroundColor: (id === "MA7" ? "#f59e0b" : id === "MA25" ? "#6366f1" : id === "MA99" ? "#ec4899" : "#06b6d4") + "20", color: id === "MA7" ? "#f59e0b" : id === "MA25" ? "#6366f1" : id === "MA99" ? "#ec4899" : "#06b6d4" }}
-                    >{id}</span>
-                  ))}
-                </div>
-              )}
-            </div>
-
             {/* Compact Leaderboard */}
-            <CompactLeaderboard />
+            <CopyTradeSection />
           </div>
         </div>
         {/* Bottom spacer — matches input area height (border-t aligns with chat input border) */}
