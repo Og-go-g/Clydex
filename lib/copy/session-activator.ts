@@ -25,14 +25,21 @@ export async function activateSession(
     throw new Error("Invalid session key: expected 64 bytes");
   }
 
+  // Entropy check: reject all-zero or low-entropy keys
+  const uniqueBytes = new Set(secretKey);
+  if (uniqueBytes.size < 16) {
+    throw new Error("Session key has insufficient entropy");
+  }
+
   // Reconstruct keypair to verify and extract public key
   const keypair = nacl.sign.keyPair.fromSecretKey(secretKey);
   const sessionPubkey = bs58.encode(keypair.publicKey);
 
-  // Test the keypair: sign and verify a test message
-  const testMsg = new TextEncoder().encode("copy-trade-activation-test");
-  const sig = nacl.sign.detached(testMsg, keypair.secretKey);
-  if (!nacl.sign.detached.verify(testMsg, sig, keypair.publicKey)) {
+  // Test the keypair: sign and verify with random challenge
+  const { randomBytes } = await import("crypto");
+  const challenge = randomBytes(32);
+  const sig = nacl.sign.detached(challenge, keypair.secretKey);
+  if (!nacl.sign.detached.verify(challenge, sig, keypair.publicKey)) {
     throw new Error("Session key verification failed");
   }
 

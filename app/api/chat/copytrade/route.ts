@@ -371,7 +371,7 @@ export async function POST(req: Request) {
           try {
             let accountId: number;
             if (address.startsWith("account:")) {
-              accountId = parseInt(address.slice(8));
+              accountId = parseInt(address.slice(8), 10);
             } else {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               const user = await getUser(address) as any;

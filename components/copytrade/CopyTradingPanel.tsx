@@ -38,17 +38,17 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
   const { isAuthenticated } = useAuth();
   const { publicKey, signMessage, signTransaction } = useSolanaWallet();
   const [status, setStatus] = useState<CopyStatus | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [activating, setActivating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { addToast } = useToast();
   const prevTradeCountRef = useRef<number>(0);
 
   const fetchStatus = useCallback(async () => {
-    if (!isAuthenticated) return;
+    if (!isAuthenticated) { setLoading(false); return; }
     try {
       const res = await fetch("/api/copy/status");
-      if (!res.ok) return;
+      if (!res.ok) { setLoading(false); return; }
       const data = await res.json() as CopyStatus;
 
       // Detect new trades for toast notifications
@@ -56,26 +56,22 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
       const prevTotal = prevTradeCountRef.current;
       if (prevTotal > 0 && newTotal > prevTotal) {
         // Fetch recent trades to show in toasts
-        try {
-          const tradesRes = await fetch("/api/copy/subscribe");
-          if (tradesRes.ok) {
-            const diff = newTotal - prevTotal;
-            const filledDiff = data.stats.filledTrades - (status?.stats.filledTrades ?? 0);
-            const failedDiff = data.stats.failedTrades - (status?.stats.failedTrades ?? 0);
-            if (filledDiff > 0) {
-              addToast({ type: "success", title: "Copy Trade Executed", message: `${filledDiff} new trade(s) filled` });
-            }
-            if (failedDiff > 0) {
-              addToast({ type: "error", title: "Copy Trade Failed", message: `${failedDiff} trade(s) failed` });
-            }
-          }
-        } catch { /* silent */ }
+        const filledDiff = data.stats.filledTrades - (status?.stats.filledTrades ?? 0);
+        const failedDiff = data.stats.failedTrades - (status?.stats.failedTrades ?? 0);
+        if (filledDiff > 0) {
+          addToast({ type: "success", title: "Copy Trade Executed", message: `${filledDiff} new trade(s) filled` });
+        }
+        if (failedDiff > 0) {
+          addToast({ type: "error", title: "Copy Trade Failed", message: `${failedDiff} trade(s) failed` });
+        }
       }
       prevTradeCountRef.current = newTotal;
 
       setStatus(data);
     } catch {
       // silently fail
+    } finally {
+      setLoading(false);
     }
   }, [isAuthenticated, addToast, status?.stats.filledTrades, status?.stats.failedTrades]);
 
@@ -179,8 +175,15 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
         </div>
       )}
 
+      {/* Loading */}
+      {isAuthenticated && loading && (
+        <div className="flex h-16 items-center justify-center">
+          <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
+        </div>
+      )}
+
       {/* Not activated */}
-      {isAuthenticated && !status?.sessionActive && (
+      {isAuthenticated && !loading && !status?.sessionActive && (
         <div className="rounded-lg border border-[#262626] bg-[#0a0a0a] p-3 space-y-2">
           <p className="text-[11px] text-[#888] leading-relaxed">
             Enable copy trading to automatically mirror trades from top performers.
@@ -200,7 +203,7 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
       )}
 
       {/* Activated, show subscriptions */}
-      {isAuthenticated && status?.sessionActive && (
+      {isAuthenticated && !loading && status?.sessionActive && (
         <>
           {/* Session info */}
           <div className="flex items-center justify-between text-[10px] text-[#666]">

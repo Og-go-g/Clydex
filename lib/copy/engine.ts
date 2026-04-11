@@ -42,6 +42,9 @@ interface EngineResult {
 const MAX_CONSECUTIVE_FAILURES = 3;
 const DEFAULT_SLIPPAGE = 0.005; // 0.5% slippage tolerance for copy trades
 const MIN_ORDER_SIZE_USD = 1; // skip orders smaller than $1
+const MAX_ALLOCATION_USD = 10_000_000; // $10M hard cap
+const MAX_ORDER_SIZE_BASE = 100_000; // hard cap on base asset units
+const MAX_ERRORS = 100; // cap error array size
 
 // ─── Account ID Cache (leader addr → accountId) ─────────────────
 
@@ -55,7 +58,7 @@ async function resolveAccountId(addr: string): Promise<number | null> {
   try {
     // account:N format → extract N directly
     if (addr.startsWith("account:")) {
-      const id = parseInt(addr.slice(8));
+      const id = parseInt(addr.slice(8), 10);
       if (!isNaN(id)) {
         accountIdCache.set(addr, { id, ts: Date.now() });
         return id;
@@ -169,15 +172,27 @@ async function executeCopyForFollower(
     return { success: false, error: `Paused: ${failures} consecutive failures` };
   }
 
-  // Calculate proportional size
+  // Calculate proportional size — validate all numeric inputs
   const allocation = parseFloat(follower.allocationUsdc);
   const leverageMult = parseFloat(follower.leverageMult);
-  if (leaderEquity <= 0 || allocation <= 0) {
-    return { success: false, error: "Invalid equity or allocation" };
+  if (!isFinite(allocation) || allocation <= 0 || allocation > MAX_ALLOCATION_USD) {
+    return { success: false, error: "Invalid allocation" };
+  }
+  if (!isFinite(leverageMult) || leverageMult < 1 || leverageMult > 5) {
+    return { success: false, error: "Invalid leverage multiplier" };
+  }
+  if (!isFinite(leaderEquity) || leaderEquity <= 0) {
+    return { success: false, error: "Leader has zero or invalid equity" };
   }
 
   const ratio = allocation / leaderEquity;
   let followerDelta = diff.delta * ratio * leverageMult;
+
+  // Hard cap on order size to prevent overflow/runaway orders
+  if (!isFinite(followerDelta) || followerDelta < 0) {
+    return { success: false, error: "Invalid calculated size" };
+  }
+  followerDelta = Math.min(followerDelta, MAX_ORDER_SIZE_BASE);
 
   // Get mark price for USD value check
   let markPrice = 0;
@@ -188,20 +203,20 @@ async function executeCopyForFollower(
     return { success: false, error: "Failed to get market price" };
   }
 
-  if (markPrice <= 0) {
+  if (!isFinite(markPrice) || markPrice <= 0) {
     return { success: false, error: "Invalid mark price" };
   }
 
   // Cap at maxPositionUsdc
   const maxPos = follower.maxPositionUsdc ? parseFloat(follower.maxPositionUsdc) : null;
-  if (maxPos && maxPos > 0) {
+  if (maxPos && isFinite(maxPos) && maxPos > 0) {
     const maxSize = maxPos / markPrice;
     followerDelta = Math.min(followerDelta, maxSize);
   }
 
   // Skip tiny orders
   const orderValueUsd = followerDelta * markPrice;
-  if (orderValueUsd < MIN_ORDER_SIZE_USD) {
+  if (!isFinite(orderValueUsd) || orderValueUsd < MIN_ORDER_SIZE_USD) {
     return { success: false, error: `Order too small: $${orderValueUsd.toFixed(2)}` };
   }
 
@@ -295,17 +310,27 @@ export async function runCopyEngine(): Promise<EngineResult> {
         // Resolve account ID
         const accountId = await resolveAccountId(leaderAddr);
         if (accountId === null) {
-          result.errors.push(`${leaderAddr}: cannot resolve accountId`);
+          addError(result, `${leaderAddr}: cannot resolve accountId`);
           continue;
         }
 
-        // Get current positions
+        // Get current positions — validate response structure
         const account = await getAccount(accountId);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const positions = (account as any)?.positions ?? [];
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const margins = (account as any)?.margins ?? {};
-        const leaderEquity = margins.omf ?? 0;
+        const rawAccount = account as any;
+        if (!rawAccount || typeof rawAccount !== "object") {
+          addError(result, `${leaderAddr}: invalid account response`);
+          continue;
+        }
+        const positions = Array.isArray(rawAccount.positions) ? rawAccount.positions : [];
+        const margins = rawAccount.margins && typeof rawAccount.margins === "object" ? rawAccount.margins : {};
+        const leaderEquity = typeof margins.omf === "number" && isFinite(margins.omf) ? margins.omf : 0;
+
+        if (leaderEquity <= 0) {
+          // Leader has no equity — skip (don't copy from empty accounts)
+          result.leadersProcessed++;
+          continue;
+        }
 
         // Load snapshots
         const snapshots = await getSnapshots(leaderAddr);
@@ -313,6 +338,19 @@ export async function runCopyEngine(): Promise<EngineResult> {
         // Compute diffs
         const diffs = computePositionDiffs(snapshots, positions, marketSymbols);
         result.leadersProcessed++;
+
+        // Always update snapshots (atomic: delete then insert, idempotent via UNIQUE constraint)
+        await deleteSnapshots(leaderAddr);
+        for (const p of positions) {
+          const baseSize = p.perp?.baseSize ?? 0;
+          if (baseSize === 0) continue;
+          await upsertSnapshot(
+            leaderAddr,
+            p.marketId,
+            Math.abs(baseSize).toString(),
+            baseSize > 0 ? "Long" : "Short",
+          );
+        }
 
         if (diffs.length === 0) continue;
         result.diffsDetected += diffs.length;
@@ -329,37 +367,29 @@ export async function runCopyEngine(): Promise<EngineResult> {
             } else {
               result.ordersFailed++;
               if (res.error) {
-                result.errors.push(`${follower.followerAddr}→${diff.symbol}: ${res.error}`);
+                addError(result, `${follower.followerAddr}→${diff.symbol}: ${res.error}`);
               }
             }
           }
         }
-
-        // Update snapshots with current positions
-        // First clear old snapshots for this leader
-        await deleteSnapshots(leaderAddr);
-
-        // Write new snapshots
-        for (const p of positions) {
-          const baseSize = p.perp?.baseSize ?? 0;
-          if (baseSize === 0) continue;
-          await upsertSnapshot(
-            leaderAddr,
-            p.marketId,
-            Math.abs(baseSize).toString(),
-            baseSize > 0 ? "Long" : "Short",
-          );
-        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Unknown error";
-        result.errors.push(`${leaderAddr}: ${msg}`);
+        addError(result, `${leaderAddr}: ${msg}`);
       }
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Engine failed";
-    result.errors.push(msg);
+    addError(result, msg);
   }
 
   result.durationMs = Date.now() - start;
   return result;
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────
+
+function addError(result: EngineResult, msg: string): void {
+  if (result.errors.length < MAX_ERRORS) {
+    result.errors.push(msg);
+  }
 }

@@ -27,8 +27,11 @@ export async function POST(req: NextRequest) {
     if (!leaderAddr || (!isAccountId && !isSolanaAddr)) {
       return NextResponse.json({ error: "leaderAddr must be a valid address" }, { status: 400 });
     }
-    if (!allocationUsdc || typeof allocationUsdc !== "number" || allocationUsdc <= 0) {
-      return NextResponse.json({ error: "allocationUsdc must be a positive number" }, { status: 400 });
+    if (!allocationUsdc || typeof allocationUsdc !== "number" || allocationUsdc < 10 || allocationUsdc > 10_000_000) {
+      return NextResponse.json({ error: "allocationUsdc must be between $10 and $10,000,000" }, { status: 400 });
+    }
+    if (leverageMult !== undefined && (typeof leverageMult !== "number" || leverageMult < 1 || leverageMult > 5)) {
+      return NextResponse.json({ error: "leverageMult must be between 1 and 5" }, { status: 400 });
     }
     if (leaderAddr === addr) {
       return NextResponse.json({ error: "Cannot follow yourself" }, { status: 400 });
