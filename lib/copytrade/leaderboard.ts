@@ -43,6 +43,20 @@ export interface MarketStat {
 type SortField = "pnl" | "winrate" | "volume" | "trades";
 type Period = "7d" | "30d" | "all";
 
+// ─── In-memory cache (avoids heavy query on every request) ─────
+
+interface CacheEntry {
+  data: LeaderboardEntry[];
+  ts: number;
+}
+
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const cache = new Map<string, CacheEntry>();
+
+function getCacheKey(period: Period, sort: SortField, limit: number): string {
+  return `${period}:${sort}:${limit}`;
+}
+
 // ─── Period filter ──────────────────────────────────────────────
 
 const VALID_ALIASES = new Set(["pnl_history", "trade_history"]);
@@ -66,6 +80,13 @@ export async function getLeaderboard(
 ): Promise<LeaderboardEntry[]> {
   // Clamp limit
   const safeLimit = Math.min(Math.max(1, limit), 100);
+
+  // Check in-memory cache
+  const key = getCacheKey(period, sort, safeLimit);
+  const cached = cache.get(key);
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+    return cached.data;
+  }
 
   // For "all" period, use pre-aggregated pnl_totals (fast).
   // For time-filtered periods, aggregate from pnl_history directly.
@@ -162,7 +183,7 @@ export async function getLeaderboard(
     total_volume: string;
   }>(sql, [safeLimit]);
 
-  return rows.map((r) => ({
+  const result = rows.map((r) => ({
     walletAddr: r.wallet_addr,
     totalPnl: parseFloat(r.total_pnl) || 0,
     tradingPnl: parseFloat(r.trading_pnl) || 0,
@@ -175,6 +196,11 @@ export async function getLeaderboard(
     liquidations: r.liquidations,
     totalVolume: parseFloat(r.total_volume) || 0,
   }));
+
+  // Store in cache
+  cache.set(key, { data: result, ts: Date.now() });
+
+  return result;
 }
 
 // ─── Trader Profile ─────────────────────────────────────────────

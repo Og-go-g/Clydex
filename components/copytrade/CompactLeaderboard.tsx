@@ -68,7 +68,7 @@ export function LeaderboardContent() {
   useEffect(() => { fetchData(); }, [fetchData]);
 
   return (
-    <div>
+    <div className="flex flex-col h-full">
       {/* Period filter */}
       <div className="flex items-center justify-between px-3 py-1.5">
         <span className="text-[10px] text-muted">
@@ -92,7 +92,7 @@ export function LeaderboardContent() {
       </div>
 
       {/* Table */}
-      <div className="overflow-y-auto max-h-[180px]">
+      <div className="overflow-y-auto flex-1">
         {loading ? (
           <div className="flex h-16 items-center justify-center">
             <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
