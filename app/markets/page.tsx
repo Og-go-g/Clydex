@@ -125,32 +125,30 @@ export default function MarketsPage() {
 
         {/* Filters */}
         <div className="mb-4 flex flex-wrap items-center gap-3">
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-muted">Tier:</span>
+          <div className="flex items-center gap-0.5">
             {[null, 1, 2, 3, 4, 5].map((tier) => (
               <button
                 key={tier ?? "all"}
                 onClick={() => setTierFilter(tier)}
-                className={`rounded-lg px-3 py-1 text-xs transition-colors ${
+                className={`relative whitespace-nowrap px-3 py-2 text-xs font-semibold transition-colors -mb-px ${
                   tierFilter === tier
-                    ? "border border-accent/30 bg-accent/15 text-accent"
-                    : "bg-card text-muted hover:text-foreground"
+                    ? "text-foreground after:absolute after:bottom-0 after:left-0 after:right-0 after:h-[2px] after:bg-gradient-to-r after:from-emerald-400 after:to-emerald-400/10 after:animate-[tab-fill_0.3s_ease-out]"
+                    : "text-muted hover:text-foreground"
                 }`}
               >
                 {tier === null ? "All" : `Tier ${tier}`}
               </button>
             ))}
           </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-muted">Sort:</span>
+          <div className="flex items-center gap-0.5">
             {(["volume", "change", "symbol"] as const).map((s) => (
               <button
                 key={s}
                 onClick={() => setSortBy(s)}
-                className={`rounded-lg px-3 py-1 text-xs transition-colors ${
+                className={`relative whitespace-nowrap px-3 py-2 text-xs font-semibold transition-colors -mb-px ${
                   sortBy === s
-                    ? "border border-accent/30 bg-accent/15 text-accent"
-                    : "bg-card text-muted hover:text-foreground"
+                    ? "text-foreground after:absolute after:bottom-0 after:left-0 after:right-0 after:h-[2px] after:bg-gradient-to-r after:from-emerald-400 after:to-emerald-400/10 after:animate-[tab-fill_0.3s_ease-out]"
+                    : "text-muted hover:text-foreground"
                 }`}
               >
                 {s === "volume" ? "Volume" : s === "change" ? "Change" : "Name"}

@@ -5,15 +5,16 @@ import { getAccount } from "@/lib/n1/client";
 import { N1_MAINNET_URL } from "@/lib/n1/constants";
 
 /**
- * GET /api/account/equity — equity curve (balance over time).
+ * GET /api/account/equity — equity curve over time.
  *
- * Fetches deposit + withdrawal + PnL history directly from 01 API,
- * reconstructs balance timeline, adds current live balance as last point.
- *
- * No DB dependency — works for any connected user immediately.
+ * Data sources:
+ *   - Deposit/withdrawal history: absolute `balance` snapshots (anchors)
+ *   - PnL history: `tradingPnl` only (realized trade PnL).
+ *     `settledFundingPnl` is excluded — it creates noise from background settlements.
+ *   - Current equity: USDC balance + unrealized PnL from open positions (last point).
  *
  * Query params:
- *   period: "7d" | "30d" | "90d" | "all" (default: "30d")
+ *   period: "1d" | "3d" | "7d" (default: "7d")
  */
 
 const API = N1_MAINNET_URL;
@@ -80,16 +81,29 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ points: [] });
     }
 
-    // Get current live balance
+    // Get current live equity = USDC balance + unrealized PnL
+    let currentEquity = 0;
     let currentBalance = 0;
     try {
       const account = await getAccount(accountId);
       currentBalance = account?.balances?.[0]?.amount ?? 0;
+      // Sum unrealized PnL from open positions
+      let unrealizedPnl = 0;
+      const positions = account?.positions ?? [];
+      for (const pos of positions) {
+        if (pos.perp && pos.perp.baseSize !== 0) {
+          unrealizedPnl += (pos.perp.sizePricePnl ?? 0) + (pos.perp.fundingPaymentPnl ?? 0);
+        }
+      }
+      currentEquity = currentBalance + unrealizedPnl;
     } catch { /* use 0 */ }
 
     const since = new Date(Date.now() - periodToMs(period)).toISOString();
 
-    // Fetch deposit, withdrawal, PnL history from 01 API in parallel
+    // Fetch deposit, withdrawal, and PnL history in parallel.
+    // Deposits/withdrawals have absolute `balance` field (anchors).
+    // PnL: only `tradingPnl` is used (realized trade PnL).
+    // `settledFundingPnl` is skipped — background settlements create noise.
     interface DepositRaw { time: string; amount: number; balance: number }
     interface WithdrawalRaw { time: string; amount: number; balance: number; fee: number }
     interface PnlRaw { time: string; tradingPnl: number; settledFundingPnl: number }
@@ -115,8 +129,9 @@ export async function GET(req: NextRequest) {
         balance: w.balance,
       });
     }
+    // Only tradingPnl — skip settledFundingPnl (creates noise)
     for (const p of pnlHistory) {
-      const delta = (p.tradingPnl ?? 0) + (p.settledFundingPnl ?? 0);
+      const delta = p.tradingPnl ?? 0;
       if (Math.abs(delta) > 0.001) {
         events.push({
           time: Math.floor(new Date(p.time).getTime() / 1000),
@@ -125,72 +140,77 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // Sort chronologically
     events.sort((a, b) => a.time - b.time);
+
+    const now = Math.floor(Date.now() / 1000);
+    const periodSec = periodToMs(period) / 1000;
+    const startTime = now - periodSec;
+    const step = getStepForPeriod(period);
+
+    // Separate event types
+    const hasAnchors = events.some(e => e.balance !== undefined);
+    const hasPnl = events.some(e => e.pnlDelta !== undefined);
 
     // Build equity curve
     const points: EquityPoint[] = [];
 
-    if (events.length === 0) {
-      // No history — show flat line at current balance
-      if (currentBalance > 0) {
-        const now = Math.floor(Date.now() / 1000);
-        const periodSec = periodToMs(period) / 1000 || 30 * 86400;
-        points.push({ time: now - periodSec, balance: round(currentBalance) });
-        points.push({ time: now, balance: round(currentBalance) });
+    if (!hasAnchors && !hasPnl) {
+      // No events — flat line at current equity
+      for (let t = startTime; t < now; t += step) {
+        points.push({ time: t, balance: round(currentEquity) });
       }
+      points.push({ time: now, balance: round(currentEquity) });
     } else {
-      // Reconstruct balance backwards from current known balance.
-      // Sum all deltas (PnL + deposit/withdrawal changes) to find start balance.
-      // For deposits/withdrawals: delta = change in balance at that event.
-      // For PnL: delta = tradingPnl + fundingPnl.
-
-      // First pass: compute total change from all events
-      let totalChange = 0;
-      let lastKnownBalance: number | null = null;
+      // Reconstruct balance backwards from current balance.
+      // Total trading PnL delta = sum of all tradingPnl events in period.
+      let totalTradingPnl = 0;
       for (const ev of events) {
-        if (ev.balance !== undefined) {
-          if (lastKnownBalance !== null) {
-            totalChange += ev.balance - lastKnownBalance;
-          }
-          lastKnownBalance = ev.balance;
-        } else if (ev.pnlDelta !== undefined) {
-          totalChange += ev.pnlDelta;
-        }
+        if (ev.pnlDelta !== undefined) totalTradingPnl += ev.pnlDelta;
       }
 
-      // Start balance = current balance minus all changes since first event
-      // If we have deposit/withdrawal anchors, use the first one
-      // Otherwise work backwards from current balance using PnL deltas
-      let bal: number;
-      const firstBalanceEvent = events.find(e => e.balance !== undefined);
-      if (firstBalanceEvent) {
-        // We have a deposit/withdrawal anchor — start from there
-        bal = 0; // will be set by first balance event
-      } else {
-        // Only PnL events — work backwards from current balance
-        let totalPnlDelta = 0;
+      // Starting balance = current balance - total realized PnL in period
+      // (deposits/withdrawals are handled via absolute anchors)
+      let startBalance = currentBalance - totalTradingPnl;
+
+      // If we have deposit/withdrawal anchors, use the earliest one as the start reference
+      if (hasAnchors) {
+        const firstAnchor = events.find(e => e.balance !== undefined)!;
+        startBalance = firstAnchor.balance!;
+        // Subtract any PnL that happened before this anchor
         for (const ev of events) {
-          if (ev.pnlDelta !== undefined) totalPnlDelta += ev.pnlDelta;
+          if (ev.time >= firstAnchor.time) break;
+          if (ev.pnlDelta !== undefined) startBalance -= ev.pnlDelta;
         }
-        bal = currentBalance - totalPnlDelta;
       }
 
-      // Second pass: build points forward
-      for (const ev of events) {
-        if (ev.balance !== undefined) {
-          bal = ev.balance;
-        } else if (ev.pnlDelta !== undefined) {
-          bal += ev.pnlDelta;
+      // Fill from period start with the starting balance
+      let bal = startBalance;
+      let nextEventIdx = 0;
+
+      for (let t = startTime; t <= now; t += step) {
+        // Apply all events up to this timestamp
+        while (nextEventIdx < events.length && events[nextEventIdx].time <= t) {
+          const ev = events[nextEventIdx];
+          if (ev.balance !== undefined) {
+            bal = ev.balance;
+          } else if (ev.pnlDelta !== undefined) {
+            bal += ev.pnlDelta;
+          }
+          nextEventIdx++;
         }
-        points.push({ time: ev.time, balance: round(bal) });
+        points.push({ time: t, balance: round(bal) });
       }
 
-      // Add current balance as last point
-      const now = Math.floor(Date.now() / 1000);
-      if (points[points.length - 1].time < now - 30) {
-        points.push({ time: now, balance: round(currentBalance) });
+      // Apply remaining events after last step
+      while (nextEventIdx < events.length) {
+        const ev = events[nextEventIdx];
+        if (ev.balance !== undefined) bal = ev.balance;
+        else if (ev.pnlDelta !== undefined) bal += ev.pnlDelta;
+        nextEventIdx++;
       }
+
+      // Final point = current equity (balance + unrealized PnL)
+      points.push({ time: now, balance: round(currentEquity) });
     }
 
     // Deduplicate same-second (keep last)
@@ -209,6 +229,13 @@ export async function GET(req: NextRequest) {
     console.error("[api/account/equity] error:", error);
     return NextResponse.json({ error: "Failed to fetch equity data" }, { status: 500 });
   }
+}
+
+/** Interval between intermediate points for each period */
+function getStepForPeriod(period: Period): number {
+  if (period === "1d") return 3600;     // 1 hour
+  if (period === "3d") return 6 * 3600; // 6 hours
+  return 12 * 3600;                     // 12 hours for 7d
 }
 
 function round(n: number): number {

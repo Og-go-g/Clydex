@@ -237,15 +237,6 @@ export const PriceChart = forwardRef<PriceChartHandle, PriceChartProps>(function
     chartRef.current = chart;
     seriesRef.current = series;
 
-    // Hide TradingView logo
-    const logoEl = container.querySelector('a[href*="tradingview"]');
-    if (logoEl) (logoEl as HTMLElement).style.display = "none";
-    let mo: MutationObserver | null = new MutationObserver(() => {
-      const el = container.querySelector('a[href*="tradingview"]');
-      if (el) (el as HTMLElement).style.display = "none";
-    });
-    mo.observe(container, { childList: true, subtree: true });
-
     let ro: ResizeObserver | null = new ResizeObserver((entries) => {
       const entry = entries[0];
       if (entry) {
@@ -255,7 +246,6 @@ export const PriceChart = forwardRef<PriceChartHandle, PriceChartProps>(function
     ro.observe(container);
 
     return () => {
-      mo?.disconnect(); mo = null;
       ro?.disconnect(); ro = null;
       cancelAnimationFrame(fitRafRef.current);
       indicatorSeriesRef.current.clear();
@@ -448,9 +438,9 @@ export const PriceChart = forwardRef<PriceChartHandle, PriceChartProps>(function
   }, [entryPrice, liqPrice, triggerOrders]);
 
   return (
-    <div className={compact ? "bg-[#0a0a0a] overflow-hidden" : "flex flex-col h-full rounded-xl border border-[#262626] bg-[#0a0a0a] overflow-hidden"}>
+    <div className={compact ? "bg-transparent overflow-hidden" : "flex flex-col h-full rounded-2xl border border-border bg-card/50 backdrop-blur-sm overflow-hidden"}>
       {!compact && (
-        <div className="flex items-center justify-between border-b border-[#1a1a1a] px-4 py-2">
+        <div className="flex items-center justify-between border-b border-border px-4 py-2">
           <div className="flex items-center gap-1">
             {INTERVALS.map((i) => (
               <button

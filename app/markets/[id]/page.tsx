@@ -395,7 +395,7 @@ export default function MarketDetailPage({
 
         {/* Candlestick Chart */}
         <div className="mb-6">
-          <Suspense fallback={<div className="h-[340px] rounded-xl border border-[#262626] bg-[#0a0a0a] animate-pulse" />}>
+          <Suspense fallback={<div className="h-[340px] rounded-xl border border-border bg-card/50 backdrop-blur-sm animate-pulse" />}>
             <PriceChart
               marketId={market.id}
               baseAsset={market.baseAsset}
@@ -428,7 +428,7 @@ export default function MarketDetailPage({
             },
             { label: "Max Leverage", value: `${market.maxLeverage}x` },
           ].map(({ label, value, color }) => (
-            <div key={label} className="rounded-xl border border-border bg-card p-3">
+            <div key={label} className="rounded-xl border border-border bg-card/50 backdrop-blur-sm p-3">
               <div className="text-[11px] text-muted">{label}</div>
               <div className={`mt-0.5 text-sm font-semibold font-mono ${color ?? "text-foreground"}`}>
                 {value}
@@ -439,7 +439,7 @@ export default function MarketDetailPage({
 
         {/* Funding Countdown */}
         {perp?.next_funding_time && (
-          <div className="mb-6 rounded-xl border border-border bg-card p-4 flex items-center justify-between">
+          <div className="mb-6 rounded-xl border border-border bg-card/50 backdrop-blur-sm p-4 flex items-center justify-between">
             <div>
               <span className="text-xs text-muted">Next Funding</span>
               <div className="text-sm font-mono text-foreground">{countdown || "—"}</div>
@@ -464,7 +464,7 @@ export default function MarketDetailPage({
         {/* Market Info */}
 
         {/* Market Info */}
-        <div className="mt-6 rounded-xl border border-border bg-card p-4">
+        <div className="mt-6 rounded-xl border border-border bg-card/50 backdrop-blur-sm p-4">
           <h2 className="mb-3 text-sm font-semibold text-foreground">Market Parameters</h2>
           <div className="grid grid-cols-2 gap-x-8 gap-y-2 text-sm md:grid-cols-4">
             {[

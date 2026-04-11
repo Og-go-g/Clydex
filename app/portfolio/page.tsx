@@ -5,7 +5,6 @@ import { useWallet } from "@/lib/wallet/context";
 import { useAuth } from "@/lib/auth/context";
 import { DepositWithdrawModal } from "@/components/collateral/DepositWithdrawModal";
 import { ClosePositionModal } from "@/components/collateral/ClosePositionModal";
-import { HistoryModal } from "@/components/history/HistoryModal";
 import { EquityChart, invalidateEquityCache } from "@/components/charts/EquityChart";
 import { useRealtimePrices } from "@/hooks/useRealtimePrices";
 import { usePageActive } from "@/hooks/usePageActive";
@@ -13,6 +12,69 @@ import { useOrderActions } from "@/hooks/useOrderActions";
 
 // Minimum position size threshold — positions below this are treated as dust/zero
 const MIN_POS_SIZE = 1e-12;
+
+// ─── History Types ──────────────────────────────────────────────
+
+interface OrderRow { id: string; orderId: string; marketId: number; symbol: string; side: string; placedSize: string; filledSize: string | null; placedPrice: string; orderValue: string; fillMode: string; fillStatus: string; status: string; addedAt: string }
+interface TradeRow { id: string; tradeId: string; marketId: number; symbol: string; side: string; size: string; price: string; role: string; fee: string; closedPnl: string | null; time: string }
+interface FundingRow { id: string; marketId: number; symbol: string; fundingPnl: string; positionSize: string; time: string }
+interface DepositRow { id: string; amount: string; balance: string; time: string }
+interface WithdrawalRow { id: string; amount: string; balance: string; fee: string; destPubkey: string; time: string }
+interface PagedResult<T> { data: T[]; total: number; limit: number; offset: number }
+interface TransferResult { deposits: PagedResult<DepositRow>; withdrawals: PagedResult<WithdrawalRow> }
+interface SyncStatus { synced: boolean; lastSyncAt: string | null }
+interface SyncResultItem { type: string; inserted: number; error?: string }
+
+// ─── History Formatters ─────────────────────────────────────────
+
+function hFmtUsd(v: string | number, decimals = 2): string {
+  const n = typeof v === "string" ? parseFloat(v) : v;
+  if (!isFinite(n) || n === 0) return "--";
+  return (n < 0 ? "-" : "") + "$" + Math.abs(n).toFixed(decimals);
+}
+function hFmtPrice(v: string | number): string {
+  const n = typeof v === "string" ? parseFloat(v) : v;
+  if (!isFinite(n)) return "$0.00";
+  const d = Math.abs(n) < 1 ? 6 : Math.abs(n) < 100 ? 4 : 2;
+  return "$" + n.toFixed(d).replace(/0+$/, "").replace(/\.$/, "");
+}
+function hFmtSize(v: string | number): string {
+  const n = typeof v === "string" ? parseFloat(v) : v;
+  if (!isFinite(n)) return "0";
+  const d = Math.abs(n) < 0.01 ? 6 : Math.abs(n) < 1 ? 4 : 2;
+  return n.toFixed(d);
+}
+function hFmtDate(iso: string): string {
+  const d = new Date(iso);
+  return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()} - ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
+}
+function hFmtAddr(a: string): string { return !a || a.length <= 10 ? a || "--" : a.slice(0, 4) + "..." + a.slice(-4); }
+function hPnlColor(v: string | number): string {
+  const n = typeof v === "string" ? parseFloat(v) : v;
+  return n > 0.001 ? "text-emerald-400" : n < -0.001 ? "text-red-400" : "text-muted";
+}
+function hTradeValue(price: string, size: string): number {
+  const p = parseFloat(price), s = parseFloat(size);
+  return isFinite(p) && isFinite(s) ? Math.abs(p * s) : 0;
+}
+const TAKER_FEE = 0.00035, MAKER_FEE = 0.0001;
+function hEstFee(tv: number, role: string, dbFee: string): number {
+  const f = parseFloat(dbFee);
+  if (isFinite(f) && f !== 0) return f;
+  return tv > 0 ? tv * (role === "taker" ? TAKER_FEE : MAKER_FEE) : 0;
+}
+
+function HDateCell({ iso, className }: { iso: string; className: string }) {
+  const [text, setText] = React.useState("");
+  React.useEffect(() => { setText(hFmtDate(iso)); }, [iso]);
+  return <td className={className}>{text || "\u00A0"}</td>;
+}
+
+const HISTORY_PAGE = 50;
+const HTH = "px-4 py-3 text-left text-xs font-medium text-muted";
+const HTD = "whitespace-nowrap px-4 py-3 text-sm";
+
+type PortfolioTab = "positions" | "orders" | "trades" | "orderHistory" | "funding" | "transfers";
 
 // ─── Types matching the normalized /api/account response ────────
 
@@ -135,7 +197,6 @@ export default function PortfolioPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [collateralModalOpen, setCollateralModalOpen] = useState(false);
-  const [historyModalOpen, setHistoryModalOpen] = useState(false);
   const [closeModalPos, setCloseModalPos] = useState<{
     symbol: string; displaySymbol: string; side: "Long" | "Short"; isLong: boolean;
     absSize: number; entryPrice: number; markPrice: number; totalPnl: number; positionValue: number;
@@ -171,8 +232,87 @@ export default function PortfolioPage() {
   // Order actions: cancel, edit, cancel all
   const { cancelOrder: doCancelOrder, cancelAllOrders, editOrder: doEditOrder, closePosition: doClosePosition, cancellingIds, closingSymbols, cancelAllProgress, lastError: orderActionError, clearError: clearOrderError } = useOrderActions();
   const [editingOrderId, setEditingOrderId] = useState<number | null>(null);
+  const [activeTab, setActiveTab] = useState<PortfolioTab>("positions");
+
+  // ─── History state ──────────────────────────────────────────
+  const [hLoading, setHLoading] = useState(false);
+  const [hSyncing, setHSyncing] = useState(false);
+  const [hSyncStatus, setHSyncStatus] = useState<SyncStatus | null>(null);
+  const [hSyncResults, setHSyncResults] = useState<SyncResultItem[] | null>(null);
+  const [hOffset, setHOffset] = useState(0);
+  const hInitialSyncDone = useRef(false);
+  const [hOrders, setHOrders] = useState<PagedResult<OrderRow> | null>(null);
+  const [hTrades, setHTrades] = useState<PagedResult<TradeRow> | null>(null);
+  const [hFunding, setHFunding] = useState<PagedResult<FundingRow> | null>(null);
+  const [hTransfers, setHTransfers] = useState<TransferResult | null>(null);
   const [editPrice, setEditPrice] = useState("");
   const [editSize, setEditSize] = useState("");
+
+  // Reset history pagination when switching tabs
+  useEffect(() => { setHOffset(0); }, [activeTab]);
+
+  // ─── History sync & fetch ───────────────────────────────────
+  const isHistoryTab = activeTab === "trades" || activeTab === "orderHistory" || activeTab === "funding" || activeTab === "transfers";
+
+  const checkHSyncStatus = useCallback(async () => {
+    try {
+      const res = await fetch("/api/history/sync");
+      if (res.ok) { const s: SyncStatus = await res.json(); setHSyncStatus(s); return s; }
+    } catch { /* silent */ }
+    return null;
+  }, []);
+
+  const triggerHSync = useCallback(async () => {
+    setHSyncing(true); setHSyncResults(null);
+    try {
+      const res = await fetch("/api/history/sync", { method: "POST", headers: { "Content-Type": "application/json" } });
+      if (res.ok) { const b = await res.json(); setHSyncResults(b.results); await checkHSyncStatus(); }
+    } catch (err) { console.error("[history] sync failed:", err); }
+    finally { setHSyncing(false); }
+  }, [checkHSyncStatus]);
+
+  const fetchHistoryData = useCallback(async () => {
+    if (!isHistoryTab) return;
+    setHLoading(true);
+    try {
+      const params = new URLSearchParams({ limit: String(HISTORY_PAGE), offset: String(hOffset) });
+      if (activeTab === "orderHistory") { const r = await fetch(`/api/history/orders?${params}`); if (r.ok) setHOrders(await r.json()); }
+      else if (activeTab === "trades") { const r = await fetch(`/api/history/trades?${params}`); if (r.ok) setHTrades(await r.json()); }
+      else if (activeTab === "funding") { const r = await fetch(`/api/history/funding?${params}`); if (r.ok) setHFunding(await r.json()); }
+      else if (activeTab === "transfers") { const r = await fetch(`/api/history/transfers?${params}`); if (r.ok) setHTransfers(await r.json()); }
+    } catch (err) { console.error("[history] fetch error:", err); }
+    finally { setHLoading(false); }
+  }, [isHistoryTab, activeTab, hOffset]);
+
+  // Auto-sync on first history tab open
+  useEffect(() => {
+    if (!isHistoryTab || hInitialSyncDone.current) return;
+    hInitialSyncDone.current = true;
+    (async () => {
+      const status = await checkHSyncStatus();
+      if (status?.synced) { fetchHistoryData(); triggerHSync(); }
+      else { await triggerHSync(); }
+    })();
+  }, [isHistoryTab]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Re-fetch when history tab or page changes
+  useEffect(() => {
+    if (isHistoryTab && (hSyncStatus?.synced || hSyncResults)) fetchHistoryData();
+  }, [activeTab, hOffset]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Re-fetch after sync completes
+  useEffect(() => {
+    if (hSyncResults) fetchHistoryData();
+  }, [hSyncResults]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // History pagination
+  const hTotal = activeTab === "orderHistory" ? (hOrders?.total ?? 0)
+    : activeTab === "trades" ? (hTrades?.total ?? 0)
+    : activeTab === "funding" ? (hFunding?.total ?? 0)
+    : activeTab === "transfers" ? ((hTransfers?.deposits?.total ?? 0) + (hTransfers?.withdrawals?.total ?? 0))
+    : 0;
+  const hTotalPages = Math.max(1, Math.ceil(hTotal / HISTORY_PAGE));
+  const hCurrentPage = Math.floor(hOffset / HISTORY_PAGE) + 1;
 
   // Silent refresh — no spinner, skips if previous request still in flight
   const refreshAccount = useCallback(async () => {
@@ -476,15 +616,6 @@ export default function PortfolioPage() {
           <h1 className="text-2xl font-bold text-foreground">Portfolio</h1>
           <div className="flex items-center gap-3">
             <button
-              onClick={() => setHistoryModalOpen(true)}
-              className="flex items-center gap-2 rounded-xl border border-border bg-card px-4 py-2 text-sm font-medium text-foreground transition-colors hover:border-emerald-500/30 hover:bg-emerald-500/5"
-            >
-              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              History
-            </button>
-            <button
               onClick={() => setCollateralModalOpen(true)}
               className="rounded-xl border border-emerald-500/30 bg-emerald-500/15 px-4 py-2 text-sm font-medium text-emerald-400 transition-colors hover:bg-emerald-500/25"
             >
@@ -497,11 +628,6 @@ export default function PortfolioPage() {
           isOpen={collateralModalOpen}
           onClose={() => setCollateralModalOpen(false)}
           onSuccess={() => { invalidateEquityCache(); fetchAccount(); }}
-        />
-
-        <HistoryModal
-          isOpen={historyModalOpen}
-          onClose={() => setHistoryModalOpen(false)}
         />
 
         {closeModalPos && (
@@ -549,25 +675,71 @@ export default function PortfolioPage() {
 
         {/* Equity Chart */}
         <div className="mb-6">
-          <EquityChart />
+          <EquityChart liveEquity={totalValue} />
         </div>
 
-        {/* Positions */}
+        {/* Unified tab bar: Positions | Open Orders | History tabs */}
         <div className="mb-6">
-          <h2 className="mb-3 text-lg font-semibold text-foreground flex items-center gap-2">
-            {positions.length > 0 && <span className="h-2 w-2 animate-pulse rounded-full bg-green-400" />}
-            Positions
-            {positions.length > 0 && <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-green-500/20 text-xs text-green-400">{positions.length}</span>}
-          </h2>
+          <div className="mb-3 flex items-center justify-between">
+            <div className="flex items-center gap-0.5">
+              {([
+                { key: "positions" as PortfolioTab, label: "Positions", badge: positions.length > 0 ? positions.length : null, dot: positions.length > 0 },
+                { key: "orders" as PortfolioTab, label: "Open Orders", badge: openOrders.length > 0 ? openOrders.length : null },
+                { key: "trades" as PortfolioTab, label: "Trade History" },
+                { key: "orderHistory" as PortfolioTab, label: "Order History" },
+                { key: "funding" as PortfolioTab, label: "Funding History" },
+                { key: "transfers" as PortfolioTab, label: "Transfers" },
+              ]).map((t) => (
+                <button
+                  key={t.key}
+                  onClick={() => setActiveTab(t.key)}
+                  className={`relative flex items-center gap-1.5 whitespace-nowrap px-3 py-2 text-xs font-semibold transition-colors -mb-px ${
+                    activeTab === t.key
+                      ? "text-foreground after:absolute after:bottom-0 after:left-0 after:right-0 after:h-[2px] after:bg-gradient-to-r after:from-emerald-400 after:to-emerald-400/10 after:animate-[tab-fill_0.3s_ease-out]"
+                      : "text-muted hover:text-foreground"
+                  }`}
+                >
+                  {t.dot && <span className="h-2 w-2 animate-pulse rounded-full bg-green-400" />}
+                  {t.label}
+                  {t.badge != null && <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-green-500/20 text-xs text-green-400">{t.badge}</span>}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-2 shrink-0 ml-2">
+              {activeTab === "orders" && openOrders.length > 1 && (
+                <button
+                  onClick={() => cancelAllOrders(openOrders.map(o => o.orderId))}
+                  disabled={!!cancelAllProgress}
+                  className="rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
+                >
+                  {cancelAllProgress ? `Cancelling ${cancelAllProgress.current}/${cancelAllProgress.total}...` : "Cancel All"}
+                </button>
+              )}
+              {isHistoryTab && (
+                <button
+                  onClick={triggerHSync}
+                  disabled={hSyncing}
+                  className="flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-xs text-foreground transition hover:border-emerald-500/30 disabled:opacity-50"
+                >
+                  {hSyncing ? (
+                    <><span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />Syncing...</>
+                  ) : "Sync"}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {activeTab === "positions" && (<>
+
           {positions.length === 0 ? (
             <div className="rounded-xl border border-border bg-card p-6 text-center text-sm text-muted">
               No open positions. Use the Chat to place trades.
             </div>
           ) : (
-            <div className="overflow-x-auto rounded-xl border border-border">
+            <div className="overflow-x-auto rounded-2xl border border-border bg-card/50 backdrop-blur-sm">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b border-border bg-card text-xs text-muted">
+                  <tr className="border-b border-border text-xs text-muted">
                     <th className="whitespace-nowrap px-3 py-3 text-left">Market</th>
                     <th className="whitespace-nowrap px-3 py-3 text-right">Position</th>
                     <th className="whitespace-nowrap px-3 py-3 text-right">Position Value</th>
@@ -653,31 +825,18 @@ export default function PortfolioPage() {
               </table>
             </div>
           )}
-        </div>
+          </>)}
 
-        {/* Open Orders — table like Positions */}
-        {openOrders.length > 0 && (
-          <div className="mb-6">
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-foreground flex items-center gap-2">
-                <span className="h-2 w-2 animate-pulse rounded-full bg-yellow-400" />
-                Open Orders
-                <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500/20 text-xs text-emerald-400">{openOrders.length}</span>
-              </h2>
-              {openOrders.length > 1 && (
-                <button
-                  onClick={() => cancelAllOrders(openOrders.map(o => o.orderId))}
-                  disabled={!!cancelAllProgress}
-                  className="rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-1.5 text-xs font-medium text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50"
-                >
-                  {cancelAllProgress ? `Cancelling ${cancelAllProgress.current}/${cancelAllProgress.total}...` : "Cancel All"}
-                </button>
-              )}
+          {activeTab === "orders" && (<>
+          {openOrders.length === 0 ? (
+            <div className="rounded-2xl border border-border bg-card/50 backdrop-blur-sm p-6 text-center text-sm text-muted">
+              No open orders.
             </div>
-            <div className="overflow-x-auto rounded-xl border border-border">
+          ) : (
+            <div className="overflow-x-auto rounded-2xl border border-border bg-card/50 backdrop-blur-sm">
               <table className="w-full text-xs">
                 <thead>
-                  <tr className="border-b border-border bg-card text-xs text-muted">
+                  <tr className="border-b border-border text-xs text-muted">
                     <th className="whitespace-nowrap px-3 py-2 text-left font-medium">Market</th>
                     <th className="whitespace-nowrap px-3 py-2 text-left font-medium">Side</th>
                     <th className="whitespace-nowrap px-3 py-2 text-right font-medium">Order Value</th>
@@ -818,8 +977,53 @@ export default function PortfolioPage() {
                 </tbody>
               </table>
             </div>
-          </div>
-        )}
+          )}
+          </>)}
+
+          {/* ─── History tab content ──────────────────────────── */}
+          {isHistoryTab && (
+            <div className="rounded-2xl border border-border bg-card/50 backdrop-blur-sm">
+              {hSyncing && (
+                <div className="border-b border-emerald-500/20 bg-emerald-500/5 px-4 py-2">
+                  <div className="flex items-center gap-2 text-xs text-emerald-400">
+                    <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
+                    Syncing history from 01 Exchange...
+                  </div>
+                </div>
+              )}
+              <div className="max-h-[50vh] overflow-auto">
+                {hLoading ? (
+                  <div className="flex h-32 items-center justify-center">
+                    <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
+                  </div>
+                ) : (
+                  <>
+                    {activeTab === "trades" && <HTradeTable data={hTrades?.data ?? []} />}
+                    {activeTab === "orderHistory" && <HOrderTable data={hOrders?.data ?? []} />}
+                    {activeTab === "funding" && <HFundingTable data={hFunding?.data ?? []} />}
+                    {activeTab === "transfers" && <HTransferTable deposits={hTransfers?.deposits?.data ?? []} withdrawals={hTransfers?.withdrawals?.data ?? []} />}
+                  </>
+                )}
+              </div>
+              {hTotal > HISTORY_PAGE && (
+                <div className="flex items-center justify-center gap-2 border-t border-border px-4 py-3">
+                  <button onClick={() => setHOffset(0)} disabled={hOffset === 0} className="rounded px-2 py-1 text-xs text-muted hover:text-foreground disabled:opacity-30">&laquo;</button>
+                  <button onClick={() => setHOffset(Math.max(0, hOffset - HISTORY_PAGE))} disabled={hOffset === 0} className="rounded px-2 py-1 text-xs text-muted hover:text-foreground disabled:opacity-30">&lsaquo;</button>
+                  {Array.from({ length: Math.min(5, hTotalPages) }, (_, i) => {
+                    const page = hTotalPages <= 5 ? i + 1 : hCurrentPage <= 3 ? i + 1 : hCurrentPage >= hTotalPages - 2 ? hTotalPages - 4 + i : hCurrentPage - 2 + i;
+                    return (
+                      <button key={page} onClick={() => setHOffset((page - 1) * HISTORY_PAGE)}
+                        className={`min-w-[28px] rounded px-2 py-1 text-xs transition ${page === hCurrentPage ? "bg-accent/20 text-accent font-medium" : "text-muted hover:text-foreground"}`}
+                      >{page}</button>
+                    );
+                  })}
+                  <button onClick={() => setHOffset(hOffset + HISTORY_PAGE)} disabled={hCurrentPage >= hTotalPages} className="rounded px-2 py-1 text-xs text-muted hover:text-foreground disabled:opacity-30">&rsaquo;</button>
+                  <button onClick={() => setHOffset((hTotalPages - 1) * HISTORY_PAGE)} disabled={hCurrentPage >= hTotalPages} className="rounded px-2 py-1 text-xs text-muted hover:text-foreground disabled:opacity-30">&raquo;</button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
 
         {/* Active Triggers */}
         {/* Orphan triggers — triggers without a matching open position */}
@@ -871,5 +1075,109 @@ export default function PortfolioPage() {
 
       </div>
     </div>
+  );
+}
+
+// ─── History Table Components ─────────────────────────────────────
+
+function HEmpty() {
+  return <div className="flex h-24 items-center justify-center text-sm text-muted">No records found</div>;
+}
+
+function HTradeTable({ data }: { data: TradeRow[] }) {
+  if (!data.length) return <HEmpty />;
+  return (
+    <table className="w-full">
+      <thead className="sticky top-0 border-b border-border bg-card/80 backdrop-blur-sm">
+        <tr><th className={HTH}>Time</th><th className={HTH}>Market</th><th className={HTH}>Trade</th><th className={HTH}>Price</th><th className={HTH}>Trade Value</th><th className={HTH}>Fee Paid</th><th className={HTH}>Closed PnL</th><th className={HTH}>Type</th></tr>
+      </thead>
+      <tbody className="divide-y divide-border/50">
+        {data.map((r) => { const tv = hTradeValue(r.price, r.size); const sz = parseFloat(r.size); const fee = hEstFee(tv, r.role, r.fee); return (
+          <tr key={r.id} className="transition hover:bg-white/[0.02]">
+            <HDateCell iso={r.time} className={`${HTD} text-muted`} />
+            <td className={`${HTD} text-foreground`}>{r.symbol.replace("USD", "/USD")}</td>
+            <td className={`${HTD} ${r.side === "Long" ? "text-emerald-400" : "text-red-400"}`}>{r.side === "Short" ? "-" : ""}{hFmtSize(Math.abs(sz))}</td>
+            <td className={`${HTD} text-foreground`}>{hFmtPrice(r.price)}</td>
+            <td className={`${HTD} text-foreground`}>{tv > 0 ? "$" + tv.toFixed(2) : "--"}</td>
+            <td className={`${HTD} text-red-400`}>{fee > 0 ? hFmtUsd(-fee) : "--"}</td>
+            <td className={`${HTD} ${r.closedPnl ? hPnlColor(r.closedPnl) : "text-muted"}`}>{r.closedPnl && parseFloat(r.closedPnl) !== 0 ? hFmtUsd(r.closedPnl) : "--"}</td>
+            <td className={`${HTD} text-muted capitalize`}>{r.role}</td>
+          </tr>
+        ); })}
+      </tbody>
+    </table>
+  );
+}
+
+function HOrderTable({ data }: { data: OrderRow[] }) {
+  if (!data.length) return <HEmpty />;
+  return (
+    <table className="w-full">
+      <thead className="sticky top-0 border-b border-border bg-card/80 backdrop-blur-sm">
+        <tr><th className={HTH}>Time</th><th className={HTH}>Market</th><th className={HTH}>Order</th><th className={HTH}>Price</th><th className={HTH}>Order Value</th><th className={HTH}>Fill Status</th><th className={HTH}>Status</th><th className={HTH}>Order ID</th></tr>
+      </thead>
+      <tbody className="divide-y divide-border/50">
+        {data.map((r) => { const sz = parseFloat(r.placedSize); const val = parseFloat(r.orderValue); return (
+          <tr key={r.id} className="transition hover:bg-white/[0.02]">
+            <HDateCell iso={r.addedAt} className={`${HTD} text-muted`} />
+            <td className={`${HTD} ${r.side === "Long" ? "text-emerald-400" : "text-red-400"} font-medium`}>{r.symbol.replace("USD", "/USD")}</td>
+            <td className={`${HTD} text-foreground`}>{hFmtSize(sz)}</td>
+            <td className={`${HTD} text-foreground`}>{hFmtPrice(r.placedPrice)}</td>
+            <td className={`${HTD} text-foreground`}>{val > 0 ? "$" + val.toFixed(2) : "--"}</td>
+            <td className={`${HTD} ${r.fillStatus === "Filled" ? "text-emerald-400" : "text-muted"}`}>{r.fillStatus}</td>
+            <td className={`${HTD} ${r.status === "Filled" ? "text-emerald-400" : r.status === "Cancelled" ? "text-muted" : "text-foreground"}`}>{r.status}</td>
+            <td className={`${HTD} text-muted font-mono text-xs`}>{r.orderId}</td>
+          </tr>
+        ); })}
+      </tbody>
+    </table>
+  );
+}
+
+function HFundingTable({ data }: { data: FundingRow[] }) {
+  if (!data.length) return <HEmpty />;
+  return (
+    <table className="w-full">
+      <thead className="sticky top-0 border-b border-border bg-card/80 backdrop-blur-sm">
+        <tr><th className={HTH}>Time</th><th className={HTH}>Market</th><th className={HTH}>Position Size</th><th className={HTH}>Funding Payment</th></tr>
+      </thead>
+      <tbody className="divide-y divide-border/50">
+        {data.map((r) => (
+          <tr key={r.id} className="transition hover:bg-white/[0.02]">
+            <HDateCell iso={r.time} className={`${HTD} text-muted`} />
+            <td className={`${HTD} text-foreground`}>{r.symbol.replace("USD", "/USD")}</td>
+            <td className={`${HTD} text-foreground`}>{hFmtSize(r.positionSize)}</td>
+            <td className={`${HTD} ${hPnlColor(r.fundingPnl)}`}>{parseFloat(r.fundingPnl) !== 0 ? hFmtUsd(r.fundingPnl, 4) : "--"}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function HTransferTable({ deposits, withdrawals }: { deposits: DepositRow[]; withdrawals: WithdrawalRow[] }) {
+  const merged = [
+    ...deposits.map((d) => ({ ...d, type: "deposit" as const })),
+    ...withdrawals.map((w) => ({ ...w, type: "withdrawal" as const })),
+  ].sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
+  if (!merged.length) return <HEmpty />;
+  return (
+    <table className="w-full">
+      <thead className="sticky top-0 border-b border-border bg-card/80 backdrop-blur-sm">
+        <tr><th className={HTH}>Time</th><th className={HTH}>Type</th><th className={HTH}>Amount</th><th className={HTH}>Balance After</th><th className={HTH}>Fee</th><th className={HTH}>Destination</th></tr>
+      </thead>
+      <tbody className="divide-y divide-border/50">
+        {merged.map((r) => (
+          <tr key={r.id} className="transition hover:bg-white/[0.02]">
+            <HDateCell iso={r.time} className={`${HTD} text-muted`} />
+            <td className={`${HTD} ${r.type === "deposit" ? "text-emerald-400" : "text-red-400"}`}>{r.type === "deposit" ? "Deposit" : "Withdrawal"}</td>
+            <td className={`${HTD} text-foreground`}>${parseFloat(r.amount).toFixed(2)}</td>
+            <td className={`${HTD} text-muted`}>${parseFloat(r.balance).toFixed(2)}</td>
+            <td className={`${HTD} text-muted`}>{r.type === "withdrawal" && parseFloat((r as WithdrawalRow).fee) > 0 ? "$" + parseFloat((r as WithdrawalRow).fee).toFixed(2) : "--"}</td>
+            <td className={`${HTD} text-muted font-mono text-xs`}>{r.type === "withdrawal" ? hFmtAddr((r as WithdrawalRow).destPubkey) : "--"}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }

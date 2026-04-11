@@ -38,7 +38,7 @@ export function invalidateEquityCache() {
   } catch { /* ignore */ }
 }
 
-export function EquityChart() {
+export function EquityChart({ liveEquity }: { liveEquity?: number }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Area"> | null>(null);
@@ -173,10 +173,39 @@ export function EquityChart() {
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current) return;
 
-    const chartData: AreaData[] = points.map((p) => ({
+    // Override last point with live equity from WebSocket (matches Total Value card)
+    const displayPoints = liveEquity != null && points.length > 0
+      ? points.map((p, i) =>
+          i === points.length - 1 ? { ...p, balance: liveEquity } : p
+        )
+      : points;
+
+    const chartData: AreaData[] = displayPoints.map((p) => ({
       time: p.time as Time,
       value: p.balance,
     }));
+
+    // Set minimum Y-axis range so flat data doesn't show as a single pixel
+    const MIN_RANGE = 5; // at least $5 visible range
+    if (displayPoints.length > 0) {
+      const vals = displayPoints.map((p) => p.balance);
+      const minVal = Math.min(...vals);
+      const maxVal = Math.max(...vals);
+      const range = maxVal - minVal;
+      if (range < MIN_RANGE) {
+        const margin = (MIN_RANGE - range) / 2;
+        seriesRef.current.applyOptions({
+          autoscaleInfoProvider: () => ({
+            priceRange: { minValue: minVal - margin, maxValue: maxVal + margin },
+          }),
+        });
+      } else {
+        // Reset to default auto-scale
+        seriesRef.current.applyOptions({
+          autoscaleInfoProvider: undefined,
+        });
+      }
+    }
 
     seriesRef.current.setData(chartData);
     // Ensure chart has correct width before fitting
@@ -185,7 +214,7 @@ export function EquityChart() {
       chartRef.current.applyOptions({ width: container.clientWidth });
     }
     chartRef.current.timeScale().fitContent();
-  }, [points]);
+  }, [points, liveEquity]);
 
   // Always render DOM (chart needs containerRef), hide via CSS until data arrives
   const visible = initialLoadDone && points.length > 0;
@@ -195,14 +224,18 @@ export function EquityChart() {
       {/* Header */}
       <div className="mb-3 flex items-center justify-between">
         <div>
-          <span className="text-sm font-semibold text-foreground">Balance</span>
+          <span className="text-sm font-semibold text-foreground">Total Value</span>
           {hoverValue ? (
             <span className="ml-3 text-xs text-muted">
               {hoverValue.time} — <span className="text-foreground">{hoverValue.balance}</span>
             </span>
           ) : points.length > 0 ? (
-            <span className="ml-3 text-xs text-emerald-400">
-              ${points[points.length - 1].balance.toFixed(2)}
+            <span className={`ml-3 text-xs ${
+              (liveEquity ?? points[points.length - 1].balance) >= points[0].balance
+                ? "text-emerald-400"
+                : "text-red-400"
+            }`}>
+              ${(liveEquity ?? points[points.length - 1].balance).toFixed(2)}
             </span>
           ) : null}
         </div>
