@@ -313,6 +313,20 @@ export async function getConsecutiveFailures(subscriptionId: string): Promise<nu
   return parseInt(rows[0]?.cnt ?? "0");
 }
 
+/** Get market IDs where copy trades were actually executed for a specific leader */
+export async function getCopiedMarketIds(
+  followerAddr: string,
+  leaderAddr: string,
+): Promise<number[]> {
+  const rows = await query<{ marketId: number }>(
+    `SELECT DISTINCT market_id AS "marketId"
+     FROM copy_trades
+     WHERE follower_addr = $1 AND leader_addr = $2 AND status = 'filled'`,
+    [followerAddr, leaderAddr],
+  );
+  return rows.map((r) => r.marketId);
+}
+
 // ─── Stats ───────────────────────────────────────────────────────
 
 export async function getCopyStats(followerAddr: string): Promise<{

@@ -41,6 +41,8 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
   const [loading, setLoading] = useState(true);
   const [activating, setActivating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [unfollowTarget, setUnfollowTarget] = useState<string | null>(null);
+  const [unfollowing, setUnfollowing] = useState(false);
   const { addToast } = useToast();
   const prevTradeCountRef = useRef<number>(0);
   const prevFilledRef = useRef<number>(0);
@@ -160,12 +162,28 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
     }
   };
 
-  const handleUnfollow = async (leaderAddr: string) => {
+  const handleUnfollowConfirm = async (closePositions: boolean) => {
+    if (!unfollowTarget) return;
+    setUnfollowing(true);
     try {
-      await fetch(`/api/copy/subscribe?leader=${encodeURIComponent(leaderAddr)}`, { method: "DELETE" });
+      const params = new URLSearchParams({ leader: unfollowTarget });
+      if (closePositions) params.set("closePositions", "true");
+      const res = await fetch(`/api/copy/subscribe?${params}`, { method: "DELETE" });
+      const data = await res.json();
+      if (res.ok) {
+        if (closePositions && data.closeResult) {
+          const cr = data.closeResult;
+          if (cr.closed > 0) addToast({ type: "success", title: "Positions Closed", message: `${cr.closed} position(s) closed` });
+          if (cr.failed > 0) addToast({ type: "error", title: "Close Failed", message: `${cr.failed} position(s) failed to close` });
+        }
+        addToast({ type: "info", title: "Unfollowed", message: `Stopped copying ${unfollowTarget.startsWith("account:") ? "#" + unfollowTarget.slice(8) : unfollowTarget.slice(0, 4) + "..." + unfollowTarget.slice(-4)}` });
+      }
       await fetchStatus();
     } catch {
-      // ignore
+      addToast({ type: "error", title: "Error", message: "Failed to unfollow" });
+    } finally {
+      setUnfollowing(false);
+      setUnfollowTarget(null);
     }
   };
 
@@ -246,7 +264,7 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
                       {sub.active ? "Active" : "Paused"}
                     </button>
                     <button
-                      onClick={() => handleUnfollow(sub.leaderAddr)}
+                      onClick={() => setUnfollowTarget(sub.leaderAddr)}
                       className="rounded p-1 text-[#555] hover:text-red-400 transition-colors"
                       title="Unfollow"
                     >
@@ -271,6 +289,41 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
             </div>
           )}
         </>
+      )}
+
+      {/* Unfollow confirmation dialog */}
+      {unfollowTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => !unfollowing && setUnfollowTarget(null)}>
+          <div className="w-full max-w-sm rounded-2xl border border-[#262626] bg-[#0f0f0f] p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold text-white mb-3">Unfollow Trader</h3>
+            <p className="text-xs text-[#888] mb-4">
+              Do you want to close positions that were copied from this trader?
+            </p>
+            <div className="space-y-2">
+              <button
+                onClick={() => handleUnfollowConfirm(true)}
+                disabled={unfollowing}
+                className="w-full rounded-xl border border-red-500/30 bg-red-500/10 py-2.5 text-xs font-medium text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+              >
+                {unfollowing ? "Closing..." : "Unfollow & Close Positions"}
+              </button>
+              <button
+                onClick={() => handleUnfollowConfirm(false)}
+                disabled={unfollowing}
+                className="w-full rounded-xl border border-[#262626] bg-[#141414] py-2.5 text-xs font-medium text-gray-300 hover:bg-[#1a1a1a] transition-colors disabled:opacity-50"
+              >
+                Unfollow Only (keep positions)
+              </button>
+              <button
+                onClick={() => setUnfollowTarget(null)}
+                disabled={unfollowing}
+                className="w-full py-2 text-xs text-[#666] hover:text-white transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

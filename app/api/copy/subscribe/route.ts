@@ -6,6 +6,7 @@ import {
   toggleSubscription,
   deleteSubscription,
 } from "@/lib/copy/queries";
+import { closeFollowerPositions } from "@/lib/copy/close-positions";
 
 /**
  * POST /api/copy/subscribe
@@ -116,9 +117,23 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ error: "leader query param is required" }, { status: 400 });
   }
 
+  const closePos = req.nextUrl.searchParams.get("closePositions") === "true";
+
+  // Close copied positions first if requested
+  let closeResult = null;
+  if (closePos) {
+    try {
+      closeResult = await closeFollowerPositions(addr, leaderAddr);
+    } catch (err) {
+      // Don't block unfollow if close fails — log and continue
+      console.error("[copy/subscribe] closePositions error:", err);
+      closeResult = { closed: 0, failed: 0, errors: ["Failed to close positions"] };
+    }
+  }
+
   const deleted = await deleteSubscription(addr, leaderAddr);
   if (deleted === 0) {
     return NextResponse.json({ error: "Subscription not found" }, { status: 404 });
   }
-  return NextResponse.json({ success: true });
+  return NextResponse.json({ success: true, closeResult });
 }
