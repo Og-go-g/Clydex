@@ -17,6 +17,17 @@ interface CopySubscriptionUI {
   active: boolean;
 }
 
+interface CopyTradeLog {
+  symbol: string;
+  side: string;
+  size: string;
+  price: string | null;
+  status: string;
+  error: string | null;
+  leaderAddr: string;
+  createdAt: string;
+}
+
 interface CopyStatus {
   sessionActive: boolean;
   sessionExpires: string | null;
@@ -27,6 +38,7 @@ interface CopyStatus {
     failedTrades: number;
     todayTrades: number;
   };
+  recentTrades: CopyTradeLog[];
 }
 
 function shortenAddr(addr: string): string {
@@ -217,11 +229,35 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
 
       {/* Not activated */}
       {isAuthenticated && !loading && !status?.sessionActive && (
-        <div className="rounded-lg border border-[#262626] bg-[#0a0a0a] p-3 space-y-2">
+        <div className="rounded-lg border border-[#262626] bg-[#0a0a0a] p-3 space-y-3">
           <p className="text-[11px] text-[#888] leading-relaxed">
             Enable copy trading to automatically mirror trades from top performers.
-            Your session key will be securely encrypted on our server.
           </p>
+          {/* Security info */}
+          <div className="rounded-lg border border-emerald-500/10 bg-emerald-500/5 p-2.5 space-y-1.5">
+            <p className="text-[10px] font-medium text-emerald-400/80 flex items-center gap-1">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              Security Details
+            </p>
+            <div className="space-y-1 text-[9px] text-[#888] leading-relaxed">
+              <p className="flex items-start gap-1.5">
+                <span className="text-emerald-500 mt-0.5">✓</span>
+                Session key can <strong className="text-[#ccc]">ONLY trade</strong> — cannot withdraw, deposit, or transfer funds
+              </p>
+              <p className="flex items-start gap-1.5">
+                <span className="text-emerald-500 mt-0.5">✓</span>
+                Key encrypted with AES-256-GCM before storage
+              </p>
+              <p className="flex items-start gap-1.5">
+                <span className="text-emerald-500 mt-0.5">✓</span>
+                Session expires in 30 days — disable anytime
+              </p>
+              <p className="flex items-start gap-1.5">
+                <span className="text-emerald-500 mt-0.5">✓</span>
+                All copy trades logged and visible in real-time
+              </p>
+            </div>
+          </div>
           {error && (
             <p className="text-[11px] text-red-400">{error}</p>
           )}
@@ -298,6 +334,36 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
                 <span className="text-red-400/60">{status.stats.failedTrades} failed</span>
               )}
               <span>{status.stats.totalTrades} total</span>
+            </div>
+          )}
+
+          {/* Activity Log */}
+          {status.recentTrades && status.recentTrades.length > 0 && (
+            <div className="pt-2">
+              <p className="text-[10px] font-medium text-[#888] mb-1.5">Activity Log</p>
+              <div className="space-y-1 max-h-[120px] overflow-y-auto">
+                {status.recentTrades.map((t, i) => (
+                  <div key={i} className={`flex items-center justify-between rounded border px-2 py-1 text-[9px] font-mono ${
+                    t.status === "filled"
+                      ? "border-emerald-500/10 bg-emerald-500/5"
+                      : "border-red-500/10 bg-red-500/5"
+                  }`}>
+                    <div className="flex items-center gap-1.5">
+                      <span className={`h-1 w-1 rounded-full ${t.status === "filled" ? "bg-emerald-500" : "bg-red-500"}`} />
+                      <span className={t.side === "Long" ? "text-emerald-400" : "text-red-400"}>{t.side}</span>
+                      <span className="text-[#ccc]">{t.symbol}</span>
+                      <span className="text-[#666]">{parseFloat(t.size).toFixed(2)}</span>
+                      {t.price && <span className="text-[#555]">@${parseFloat(t.price).toLocaleString()}</span>}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {t.status === "failed" && t.error && (
+                        <span className="text-red-400/60 max-w-[80px] truncate" title={t.error}>{t.error}</span>
+                      )}
+                      <span className="text-[#555]">{new Date(t.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </>

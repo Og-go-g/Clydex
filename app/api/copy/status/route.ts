@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getAuthAddress } from "@/lib/auth/session";
 import { isSessionActive } from "@/lib/copy/session-activator";
-import { getSubscriptions, getCopyStats } from "@/lib/copy/queries";
+import { getSubscriptions, getCopyStats, getRecentCopyTrades } from "@/lib/copy/queries";
 
 /**
  * GET /api/copy/status
@@ -14,10 +14,11 @@ export async function GET() {
   }
 
   try {
-    const [session, subscriptions, stats] = await Promise.all([
+    const [session, subscriptions, stats, recentTrades] = await Promise.all([
       isSessionActive(addr),
       getSubscriptions(addr),
       getCopyStats(addr),
+      getRecentCopyTrades(addr, 20),
     ]);
 
     return NextResponse.json({
@@ -33,6 +34,16 @@ export async function GET() {
         active: s.active,
       })),
       stats,
+      recentTrades: recentTrades.map((t) => ({
+        symbol: t.symbol,
+        side: t.side,
+        size: t.size,
+        price: t.price,
+        status: t.status,
+        error: t.error,
+        leaderAddr: t.leaderAddr,
+        createdAt: t.createdAt,
+      })),
     });
   } catch (err) {
     // History DB may be unavailable in local dev
@@ -43,6 +54,7 @@ export async function GET() {
         sessionExpires: null,
         subscriptions: [],
         stats: { totalTrades: 0, filledTrades: 0, failedTrades: 0, todayTrades: 0 },
+        recentTrades: [],
       });
     }
     return NextResponse.json({ error: msg }, { status: 500 });
