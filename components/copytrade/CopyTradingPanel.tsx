@@ -43,6 +43,8 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
   const [error, setError] = useState<string | null>(null);
   const { addToast } = useToast();
   const prevTradeCountRef = useRef<number>(0);
+  const prevFilledRef = useRef<number>(0);
+  const prevFailedRef = useRef<number>(0);
 
   const fetchStatus = useCallback(async () => {
     if (!isAuthenticated) { setLoading(false); return; }
@@ -55,9 +57,8 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
       const newTotal = data.stats.totalTrades;
       const prevTotal = prevTradeCountRef.current;
       if (prevTotal > 0 && newTotal > prevTotal) {
-        // Fetch recent trades to show in toasts
-        const filledDiff = data.stats.filledTrades - (status?.stats.filledTrades ?? 0);
-        const failedDiff = data.stats.failedTrades - (status?.stats.failedTrades ?? 0);
+        const filledDiff = data.stats.filledTrades - prevFilledRef.current;
+        const failedDiff = data.stats.failedTrades - prevFailedRef.current;
         if (filledDiff > 0) {
           addToast({ type: "success", title: "Copy Trade Executed", message: `${filledDiff} new trade(s) filled` });
         }
@@ -66,6 +67,8 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
         }
       }
       prevTradeCountRef.current = newTotal;
+      prevFilledRef.current = data.stats.filledTrades;
+      prevFailedRef.current = data.stats.failedTrades;
 
       setStatus(data);
     } catch {
@@ -73,7 +76,7 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
     } finally {
       setLoading(false);
     }
-  }, [isAuthenticated, addToast, status?.stats.filledTrades, status?.stats.failedTrades]);
+  }, [isAuthenticated, addToast]);
 
   useEffect(() => {
     fetchStatus();
