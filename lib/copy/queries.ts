@@ -333,6 +333,114 @@ export async function getCopiedMarketIds(
 
 // ─── Stats ───────────────────────────────────────────────────────
 
+// ─── Paginated History ──────────────────────────────────────────
+
+export async function getCopyTradesHistory(
+  followerAddr: string,
+  opts: {
+    limit?: number;
+    offset?: number;
+    leaderAddr?: string;
+    status?: string;
+  } = {},
+): Promise<{ trades: CopyTrade[]; total: number }> {
+  const limit = opts.limit ?? 50;
+  const offset = opts.offset ?? 0;
+  const conditions = [`follower_addr = $1`];
+  const params: unknown[] = [followerAddr];
+  let idx = 2;
+
+  if (opts.leaderAddr) {
+    conditions.push(`leader_addr = $${idx}`);
+    params.push(opts.leaderAddr);
+    idx++;
+  }
+  if (opts.status) {
+    conditions.push(`status = $${idx}`);
+    params.push(opts.status);
+    idx++;
+  }
+
+  const where = conditions.join(" AND ");
+
+  const [rows, countRows] = await Promise.all([
+    query<CopyTrade>(
+      `SELECT id, subscription_id AS "subscriptionId", follower_addr AS "followerAddr",
+              leader_addr AS "leaderAddr", market_id AS "marketId", symbol, side, size,
+              price, status, error, orig_trade_id AS "origTradeId", order_id AS "orderId",
+              created_at AS "createdAt", filled_at AS "filledAt"
+       FROM copy_trades
+       WHERE ${where}
+       ORDER BY created_at DESC
+       LIMIT $${idx} OFFSET $${idx + 1}`,
+      [...params, limit, offset],
+    ),
+    query<{ cnt: string }>(
+      `SELECT COUNT(*)::text AS cnt FROM copy_trades WHERE ${where}`,
+      params,
+    ),
+  ]);
+
+  return { trades: rows, total: parseInt(countRows[0]?.cnt ?? "0") };
+}
+
+// ─── Per-Leader Stats ───────────────────────────────────────────
+
+export async function getPerLeaderStats(followerAddr: string): Promise<
+  Array<{
+    leaderAddr: string;
+    totalTrades: number;
+    filledTrades: number;
+    failedTrades: number;
+    totalPnl: number;
+  }>
+> {
+  return query<{
+    leaderAddr: string;
+    totalTrades: number;
+    filledTrades: number;
+    failedTrades: number;
+    totalPnl: number;
+  }>(
+    `SELECT
+       leader_addr AS "leaderAddr",
+       COUNT(*)::int AS "totalTrades",
+       COUNT(*) FILTER (WHERE status = 'filled')::int AS "filledTrades",
+       COUNT(*) FILTER (WHERE status = 'failed')::int AS "failedTrades",
+       COALESCE(SUM(
+         CASE WHEN status = 'filled' AND price IS NOT NULL
+           THEN CASE WHEN side = 'Long' THEN size::numeric * price::numeric
+                     ELSE -size::numeric * price::numeric END
+           ELSE 0 END
+       ), 0)::float AS "totalPnl"
+     FROM copy_trades
+     WHERE follower_addr = $1
+     GROUP BY leader_addr
+     ORDER BY "filledTrades" DESC`,
+    [followerAddr],
+  );
+}
+
+// ─── Trades by Leader (for expanded cards) ──────────────────────
+
+export async function getRecentTradesByLeader(
+  followerAddr: string,
+  leaderAddr: string,
+  limit = 10,
+): Promise<CopyTrade[]> {
+  return query<CopyTrade>(
+    `SELECT id, subscription_id AS "subscriptionId", follower_addr AS "followerAddr",
+            leader_addr AS "leaderAddr", market_id AS "marketId", symbol, side, size,
+            price, status, error, orig_trade_id AS "origTradeId", order_id AS "orderId",
+            created_at AS "createdAt", filled_at AS "filledAt"
+     FROM copy_trades
+     WHERE follower_addr = $1 AND leader_addr = $2
+     ORDER BY created_at DESC
+     LIMIT $3`,
+    [followerAddr, leaderAddr, limit],
+  );
+}
+
 export async function getCopyStats(followerAddr: string): Promise<{
   totalTrades: number;
   filledTrades: number;

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getAuthAddress } from "@/lib/auth/session";
 import { isSessionActive } from "@/lib/copy/session-activator";
-import { getSubscriptions, getCopyStats, getRecentCopyTrades } from "@/lib/copy/queries";
+import { getSubscriptions, getCopyStats, getRecentCopyTrades, getPerLeaderStats, getRecentTradesByLeader } from "@/lib/copy/queries";
 
 /**
  * GET /api/copy/status
@@ -14,12 +14,43 @@ export async function GET() {
   }
 
   try {
-    const [session, subscriptions, stats, recentTrades] = await Promise.all([
+    const [session, subscriptions, stats, recentTrades, leaderStats] = await Promise.all([
       isSessionActive(addr),
       getSubscriptions(addr),
       getCopyStats(addr),
       getRecentCopyTrades(addr, 20),
+      getPerLeaderStats(addr),
     ]);
+
+    // Fetch recent trades per leader (for expanded cards)
+    const leaderAddrs = subscriptions.map((s) => s.leaderAddr);
+    const leaderTradesMap: Record<string, Array<{ symbol: string; side: string; size: string; price: string | null; status: string; createdAt: Date }>> = {};
+    if (leaderAddrs.length > 0) {
+      const tradeResults = await Promise.all(
+        leaderAddrs.map((la) => getRecentTradesByLeader(addr, la, 5)),
+      );
+      leaderAddrs.forEach((la, i) => {
+        leaderTradesMap[la] = tradeResults[i].map((t) => ({
+          symbol: t.symbol,
+          side: t.side,
+          size: t.size,
+          price: t.price,
+          status: t.status,
+          createdAt: t.createdAt,
+        }));
+      });
+    }
+
+    // Build leaderStats map for quick lookup
+    const leaderStatsMap: Record<string, { totalTrades: number; filledTrades: number; failedTrades: number; totalPnl: number }> = {};
+    for (const ls of leaderStats) {
+      leaderStatsMap[ls.leaderAddr] = {
+        totalTrades: ls.totalTrades,
+        filledTrades: ls.filledTrades,
+        failedTrades: ls.failedTrades,
+        totalPnl: ls.totalPnl,
+      };
+    }
 
     return NextResponse.json({
       sessionActive: session.active,
@@ -32,6 +63,8 @@ export async function GET() {
         maxPositionUsdc: s.maxPositionUsdc,
         stopLossPct: s.stopLossPct,
         active: s.active,
+        stats: leaderStatsMap[s.leaderAddr] ?? { totalTrades: 0, filledTrades: 0, failedTrades: 0, totalPnl: 0 },
+        recentTrades: leaderTradesMap[s.leaderAddr] ?? [],
       })),
       stats,
       recentTrades: recentTrades.map((t) => ({

@@ -128,17 +128,23 @@ export async function GET() {
 
     // Normalize positions with market data and live mark prices
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const positions = (account.positions ?? []).map((p: any) => ({
-      marketId: p.marketId,
-      symbol: marketSymbols[p.marketId] ?? `Market-${p.marketId}`,
-      openOrders: p.openOrders,
-      perp: p.perp,
-      marketImf: marketImfs[p.marketId] ?? 0.10,
-      marketMmf: marketMmfs[p.marketId] ?? 0.025,
-      marketCmf: marketCmfs[p.marketId] ?? 0.03,
-      maxLeverage: marketMaxLev[p.marketId] ?? 1,
-      markPrice: markPrices[p.marketId] ?? null,
-    }));
+    const positions = (account.positions ?? []).map((p: any) => {
+      const absSize = Math.abs(p.perp?.baseSize ?? 0);
+      const entryPrice = p.perp?.price ?? 0;
+      const imf = marketImfs[p.marketId] ?? 0.10;
+      return {
+        marketId: p.marketId,
+        symbol: marketSymbols[p.marketId] ?? `Market-${p.marketId}`,
+        openOrders: p.openOrders,
+        perp: p.perp,
+        marketImf: imf,
+        marketMmf: marketMmfs[p.marketId] ?? 0.025,
+        marketCmf: marketCmfs[p.marketId] ?? 0.03,
+        maxLeverage: marketMaxLev[p.marketId] ?? 1,
+        markPrice: markPrices[p.marketId] ?? null,
+        usedMargin: absSize * entryPrice * imf,
+      };
+    });
 
     return NextResponse.json({
       exists: true,

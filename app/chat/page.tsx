@@ -46,6 +46,13 @@ export function openCloseModal(data: CloseModalData) { openCloseModalFn?.(data);
 
 /** Minimum position size threshold — below this, position is considered empty */
 const MIN_POS_SIZE = 1e-12;
+
+// ─── LivePositionCard registry ─────────────────────────────────
+// Only the MOST RECENTLY mounted LivePositionCard for a given symbol+side
+// should actively poll and show as "live". Older cards auto-close.
+// Key: "SYMBOL_SIDE" e.g. "BTCUSD_Long"
+const liveCardRegistry = new Map<string, number>(); // key → mount timestamp
+let liveCardSeq = 0;
 // ─── Chat Mode Config ───────────────────────────────────────────
 
 interface ModeConfig {
@@ -1993,6 +2000,8 @@ function LivePositionCard({ initialPos, txHash, realtimePrices, onSendMessage }:
 }) {
   const [closed, setClosed] = useState(false);
   const closedRef = useRef(false);
+  // Superseded: a newer LivePositionCard for the same symbol+side was mounted
+  const [superseded, setSuperseded] = useState(false);
   // Live position data from polling (updates entry price, PnL after partial close etc.)
   const [livePos, setLivePos] = useState(initialPos);
   // TP/SL from polling
@@ -2000,10 +2009,25 @@ function LivePositionCard({ initialPos, txHash, realtimePrices, onSendMessage }:
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const sym = (initialPos.symbol as string) ?? "";
   const baseAsset = (initialPos.baseAsset as string) || baseAssetFrom(sym);
-  // Identity: match by symbol + side + entry price (tracks drift from partial fills)
+  // Identity: match by symbol + side (exchange has one position per symbol/side)
   const initSide = initialPos.side as string;
   // Track entry price dynamically — updates as partial fills shift average entry
   const trackedEntryRef = useRef(initialPos.entryPrice as number);
+  // Registry: detect when a newer card supersedes this one
+  const mySeqRef = useRef(0);
+  const registryKey = `${sym.toUpperCase()}_${initSide}`;
+
+  useEffect(() => {
+    const seq = ++liveCardSeq;
+    mySeqRef.current = seq;
+    liveCardRegistry.set(registryKey, seq);
+    return () => {
+      // Only remove from registry if we're still the current holder
+      if (liveCardRegistry.get(registryKey) === seq) {
+        liveCardRegistry.delete(registryKey);
+      }
+    };
+  }, [registryKey]);
 
   // Poll /api/account to detect external close + update live data
   // Aggressive first check (1s), then every 5s for 2 min, then every 30s indefinitely
@@ -2014,24 +2038,31 @@ function LivePositionCard({ initialPos, txHash, realtimePrices, onSendMessage }:
 
     const check = async () => {
       pollCount++;
+
+      // If a newer LivePositionCard for the same symbol+side was mounted, stop polling
+      const currentHolder = liveCardRegistry.get(registryKey);
+      if (currentHolder && currentHolder !== mySeqRef.current) {
+        if (active) {
+          setSuperseded(true);
+          if (pollingRef.current) { clearInterval(pollingRef.current); pollingRef.current = null; }
+        }
+        return;
+      }
+
       try {
         const res = await fetch(`/api/account?_t=${Date.now()}`);
         if (!res.ok) return;
         const data = await res.json();
         const symUp = sym.toUpperCase();
 
-        // Find THIS specific position by symbol + side + entry price proximity
+        // Find position by symbol + side (exchange has ONE position per symbol/side)
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const match = (data.positions ?? []).find((p: any) => {
           const pSym = (p.symbol ?? "").toUpperCase();
           if (pSym !== symUp && !pSym.startsWith(baseAsset.toUpperCase())) return false;
           if (Math.abs(p.perp?.baseSize ?? 0) < MIN_POS_SIZE) return false;
           const pSide = p.perp?.isLong ? "Long" : "Short";
-          if (pSide !== initSide) return false;
-          const pEntry = p.perp?.price ?? 0;
-          const refEntry = trackedEntryRef.current;
-          if (refEntry > 0 && pEntry > 0 && Math.abs(pEntry - refEntry) / refEntry > 0.01) return false;
-          return true;
+          return pSide === initSide;
         });
 
         // Extract triggers for this market
@@ -2154,6 +2185,45 @@ function LivePositionCard({ initialPos, txHash, realtimePrices, onSendMessage }:
       } catch { /* quota exceeded — non-critical */ }
     }
   }, [closed, wsMarkPrice, livePnlFunding, livePnlPct, sym, initSide, baseAsset, absSize, entryP, usedMargin]);
+
+  // Superseded by a newer card for the same symbol+side (add-to-position)
+  if (superseded) {
+    return (
+      <div className="my-2 w-full max-w-lg overflow-hidden rounded-xl border border-[#262626] bg-background opacity-60">
+        <div className="border-b border-border px-4 py-2 flex items-center gap-2">
+          <span className="text-muted">↗</span>
+          <span className="text-sm font-semibold text-muted">Position Updated</span>
+        </div>
+        <div className="px-4 py-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold text-foreground/60">{baseAsset}/USD</span>
+              <span className={`rounded-md px-1.5 py-0.5 text-[10px] font-bold ${posIsLong ? "bg-green-500/10 text-green-400/60" : "bg-red-500/10 text-red-400/60"}`}>
+                {String(initialPos.side)}
+              </span>
+              <span className="text-xs font-mono text-muted">{absSize < 0.01 ? absSize.toFixed(6) : absSize.toFixed(4)}</span>
+            </div>
+            <span className="text-xs text-muted">Added to position</span>
+          </div>
+          <div className="grid grid-cols-3 gap-2 text-[11px] text-muted">
+            <div>
+              <span>Entry</span>
+              <div className="font-mono text-foreground/50">{fmtPrice(entryP)}</div>
+            </div>
+            <div>
+              <span>Margin</span>
+              <div className="font-mono text-foreground/50">{formatUsd(usedMargin)}</div>
+            </div>
+            <div>
+              <span>Size</span>
+              <div className="font-mono text-foreground/50">{absSize < 0.01 ? absSize.toFixed(6) : absSize.toFixed(4)}</div>
+            </div>
+          </div>
+          <p className="text-[10px] text-[#555]">See latest card below for live position</p>
+        </div>
+      </div>
+    );
+  }
 
   if (closed) {
     const fp = frozenRef.current;

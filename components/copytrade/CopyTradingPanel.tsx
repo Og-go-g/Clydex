@@ -7,6 +7,24 @@ import { PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import { useToast } from "@/components/alerts/ToastProvider";
 
+// ─── Types ─────────────────────────────────────────────────────
+
+interface LeaderTradeLog {
+  symbol: string;
+  side: string;
+  size: string;
+  price: string | null;
+  status: string;
+  createdAt: string;
+}
+
+interface LeaderStats {
+  totalTrades: number;
+  filledTrades: number;
+  failedTrades: number;
+  totalPnl: number;
+}
+
 interface CopySubscriptionUI {
   id: string;
   leaderAddr: string;
@@ -15,6 +33,8 @@ interface CopySubscriptionUI {
   maxPositionUsdc: string | null;
   stopLossPct: string | null;
   active: boolean;
+  stats: LeaderStats;
+  recentTrades: LeaderTradeLog[];
 }
 
 interface CopyTradeLog {
@@ -42,8 +62,154 @@ interface CopyStatus {
 }
 
 function shortenAddr(addr: string): string {
+  if (addr.startsWith("account:")) return "#" + addr.slice(8);
   return addr.slice(0, 4) + "..." + addr.slice(-4);
 }
+
+function fmtUsd(n: number): string {
+  const abs = Math.abs(n);
+  if (abs >= 1_000_000) return (n > 0 ? "+" : "-") + "$" + (abs / 1_000_000).toFixed(1) + "M";
+  if (abs >= 1_000) return (n > 0 ? "+" : "-") + "$" + (abs / 1_000).toFixed(1) + "K";
+  if (abs > 0) return (n > 0 ? "+$" : "-$") + abs.toFixed(2);
+  return "$0";
+}
+
+// ─── Expandable Leader Card ────────────────────────────────────
+
+function LeaderCard({
+  sub,
+  expanded,
+  onToggleExpand,
+  onToggleActive,
+  onUnfollow,
+}: {
+  sub: CopySubscriptionUI;
+  expanded: boolean;
+  onToggleExpand: () => void;
+  onToggleActive: () => void;
+  onUnfollow: () => void;
+}) {
+  return (
+    <div className="rounded-lg border border-[#262626] bg-[#0a0a0a] overflow-hidden transition-all">
+      {/* Collapsed row — clickable to expand */}
+      <button
+        onClick={onToggleExpand}
+        className="w-full flex items-center justify-between px-3 py-2 hover:bg-[#111] transition-colors"
+      >
+        <div className="flex items-center gap-2">
+          <span className={`h-1.5 w-1.5 rounded-full flex-shrink-0 ${sub.active ? "bg-green-500" : "bg-[#555]"}`} />
+          <span className="text-xs font-mono text-[#ccc]">{shortenAddr(sub.leaderAddr)}</span>
+          <span className="text-[10px] text-[#666]">${parseFloat(sub.allocationUsdc).toFixed(0)}</span>
+          <span className="text-[10px] text-[#555]">{sub.leverageMult}x</span>
+        </div>
+        <div className="flex items-center gap-2">
+          {/* Per-leader PnL badge */}
+          {sub.stats.filledTrades > 0 && (
+            <span className={`text-[10px] font-mono ${sub.stats.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {fmtUsd(sub.stats.totalPnl)}
+            </span>
+          )}
+          <span className="text-[10px] text-[#555]">{sub.stats.filledTrades} trades</span>
+          {/* Chevron */}
+          <svg
+            width="10"
+            height="10"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            className={`text-[#555] transition-transform ${expanded ? "rotate-180" : ""}`}
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        </div>
+      </button>
+
+      {/* Expanded content */}
+      {expanded && (
+        <div className="border-t border-[#1a1a1a] px-3 py-2 space-y-2">
+          {/* Stats row */}
+          <div className="grid grid-cols-4 gap-2">
+            <div className="text-center">
+              <p className="text-[9px] text-[#555]">Filled</p>
+              <p className="text-[11px] font-mono text-emerald-400">{sub.stats.filledTrades}</p>
+            </div>
+            <div className="text-center">
+              <p className="text-[9px] text-[#555]">Failed</p>
+              <p className="text-[11px] font-mono text-red-400">{sub.stats.failedTrades}</p>
+            </div>
+            <div className="text-center">
+              <p className="text-[9px] text-[#555]">Total</p>
+              <p className="text-[11px] font-mono text-[#ccc]">{sub.stats.totalTrades}</p>
+            </div>
+            <div className="text-center">
+              <p className="text-[9px] text-[#555]">PnL</p>
+              <p className={`text-[11px] font-mono ${sub.stats.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                {fmtUsd(sub.stats.totalPnl)}
+              </p>
+            </div>
+          </div>
+
+          {/* Settings */}
+          <div className="flex flex-wrap gap-x-3 gap-y-1 text-[9px] text-[#666]">
+            <span>Allocation: <strong className="text-[#999]">${parseFloat(sub.allocationUsdc).toFixed(0)}</strong></span>
+            <span>Leverage: <strong className="text-[#999]">{sub.leverageMult}x</strong></span>
+            {sub.maxPositionUsdc && (
+              <span>Max pos: <strong className="text-[#999]">${parseFloat(sub.maxPositionUsdc).toFixed(0)}</strong></span>
+            )}
+            {sub.stopLossPct && (
+              <span>Stop loss: <strong className="text-[#999]">{sub.stopLossPct}%</strong></span>
+            )}
+          </div>
+
+          {/* Recent trades from this leader */}
+          {sub.recentTrades.length > 0 && (
+            <div>
+              <p className="text-[9px] text-[#555] mb-1">Recent Trades</p>
+              <div className="space-y-0.5">
+                {sub.recentTrades.map((t, i) => (
+                  <div key={i} className="flex items-center justify-between text-[9px] font-mono px-1.5 py-0.5 rounded bg-[#111]">
+                    <div className="flex items-center gap-1.5">
+                      <span className={`h-1 w-1 rounded-full ${t.status === "filled" ? "bg-emerald-500" : "bg-red-500"}`} />
+                      <span className={t.side === "Long" ? "text-emerald-400" : "text-red-400"}>{t.side}</span>
+                      <span className="text-[#ccc]">{t.symbol}</span>
+                      <span className="text-[#666]">{parseFloat(t.size).toFixed(4)}</span>
+                    </div>
+                    <span className="text-[#555]">
+                      {new Date(t.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Action buttons */}
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              onClick={(e) => { e.stopPropagation(); onToggleActive(); }}
+              className={`flex-1 rounded-lg py-1.5 text-[10px] font-medium transition-colors ${
+                sub.active
+                  ? "bg-yellow-500/10 text-yellow-400 hover:bg-yellow-500/20"
+                  : "bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20"
+              }`}
+            >
+              {sub.active ? "Pause" : "Resume"}
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onUnfollow(); }}
+              className="flex-1 rounded-lg py-1.5 text-[10px] font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
+            >
+              Unfollow
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Main Component ────────────────────────────────────────────
 
 /** Copy trading content without wrapper — used inside CopyTradeSection tabs */
 export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRefObject<(() => void) | null> }) {
@@ -56,6 +222,7 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
   const [unfollowTarget, setUnfollowTarget] = useState<string | null>(null);
   const [unfollowing, setUnfollowing] = useState(false);
   const [showDisableConfirm, setShowDisableConfirm] = useState(false);
+  const [expandedLeader, setExpandedLeader] = useState<string | null>(null);
   const { addToast } = useToast();
   const prevTradeCountRef = useRef<number>(0);
   const prevFilledRef = useRef<number>(0);
@@ -120,7 +287,6 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
     setActivating(true);
     setError(null);
     try {
-      // Create NordUser session in browser — wallet signs the session creation
       const { createNordUserWithSessionKey } = await import("@/lib/n1/user-client");
       const { sessionSecretKey, sessionId } = await createNordUserWithSessionKey({
         walletPubkey: publicKey,
@@ -128,7 +294,6 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
         signTransactionFn: signTransaction as (tx: import("@solana/web3.js").Transaction) => Promise<import("@solana/web3.js").Transaction>,
       });
 
-      // Send session key + sessionId to server for encrypted storage
       const res = await fetch("/api/copy/activate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -145,7 +310,6 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
       await fetchStatus();
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Activation failed";
-      // User rejected wallet signature
       if (msg.includes("User rejected") || msg.includes("rejected")) {
         setError("Wallet signature rejected");
       } else {
@@ -200,7 +364,7 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
           if (cr.closed > 0) addToast({ type: "success", title: "Positions Closed", message: `${cr.closed} position(s) closed` });
           if (cr.failed > 0) addToast({ type: "error", title: "Close Failed", message: `${cr.failed} position(s) failed to close` });
         }
-        addToast({ type: "info", title: "Unfollowed", message: `Stopped copying ${unfollowTarget.startsWith("account:") ? "#" + unfollowTarget.slice(8) : unfollowTarget.slice(0, 4) + "..." + unfollowTarget.slice(-4)}` });
+        addToast({ type: "info", title: "Unfollowed", message: `Stopped copying ${shortenAddr(unfollowTarget)}` });
       }
       await fetchStatus();
     } catch {
@@ -210,6 +374,11 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
       setUnfollowTarget(null);
     }
   };
+
+  // Computed: summary stats across all leaders
+  const totalAllocation = status?.subscriptions.reduce((sum, s) => sum + parseFloat(s.allocationUsdc), 0) ?? 0;
+  const activeLeaders = status?.subscriptions.filter((s) => s.active).length ?? 0;
+  const totalLeaderPnl = status?.subscriptions.reduce((sum, s) => sum + (s.stats?.totalPnl ?? 0), 0) ?? 0;
 
   return (
     <div className="px-3 py-2 space-y-2">
@@ -271,10 +440,10 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
         </div>
       )}
 
-      {/* Activated, show subscriptions */}
+      {/* Activated — dashboard */}
       {isAuthenticated && !loading && status?.sessionActive && (
         <>
-          {/* Session info */}
+          {/* Session bar */}
           <div className="flex items-center justify-between text-[10px] text-[#666]">
             <div className="flex items-center gap-1.5">
               <span className="h-1.5 w-1.5 rounded-full bg-green-500 animate-pulse" />
@@ -285,7 +454,36 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
             </button>
           </div>
 
-          {/* Subscriptions */}
+          {/* Multi-leader summary bar */}
+          {status.subscriptions.length > 0 && (
+            <div className="flex items-center gap-3 rounded-lg border border-[#262626] bg-[#0a0a0a] px-3 py-2 text-[10px]">
+              <div className="flex items-center gap-1">
+                <span className="text-[#555]">Leaders:</span>
+                <span className="text-[#ccc] font-medium">{activeLeaders}/{status.subscriptions.length}</span>
+              </div>
+              <div className="h-3 w-px bg-[#262626]" />
+              <div className="flex items-center gap-1">
+                <span className="text-[#555]">Allocated:</span>
+                <span className="text-[#ccc] font-medium">${totalAllocation.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+              </div>
+              <div className="h-3 w-px bg-[#262626]" />
+              <div className="flex items-center gap-1">
+                <span className="text-[#555]">Trades:</span>
+                <span className="text-[#ccc] font-medium">{status.stats.filledTrades}</span>
+              </div>
+              {status.stats.todayTrades > 0 && (
+                <>
+                  <div className="h-3 w-px bg-[#262626]" />
+                  <div className="flex items-center gap-1">
+                    <span className="text-[#555]">Today:</span>
+                    <span className="text-emerald-400 font-medium">{status.stats.todayTrades}</span>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Subscriptions — expandable cards */}
           {status.subscriptions.length === 0 ? (
             <div className="rounded-lg border border-dashed border-[#262626] p-3 text-center">
               <p className="text-[11px] text-[#666]">
@@ -295,38 +493,21 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
           ) : (
             <div className="space-y-1.5">
               {status.subscriptions.map((sub) => (
-                <div key={sub.id} className="flex items-center justify-between rounded-lg border border-[#262626] bg-[#0a0a0a] px-3 py-2">
-                  <div className="flex items-center gap-2">
-                    <span className={`h-1.5 w-1.5 rounded-full ${sub.active ? "bg-green-500" : "bg-[#555]"}`} />
-                    <span className="text-xs font-mono text-[#ccc]">{shortenAddr(sub.leaderAddr)}</span>
-                    <span className="text-[10px] text-[#666]">${parseFloat(sub.allocationUsdc).toFixed(0)}</span>
-                    <span className="text-[10px] text-[#555]">{sub.leverageMult}x</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      onClick={() => handleToggle(sub.id, !sub.active)}
-                      className={`rounded px-2 py-0.5 text-[10px] transition-colors ${
-                        sub.active ? "bg-green-500/10 text-green-400 hover:bg-green-500/20" : "bg-[#222] text-[#666] hover:text-[#999]"
-                      }`}
-                    >
-                      {sub.active ? "Active" : "Paused"}
-                    </button>
-                    <button
-                      onClick={() => setUnfollowTarget(sub.leaderAddr)}
-                      className="rounded p-1 text-[#555] hover:text-red-400 transition-colors"
-                      title="Unfollow"
-                    >
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-                      </svg>
-                    </button>
-                  </div>
-                </div>
+                <LeaderCard
+                  key={sub.id}
+                  sub={sub}
+                  expanded={expandedLeader === sub.leaderAddr}
+                  onToggleExpand={() =>
+                    setExpandedLeader((prev) => (prev === sub.leaderAddr ? null : sub.leaderAddr))
+                  }
+                  onToggleActive={() => handleToggle(sub.id, !sub.active)}
+                  onUnfollow={() => setUnfollowTarget(sub.leaderAddr)}
+                />
               ))}
             </div>
           )}
 
-          {/* Stats */}
+          {/* Global stats */}
           {status.stats.totalTrades > 0 && (
             <div className="flex items-center gap-3 text-[10px] text-[#555] pt-1">
               <span>{status.stats.filledTrades} filled</span>

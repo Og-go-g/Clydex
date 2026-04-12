@@ -5,9 +5,10 @@ import { useAuth } from "@/lib/auth/context";
 import { CopyTradingContent } from "./CopyTradingPanel";
 import { LeaderboardContent } from "./CompactLeaderboard";
 import { FollowTraderDialog } from "./FollowTraderDialog";
+import { CopyHistoryTab } from "./CopyHistoryTab";
 import type { LeaderboardEntry } from "./CompactLeaderboard";
 
-type Tab = "leaderboard" | "copy";
+type Tab = "leaderboard" | "copy" | "history";
 
 export function CopyTradeSection() {
   const { isAuthenticated } = useAuth();
@@ -33,6 +34,7 @@ export function CopyTradeSection() {
   const tabs: { key: Tab; label: string }[] = [
     { key: "copy", label: "Copy Trading" },
     { key: "leaderboard", label: "Top Traders" },
+    { key: "history", label: "History" },
   ];
 
   return (
@@ -58,6 +60,7 @@ export function CopyTradeSection() {
       <div className="flex-1 min-h-0 overflow-y-auto">
         {activeTab === "leaderboard" && <LeaderboardContent onCopyTrader={handleCopyTrader} />}
         {activeTab === "copy" && <CopyTradingContent onRefreshRef={refreshRef} />}
+        {activeTab === "history" && <CopyHistoryTab />}
       </div>
 
       {/* Follow Trader Dialog */}
