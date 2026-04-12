@@ -61,6 +61,7 @@ export async function GET() {
         allocationUsdc: s.allocationUsdc,
         leverageMult: s.leverageMult,
         maxPositionUsdc: s.maxPositionUsdc,
+        maxTotalPositionUsdc: s.maxTotalPositionUsdc,
         stopLossPct: s.stopLossPct,
         active: s.active,
         stats: leaderStatsMap[s.leaderAddr] ?? { totalTrades: 0, filledTrades: 0, failedTrades: 0, totalVolume: 0 },

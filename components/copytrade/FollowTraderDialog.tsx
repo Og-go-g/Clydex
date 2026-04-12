@@ -46,6 +46,7 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
   const [allocation, setAllocation] = useState("100");
   const [leverage, setLeverage] = useState(1);
   const [maxPosition, setMaxPosition] = useState("");
+  const [maxTotal, setMaxTotal] = useState("");
   const [stopLoss, setStopLoss] = useState("");
 
   // Flow state
@@ -70,6 +71,7 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
     setAllocation("100");
     setLeverage(1);
     setMaxPosition("");
+    setMaxTotal("");
     setStopLoss("");
     onClose();
   }, [step, onClose]);
@@ -85,6 +87,13 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
     const val = e.target.value;
     if (val === "" || /^\d*\.?\d{0,2}$/.test(val)) {
       setMaxPosition(val);
+    }
+  }, []);
+
+  const handleMaxTotalChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    if (val === "" || /^\d*\.?\d{0,2}$/.test(val)) {
+      setMaxTotal(val);
     }
   }, []);
 
@@ -121,8 +130,14 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
         return "Max position must be greater than $0";
       }
     }
+    if (maxTotal) {
+      const mt = parseFloat(maxTotal);
+      if (isNaN(mt) || mt <= 0) {
+        return "Max total must be greater than $0";
+      }
+    }
     return null;
-  }, [allocation, stopLoss, maxPosition]);
+  }, [allocation, stopLoss, maxPosition, maxTotal]);
 
   const handleConfirm = useCallback(() => {
     const err = validate();
@@ -145,6 +160,7 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
         leverageMult: leverage,
       };
       if (maxPosition) body.maxPositionUsdc = parseFloat(maxPosition);
+      if (maxTotal) body.maxTotalPositionUsdc = parseFloat(maxTotal);
       if (stopLoss) body.stopLossPct = parseFloat(stopLoss);
 
       const res = await fetch("/api/copy/subscribe", {
@@ -171,7 +187,7 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
       setError("Network error — please try again");
       setStep("error");
     }
-  }, [trader.walletAddr, allocation, leverage, maxPosition, stopLoss, handleClose, onSuccess]);
+  }, [trader.walletAddr, allocation, leverage, maxPosition, maxTotal, stopLoss, handleClose, onSuccess]);
 
   if (!isOpen) return null;
 
@@ -303,11 +319,11 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
                     </div>
                   </div>
 
-                  {/* Max position & stop loss — compact row */}
-                  <div className="mb-5 grid grid-cols-2 gap-3">
+                  {/* Limits — compact row */}
+                  <div className="mb-3 grid grid-cols-2 gap-3">
                     <div>
                       <label className="mb-1.5 flex items-center gap-1 text-xs font-medium text-gray-400">
-                        Max Position
+                        Max / Market
                         <span className="text-[10px] text-gray-600">optional</span>
                       </label>
                       <div className="relative">
@@ -324,20 +340,37 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
                     </div>
                     <div>
                       <label className="mb-1.5 flex items-center gap-1 text-xs font-medium text-gray-400">
-                        Stop Loss
+                        Max Total
                         <span className="text-[10px] text-gray-600">optional</span>
                       </label>
                       <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-gray-500">$</span>
                         <input
                           type="text"
                           inputMode="decimal"
-                          value={stopLoss}
-                          onChange={handleStopLossChange}
-                          placeholder="None"
-                          className="w-full rounded-xl border border-[#262626] bg-[#141414] py-2.5 pl-3 pr-6 text-xs font-mono text-white placeholder-gray-600 outline-none transition-colors focus:border-emerald-500/50"
+                          value={maxTotal}
+                          onChange={handleMaxTotalChange}
+                          placeholder="No limit"
+                          className="w-full rounded-xl border border-[#262626] bg-[#141414] py-2.5 pl-6 pr-3 text-xs font-mono text-white placeholder-gray-600 outline-none transition-colors focus:border-emerald-500/50"
                         />
-                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-500">%</span>
                       </div>
+                    </div>
+                  </div>
+                  <div className="mb-5">
+                    <label className="mb-1.5 flex items-center gap-1 text-xs font-medium text-gray-400">
+                      Stop Loss
+                      <span className="text-[10px] text-gray-600">optional</span>
+                    </label>
+                    <div className="relative max-w-[50%]">
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={stopLoss}
+                        onChange={handleStopLossChange}
+                        placeholder="None"
+                        className="w-full rounded-xl border border-[#262626] bg-[#141414] py-2.5 pl-3 pr-6 text-xs font-mono text-white placeholder-gray-600 outline-none transition-colors focus:border-emerald-500/50"
+                      />
+                      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-500">%</span>
                     </div>
                   </div>
 
@@ -352,8 +385,12 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
                       <span className="font-mono text-white">{leverage}x</span>
                     </div>
                     <div className="flex justify-between text-xs">
-                      <span className="text-gray-400">Max Position</span>
+                      <span className="text-gray-400">Max / Market</span>
                       <span className="font-mono text-white">{maxPosition ? `$${parseFloat(maxPosition).toLocaleString()}` : "Unlimited"}</span>
+                    </div>
+                    <div className="flex justify-between text-xs">
+                      <span className="text-gray-400">Max Total</span>
+                      <span className="font-mono text-white">{maxTotal ? `$${parseFloat(maxTotal).toLocaleString()}` : "Unlimited"}</span>
                     </div>
                     <div className="flex justify-between text-xs">
                       <span className="text-gray-400">Stop Loss</span>
@@ -406,8 +443,14 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
                       </div>
                       {maxPosition && (
                         <div className="flex justify-between text-xs">
-                          <span className="text-gray-400">Max Position</span>
+                          <span className="text-gray-400">Max / Market</span>
                           <span className="font-mono text-white">${parseFloat(maxPosition).toLocaleString()}</span>
+                        </div>
+                      )}
+                      {maxTotal && (
+                        <div className="flex justify-between text-xs">
+                          <span className="text-gray-400">Max Total</span>
+                          <span className="font-mono text-white">${parseFloat(maxTotal).toLocaleString()}</span>
                         </div>
                       )}
                       {stopLoss && (

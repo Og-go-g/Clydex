@@ -4,6 +4,7 @@ import {
   createSubscription,
   getSubscriptions,
   toggleSubscription,
+  updateSubscriptionSettings,
   deleteSubscription,
 } from "@/lib/copy/queries";
 import { closeFollowerPositions } from "@/lib/copy/close-positions";
@@ -21,7 +22,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json();
-    const { leaderAddr, allocationUsdc, leverageMult, maxPositionUsdc, stopLossPct } = body;
+    const { leaderAddr, allocationUsdc, leverageMult, maxPositionUsdc, maxTotalPositionUsdc, stopLossPct } = body;
 
     const isAccountId = typeof leaderAddr === "string" && leaderAddr.startsWith("account:");
     const isSolanaAddr = typeof leaderAddr === "string" && leaderAddr.length >= 32 && leaderAddr.length <= 44;
@@ -50,6 +51,7 @@ export async function POST(req: NextRequest) {
       allocationUsdc,
       leverageMult: leverageMult ?? 1.0,
       maxPositionUsdc: maxPositionUsdc ?? undefined,
+      maxTotalPositionUsdc: maxTotalPositionUsdc ?? undefined,
       stopLossPct: stopLossPct ?? undefined,
     });
 
@@ -76,8 +78,8 @@ export async function GET() {
 
 /**
  * PATCH /api/copy/subscribe
- * Toggle a subscription active/paused.
- * Body: { id, active }
+ * Update subscription settings.
+ * Body: { id, active?, allocationUsdc?, leverageMult?, maxPositionUsdc?, maxTotalPositionUsdc?, stopLossPct? }
  */
 export async function PATCH(req: NextRequest) {
   const addr = await getAuthAddress();
@@ -87,23 +89,52 @@ export async function PATCH(req: NextRequest) {
 
   try {
     const body = await req.json();
-    const { id, active } = body;
+    const { id, active, allocationUsdc, leverageMult, maxPositionUsdc, maxTotalPositionUsdc, stopLossPct } = body;
 
-    if (!id || typeof active !== "boolean") {
-      return NextResponse.json({ error: "id and active (boolean) are required" }, { status: 400 });
+    if (!id) {
+      return NextResponse.json({ error: "id is required" }, { status: 400 });
     }
 
-    // Verify ownership: fetch subscription and check followerAddr
+    // Verify ownership
     const subs = await getSubscriptions(addr);
     const sub = subs.find((s) => s.id === id);
     if (!sub) {
       return NextResponse.json({ error: "Subscription not found" }, { status: 404 });
     }
 
-    await toggleSubscription(id, active);
+    // Validate fields if provided
+    if (allocationUsdc !== undefined) {
+      if (typeof allocationUsdc !== "number" || allocationUsdc < 10 || allocationUsdc > 10_000_000) {
+        return NextResponse.json({ error: "allocationUsdc must be between $10 and $10,000,000" }, { status: 400 });
+      }
+    }
+    if (leverageMult !== undefined) {
+      if (typeof leverageMult !== "number" || leverageMult < 1 || leverageMult > 5) {
+        return NextResponse.json({ error: "leverageMult must be between 1 and 5" }, { status: 400 });
+      }
+    }
+    if (active !== undefined && typeof active !== "boolean") {
+      return NextResponse.json({ error: "active must be boolean" }, { status: 400 });
+    }
+
+    // Build settings update — only toggle if that's the only field
+    const hasSettings = allocationUsdc !== undefined || leverageMult !== undefined ||
+      maxPositionUsdc !== undefined || maxTotalPositionUsdc !== undefined || stopLossPct !== undefined;
+
+    if (hasSettings || active !== undefined) {
+      await updateSubscriptionSettings(id, {
+        ...(allocationUsdc !== undefined && { allocationUsdc }),
+        ...(leverageMult !== undefined && { leverageMult }),
+        ...(maxPositionUsdc !== undefined && { maxPositionUsdc: maxPositionUsdc || null }),
+        ...(maxTotalPositionUsdc !== undefined && { maxTotalPositionUsdc: maxTotalPositionUsdc || null }),
+        ...(stopLossPct !== undefined && { stopLossPct: stopLossPct || null }),
+        ...(active !== undefined && { active }),
+      });
+    }
+
     return NextResponse.json({ success: true });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Toggle failed";
+    const message = err instanceof Error ? err.message : "Update failed";
     return NextResponse.json({ error: message }, { status: 400 });
   }
 }

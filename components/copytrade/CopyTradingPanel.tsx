@@ -31,6 +31,7 @@ interface CopySubscriptionUI {
   allocationUsdc: string;
   leverageMult: string;
   maxPositionUsdc: string | null;
+  maxTotalPositionUsdc: string | null;
   stopLossPct: string | null;
   active: boolean;
   stats: LeaderStats;
@@ -82,16 +83,53 @@ function LeaderCard({
   onToggleExpand,
   onToggleActive,
   onUnfollow,
+  onSaveSettings,
 }: {
   sub: CopySubscriptionUI;
   expanded: boolean;
   onToggleExpand: () => void;
   onToggleActive: () => void;
   onUnfollow: () => void;
+  onSaveSettings: (id: string, settings: Record<string, unknown>) => Promise<void>;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [editAlloc, setEditAlloc] = useState("");
+  const [editLev, setEditLev] = useState(1);
+  const [editMaxPos, setEditMaxPos] = useState("");
+  const [editMaxTotal, setEditMaxTotal] = useState("");
+  const [editSL, setEditSL] = useState("");
+
+  const startEdit = () => {
+    setEditAlloc(parseFloat(sub.allocationUsdc).toFixed(0));
+    setEditLev(parseFloat(sub.leverageMult));
+    setEditMaxPos(sub.maxPositionUsdc ? parseFloat(sub.maxPositionUsdc).toFixed(0) : "");
+    setEditMaxTotal(sub.maxTotalPositionUsdc ? parseFloat(sub.maxTotalPositionUsdc).toFixed(0) : "");
+    setEditSL(sub.stopLossPct ?? "");
+    setEditing(true);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await onSaveSettings(sub.id, {
+        allocationUsdc: parseFloat(editAlloc) || undefined,
+        leverageMult: editLev,
+        maxPositionUsdc: editMaxPos ? parseFloat(editMaxPos) : null,
+        maxTotalPositionUsdc: editMaxTotal ? parseFloat(editMaxTotal) : null,
+        stopLossPct: editSL ? parseFloat(editSL) : null,
+      });
+      setEditing(false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const inputCls = "w-full rounded border border-[#333] bg-[#111] px-1.5 py-1 text-[10px] font-mono text-[#ccc] outline-none focus:border-emerald-500/40";
+
   return (
     <div className="rounded-lg border border-[#262626] bg-[#0a0a0a] overflow-hidden transition-all">
-      {/* Collapsed row — clickable to expand */}
+      {/* Collapsed row */}
       <button
         onClick={onToggleExpand}
         className="w-full flex items-center justify-between px-3 py-2 hover:bg-[#111] transition-colors"
@@ -103,23 +141,14 @@ function LeaderCard({
           <span className="text-[10px] text-[#555]">{sub.leverageMult}x</span>
         </div>
         <div className="flex items-center gap-2">
-          {/* Per-leader volume badge */}
           {sub.stats.filledTrades > 0 && (
             <span className="text-[10px] font-mono text-[#888]">
               Vol {fmtUsd(sub.stats.totalVolume)}
             </span>
           )}
           <span className="text-[10px] text-[#555]">{sub.stats.filledTrades} trades</span>
-          {/* Chevron */}
-          <svg
-            width="10"
-            height="10"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            className={`text-[#555] transition-transform ${expanded ? "rotate-180" : ""}`}
-          >
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+            className={`text-[#555] transition-transform ${expanded ? "rotate-180" : ""}`}>
             <polyline points="6 9 12 15 18 9" />
           </svg>
         </div>
@@ -144,25 +173,92 @@ function LeaderCard({
             </div>
             <div className="text-center">
               <p className="text-[9px] text-[#555]">Volume</p>
-              <p className="text-[11px] font-mono text-[#ccc]">
-                {fmtUsd(sub.stats.totalVolume)}
-              </p>
+              <p className="text-[11px] font-mono text-[#ccc]">{fmtUsd(sub.stats.totalVolume)}</p>
             </div>
           </div>
 
-          {/* Settings */}
-          <div className="flex flex-wrap gap-x-3 gap-y-1 text-[9px] text-[#666]">
-            <span>Allocation: <strong className="text-[#999]">${parseFloat(sub.allocationUsdc).toFixed(0)}</strong></span>
-            <span>Leverage: <strong className="text-[#999]">{sub.leverageMult}x</strong></span>
-            {sub.maxPositionUsdc && (
-              <span>Max pos: <strong className="text-[#999]">${parseFloat(sub.maxPositionUsdc).toFixed(0)}</strong></span>
-            )}
-            {sub.stopLossPct && (
-              <span>Stop loss: <strong className="text-[#999]">{sub.stopLossPct}%</strong></span>
-            )}
-          </div>
+          {/* Settings — read-only or edit mode */}
+          {!editing ? (
+            <>
+              <div className="flex items-center justify-between">
+                <div className="flex flex-wrap gap-x-3 gap-y-1 text-[9px] text-[#666]">
+                  <span>Allocation: <strong className="text-[#999]">${parseFloat(sub.allocationUsdc).toFixed(0)}</strong></span>
+                  <span>Leverage: <strong className="text-[#999]">{sub.leverageMult}x</strong></span>
+                  {sub.maxPositionUsdc && (
+                    <span>Max/mkt: <strong className="text-[#999]">${parseFloat(sub.maxPositionUsdc).toFixed(0)}</strong></span>
+                  )}
+                  {sub.maxTotalPositionUsdc && (
+                    <span>Max total: <strong className="text-[#999]">${parseFloat(sub.maxTotalPositionUsdc).toFixed(0)}</strong></span>
+                  )}
+                  {sub.stopLossPct && (
+                    <span>SL: <strong className="text-[#999]">{sub.stopLossPct}%</strong></span>
+                  )}
+                </div>
+                <button
+                  onClick={(e) => { e.stopPropagation(); startEdit(); }}
+                  className="text-[9px] text-emerald-400/60 hover:text-emerald-400 transition-colors"
+                >
+                  Edit
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="space-y-1.5 rounded border border-emerald-500/10 bg-emerald-500/5 p-2">
+              <div className="grid grid-cols-2 gap-1.5">
+                <div>
+                  <label className="text-[8px] text-[#666]">Allocation ($)</label>
+                  <input type="text" inputMode="decimal" value={editAlloc}
+                    onChange={(e) => /^\d*$/.test(e.target.value) && setEditAlloc(e.target.value)}
+                    className={inputCls} />
+                </div>
+                <div>
+                  <label className="text-[8px] text-[#666]">Leverage</label>
+                  <div className="flex gap-1">
+                    {[1, 2, 3, 5].map((v) => (
+                      <button key={v} onClick={() => setEditLev(v)}
+                        className={`flex-1 rounded border py-0.5 text-[9px] font-medium transition-colors ${
+                          editLev === v ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400" : "border-[#333] text-[#666] hover:text-[#999]"
+                        }`}>
+                        {v}x
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-1.5">
+                <div>
+                  <label className="text-[8px] text-[#666]">Max/market ($)</label>
+                  <input type="text" inputMode="decimal" value={editMaxPos} placeholder="No limit"
+                    onChange={(e) => /^\d*$/.test(e.target.value) && setEditMaxPos(e.target.value)}
+                    className={inputCls} />
+                </div>
+                <div>
+                  <label className="text-[8px] text-[#666]">Max total ($)</label>
+                  <input type="text" inputMode="decimal" value={editMaxTotal} placeholder="No limit"
+                    onChange={(e) => /^\d*$/.test(e.target.value) && setEditMaxTotal(e.target.value)}
+                    className={inputCls} />
+                </div>
+                <div>
+                  <label className="text-[8px] text-[#666]">Stop loss (%)</label>
+                  <input type="text" inputMode="decimal" value={editSL} placeholder="None"
+                    onChange={(e) => /^\d*\.?\d?$/.test(e.target.value) && setEditSL(e.target.value)}
+                    className={inputCls} />
+                </div>
+              </div>
+              <div className="flex gap-1.5 pt-0.5">
+                <button onClick={() => setEditing(false)} disabled={saving}
+                  className="flex-1 rounded py-1 text-[9px] text-[#666] hover:text-[#999] transition-colors border border-[#333]">
+                  Cancel
+                </button>
+                <button onClick={handleSave} disabled={saving}
+                  className="flex-1 rounded py-1 text-[9px] font-medium text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20 transition-colors disabled:opacity-50">
+                  {saving ? "Saving..." : "Save"}
+                </button>
+              </div>
+            </div>
+          )}
 
-          {/* Recent trades from this leader */}
+          {/* Recent trades */}
           {sub.recentTrades.length > 0 && (
             <div>
               <p className="text-[9px] text-[#555] mb-1">Recent Trades</p>
@@ -192,14 +288,12 @@ function LeaderCard({
                 sub.active
                   ? "bg-yellow-500/10 text-yellow-400 hover:bg-yellow-500/20"
                   : "bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20"
-              }`}
-            >
+              }`}>
               {sub.active ? "Pause" : "Resume"}
             </button>
             <button
               onClick={(e) => { e.stopPropagation(); onUnfollow(); }}
-              className="flex-1 rounded-lg py-1.5 text-[10px] font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
-            >
+              className="flex-1 rounded-lg py-1.5 text-[10px] font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors">
               Unfollow
             </button>
           </div>
@@ -347,6 +441,25 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
       await fetchStatus();
     } catch {
       // ignore
+    }
+  };
+
+  const handleSaveSettings = async (subId: string, settings: Record<string, unknown>) => {
+    try {
+      const res = await fetch("/api/copy/subscribe", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: subId, ...settings }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        addToast({ type: "error", title: "Save Failed", message: data.error ?? "Unknown error" });
+        return;
+      }
+      addToast({ type: "success", title: "Settings Saved", message: "Subscription updated" });
+      await fetchStatus();
+    } catch {
+      addToast({ type: "error", title: "Error", message: "Network error" });
     }
   };
 
@@ -501,6 +614,7 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
                   }
                   onToggleActive={() => handleToggle(sub.id, !sub.active)}
                   onUnfollow={() => setUnfollowTarget(sub.leaderAddr)}
+                  onSaveSettings={handleSaveSettings}
                 />
               ))}
             </div>

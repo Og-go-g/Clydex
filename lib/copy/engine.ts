@@ -247,10 +247,35 @@ async function executeCopyForFollower(
     return { success: false, error: "Invalid mark price" };
   }
 
-  // Cap at maxPositionUsdc
+  // Cap at maxPositionUsdc (per-market)
   const maxPos = follower.maxPositionUsdc ? parseFloat(follower.maxPositionUsdc) : null;
   if (maxPos && isFinite(maxPos) && maxPos > 0) {
     followerDelta = Math.min(followerDelta, maxPos / markPrice);
+  }
+
+  // Cap at maxTotalPositionUsdc (global across all markets)
+  const maxTotal = follower.maxTotalPositionUsdc ? parseFloat(follower.maxTotalPositionUsdc) : null;
+  if (maxTotal && isFinite(maxTotal) && maxTotal > 0 && diff.action !== "close" && diff.action !== "decrease") {
+    try {
+      const followerAccountId = await resolveAccountId(follower.followerAddr);
+      if (followerAccountId !== null) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const followerAccount = await getAccount(followerAccountId) as any;
+        const positions = (followerAccount?.positions ?? []) as Array<{ perp?: { baseSize?: number; price?: number } }>;
+        const existingNotional = positions.reduce((sum, p) => {
+          const bs = Math.abs(p.perp?.baseSize ?? 0);
+          const pr = p.perp?.price ?? 0;
+          return sum + bs * pr;
+        }, 0);
+        const remainingBudget = maxTotal - existingNotional;
+        if (remainingBudget <= 0) {
+          return { success: false, error: `Global cap reached: $${existingNotional.toFixed(0)}/$${maxTotal.toFixed(0)}` };
+        }
+        followerDelta = Math.min(followerDelta, remainingBudget / markPrice);
+      }
+    } catch {
+      // If global cap check fails, continue with per-market cap only
+    }
   }
 
   // Skip tiny orders

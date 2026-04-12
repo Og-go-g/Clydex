@@ -22,6 +22,7 @@ export interface CopySubscription extends Record<string, unknown> {
   allocationUsdc: string;
   leverageMult: string;
   maxPositionUsdc: string | null;
+  maxTotalPositionUsdc: string | null;
   stopLossPct: string | null;
   active: boolean;
   createdAt: Date;
@@ -106,16 +107,18 @@ export async function createSubscription(params: {
   allocationUsdc: number;
   leverageMult?: number;
   maxPositionUsdc?: number;
+  maxTotalPositionUsdc?: number;
   stopLossPct?: number;
 }): Promise<string> {
   const id = uuid();
   await execute(
-    `INSERT INTO copy_subscriptions (id, follower_addr, leader_addr, allocation_usdc, leverage_mult, max_position_usdc, stop_loss_pct)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `INSERT INTO copy_subscriptions (id, follower_addr, leader_addr, allocation_usdc, leverage_mult, max_position_usdc, max_total_position_usdc, stop_loss_pct)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      ON CONFLICT (follower_addr, leader_addr) DO UPDATE SET
        allocation_usdc = EXCLUDED.allocation_usdc,
        leverage_mult = EXCLUDED.leverage_mult,
        max_position_usdc = EXCLUDED.max_position_usdc,
+       max_total_position_usdc = EXCLUDED.max_total_position_usdc,
        stop_loss_pct = EXCLUDED.stop_loss_pct,
        active = TRUE,
        updated_at = NOW()`,
@@ -126,6 +129,7 @@ export async function createSubscription(params: {
       params.allocationUsdc,
       params.leverageMult ?? 1.0,
       params.maxPositionUsdc ?? null,
+      params.maxTotalPositionUsdc ?? null,
       params.stopLossPct ?? null,
     ],
   );
@@ -136,7 +140,7 @@ export async function getSubscriptions(followerAddr: string): Promise<CopySubscr
   return query<CopySubscription>(
     `SELECT id, follower_addr AS "followerAddr", leader_addr AS "leaderAddr",
             allocation_usdc AS "allocationUsdc", leverage_mult AS "leverageMult",
-            max_position_usdc AS "maxPositionUsdc", stop_loss_pct AS "stopLossPct",
+            max_position_usdc AS "maxPositionUsdc", max_total_position_usdc AS "maxTotalPositionUsdc", stop_loss_pct AS "stopLossPct",
             active, created_at AS "createdAt", updated_at AS "updatedAt"
      FROM copy_subscriptions
      WHERE follower_addr = $1
@@ -149,11 +153,67 @@ export async function getActiveSubscriptionsByLeader(leaderAddr: string): Promis
   return query<CopySubscription>(
     `SELECT id, follower_addr AS "followerAddr", leader_addr AS "leaderAddr",
             allocation_usdc AS "allocationUsdc", leverage_mult AS "leverageMult",
-            max_position_usdc AS "maxPositionUsdc", stop_loss_pct AS "stopLossPct",
+            max_position_usdc AS "maxPositionUsdc", max_total_position_usdc AS "maxTotalPositionUsdc", stop_loss_pct AS "stopLossPct",
             active, created_at AS "createdAt", updated_at AS "updatedAt"
      FROM copy_subscriptions
      WHERE leader_addr = $1 AND active = TRUE`,
     [leaderAddr],
+  );
+}
+
+export async function updateSubscriptionSettings(
+  id: string,
+  settings: {
+    allocationUsdc?: number;
+    leverageMult?: number;
+    maxPositionUsdc?: number | null;
+    maxTotalPositionUsdc?: number | null;
+    stopLossPct?: number | null;
+    active?: boolean;
+  },
+): Promise<void> {
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  let idx = 1;
+
+  if (settings.allocationUsdc !== undefined) {
+    sets.push(`allocation_usdc = $${idx}`);
+    params.push(settings.allocationUsdc);
+    idx++;
+  }
+  if (settings.leverageMult !== undefined) {
+    sets.push(`leverage_mult = $${idx}`);
+    params.push(settings.leverageMult);
+    idx++;
+  }
+  if (settings.maxPositionUsdc !== undefined) {
+    sets.push(`max_position_usdc = $${idx}`);
+    params.push(settings.maxPositionUsdc);
+    idx++;
+  }
+  if (settings.maxTotalPositionUsdc !== undefined) {
+    sets.push(`max_total_position_usdc = $${idx}`);
+    params.push(settings.maxTotalPositionUsdc);
+    idx++;
+  }
+  if (settings.stopLossPct !== undefined) {
+    sets.push(`stop_loss_pct = $${idx}`);
+    params.push(settings.stopLossPct);
+    idx++;
+  }
+  if (settings.active !== undefined) {
+    sets.push(`active = $${idx}`);
+    params.push(settings.active);
+    idx++;
+  }
+
+  if (sets.length === 0) return;
+
+  sets.push("updated_at = NOW()");
+  params.push(id);
+  await execute(
+    `UPDATE copy_subscriptions SET ${sets.join(", ")} WHERE id = $${idx}`,
+    params,
   );
 }
 
@@ -279,7 +339,7 @@ export async function getFollowersForLeader(leaderAddr: string): Promise<CopySub
   return query<CopySubscription>(
     `SELECT id, follower_addr AS "followerAddr", leader_addr AS "leaderAddr",
             allocation_usdc AS "allocationUsdc", leverage_mult AS "leverageMult",
-            max_position_usdc AS "maxPositionUsdc", stop_loss_pct AS "stopLossPct",
+            max_position_usdc AS "maxPositionUsdc", max_total_position_usdc AS "maxTotalPositionUsdc", stop_loss_pct AS "stopLossPct",
             active, created_at AS "createdAt", updated_at AS "updatedAt"
      FROM copy_subscriptions
      WHERE leader_addr = $1 AND active = TRUE`,

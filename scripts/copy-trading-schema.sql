@@ -53,7 +53,7 @@ CREATE INDEX IF NOT EXISTS idx_copy_snapshots_leader ON copy_snapshots (leader_a
 -- Executed copy trades
 CREATE TABLE IF NOT EXISTS copy_trades (
   id                TEXT PRIMARY KEY,
-  subscription_id   TEXT NOT NULL REFERENCES copy_subscriptions(id) ON DELETE CASCADE,
+  subscription_id   TEXT REFERENCES copy_subscriptions(id) ON DELETE SET NULL,
   follower_addr     TEXT NOT NULL,
   leader_addr       TEXT NOT NULL,
   market_id         INT NOT NULL,
@@ -73,5 +73,8 @@ CREATE INDEX IF NOT EXISTS idx_copy_trades_sub ON copy_trades (subscription_id);
 CREATE INDEX IF NOT EXISTS idx_copy_trades_follower ON copy_trades (follower_addr, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_copy_trades_leader ON copy_trades (leader_addr, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_copy_trades_status ON copy_trades (status) WHERE status = 'pending';
+
+-- Migration: add max_total_position_usdc (global cap across all markets)
+ALTER TABLE copy_subscriptions ADD COLUMN IF NOT EXISTS max_total_position_usdc NUMERIC(30,18);
 
 COMMIT;
