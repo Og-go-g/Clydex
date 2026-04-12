@@ -4,7 +4,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { z } from "zod";
 import { getAuthAddress } from "@/lib/auth/session";
 import { memRateLimit, memCleanup, chatLimiter } from "@/lib/ratelimit";
-import { getLeaderboard, getTraderProfile } from "@/lib/copytrade/leaderboard";
+import { getLeaderboard, getTraderProfile, getTopTradersByMarket } from "@/lib/copytrade/leaderboard";
 import { isSessionActive } from "@/lib/copy/session-activator";
 import {
   getSubscriptions,
@@ -88,14 +88,51 @@ When analyzing traders:
 - Note which markets the trader specializes in
 
 ═══════════════════════════════════════════════════════
+ UNDERSTANDING USER REQUESTS
+═══════════════════════════════════════════════════════
+
+Parse what the user wants INTELLIGENTLY:
+
+"top trader on ETH" / "best ETH trader" / "лучший трейдер на эфире"
+  → Use findTopTraderByMarket(symbol: "ETHUSD")
+
+"top traders this week" / "лидерборд за неделю"
+  → Use getLeaderboard(period: "7d")
+
+"analyze #7915" / "покажи профиль 7915"
+  → Use getTraderProfile(address: "account:7915")
+
+"copy #7915 with $200" / "скопируй 7915 на 200 долларов"
+  → Use followTrader(leaderAddr: "account:7915", allocationUsdc: 200)
+
+"my copies" / "мои подписки" / "what am I copying?"
+  → Use getCopyStatus()
+
+"who should I copy?" / "кого посоветуешь?"
+  → Use suggestTrader() with appropriate risk level
+
+"compare #7915 and #546"
+  → Use compareTraders(addresses: ["account:7915", "account:546"])
+
+"what positions does #7915 have?"
+  → Use getTraderPositions(address: "account:7915")
+
+"stop copying #7915" / "отпишись от 7915"
+  → Use unfollowTrader(leaderAddr: "account:7915")
+
+IMPORTANT: When user mentions a trader by number (7915, 546), always convert to "account:7915" format.
+When user mentions a market by name (ETH, BTC, SOL), always convert to "ETHUSD", "BTCUSD", "SOLUSD".
+
+═══════════════════════════════════════════════════════
  FORMATTING RULES
 ═══════════════════════════════════════════════════════
 
-- Present leaderboard as clean formatted table
+- Present data as clean formatted tables with emojis for visual clarity
 - Abbreviate addresses: "account:7915" → "#7915", full addr → first4...last4
 - Format PnL: +$1,234.56 or -$567.89
-- Keep responses concise — data first, commentary second
-- After ANY tool call, provide ONE short analysis sentence
+- Keep responses concise — data first, short analysis after
+- After ANY tool call, give brief actionable insight (1-2 sentences max)
+- Use markdown: **bold** for key metrics, tables for comparisons
 
 ═══════════════════════════════════════════════════════
  SAFETY
@@ -458,6 +495,43 @@ export async function POST(req: Request) {
           } catch (err) {
             console.error("[copytrade] suggestTrader failed:", err);
             return { error: "Failed to generate suggestions." };
+          }
+        },
+      }),
+
+      // ─── Find Top Trader by Market ────────────────────
+      findTopTraderByMarket: tool({
+        description:
+          "Find the best traders on a specific market (BTC, ETH, SOL, etc). Use when user asks about 'best trader on ETH', 'top BTC trader', 'лучший трейдер на эфире', or any market-specific query. Accepts common names: BTC, ETH, SOL, DOGE, etc.",
+        inputSchema: zodSchema(
+          z.object({
+            symbol: z.string().describe("Market symbol: BTC, ETH, SOL, etc. Will be normalized to BTCUSD format"),
+            period: z.enum(["7d", "30d", "all"]).optional().describe("Time period (default: all)"),
+            limit: z.number().min(1).max(20).optional().describe("Number of results (default: 5)"),
+          }),
+        ),
+        execute: async ({ symbol, period, limit }) => {
+          try {
+            const data = await getTopTradersByMarket(symbol, period ?? "all", limit ?? 5);
+            if (data.length === 0) {
+              return { error: `No traders found for ${symbol.toUpperCase()}. This market may not have enough trading history.` };
+            }
+            return {
+              market: symbol.toUpperCase().endsWith("USD") ? symbol.toUpperCase() : symbol.toUpperCase() + "USD",
+              period: period ?? "all",
+              traders: data.map((t, i) => ({
+                rank: i + 1,
+                wallet: fmtAddr(t.walletAddr),
+                fullAddress: t.walletAddr,
+                pnl: t.pnl,
+                winRate: t.winRate,
+                trades: t.trades,
+                volume: t.volume,
+              })),
+            };
+          } catch (err) {
+            console.error("[copytrade] findTopTraderByMarket failed:", err);
+            return { error: "Failed to find traders for this market." };
           }
         },
       }),

@@ -377,6 +377,89 @@ async function getTraderMarketBreakdown(walletAddr: string): Promise<MarketStat[
   }));
 }
 
+// ─── Top Traders by Market ──────────────────────────────────────
+
+export interface MarketTrader {
+  walletAddr: string;
+  symbol: string;
+  trades: number;
+  pnl: number;
+  winRate: number;
+  volume: number;
+}
+
+/**
+ * Find top traders on a specific market (e.g. BTCUSD, ETHUSD).
+ * Queries trade_history + pnl_history for that symbol, aggregates per trader.
+ */
+export async function getTopTradersByMarket(
+  symbol: string,
+  period: Period = "all",
+  limit = 10,
+): Promise<MarketTrader[]> {
+  const safeLimit = Math.min(Math.max(1, limit), 50);
+
+  // Normalize symbol: "ETH" → "ETHUSD", "BTC" → "BTCUSD"
+  const normalizedSymbol = symbol.toUpperCase().endsWith("USD")
+    ? symbol.toUpperCase()
+    : symbol.toUpperCase() + "USD";
+
+  const periodFilter = period === "all" ? ""
+    : ` AND t."time" >= NOW() - INTERVAL '${period === "7d" ? 7 : 30} days'`;
+
+  const sql = `
+    WITH market_traders AS (
+      SELECT t."walletAddr",
+             COUNT(DISTINCT t."tradeId")::int AS trades,
+             COALESCE(SUM(t.size::numeric * t.price::numeric), 0)::numeric AS volume
+      FROM trade_history t
+      WHERE UPPER(t.symbol) = $1 ${periodFilter}
+      GROUP BY t."walletAddr"
+      HAVING COUNT(DISTINCT t."tradeId") >= 3
+    ),
+    market_pnl AS (
+      SELECT p."walletAddr",
+             COALESCE(SUM(p."tradingPnl"), 0)::numeric AS pnl,
+             COUNT(*) FILTER (WHERE p."tradingPnl" > 0)::int AS wins,
+             COUNT(*) FILTER (WHERE p."tradingPnl" < 0)::int AS losses
+      FROM pnl_history p
+      WHERE UPPER(p.symbol) = $1 ${periodFilter.replace(/t\./g, "p.")}
+      GROUP BY p."walletAddr"
+    )
+    SELECT mt."walletAddr" AS wallet_addr,
+           $1 AS symbol,
+           mt.trades,
+           COALESCE(mp.pnl, 0) AS pnl,
+           CASE WHEN COALESCE(mp.wins, 0) + COALESCE(mp.losses, 0) > 0
+                THEN ROUND(mp.wins::numeric / (mp.wins + mp.losses) * 100, 1)
+                ELSE 0 END AS win_rate,
+           mt.volume
+    FROM market_traders mt
+    LEFT JOIN market_pnl mp ON mp."walletAddr" = mt."walletAddr"
+    WHERE COALESCE(mp.pnl, 0) > 0
+    ORDER BY COALESCE(mp.pnl, 0) DESC
+    LIMIT $2
+  `;
+
+  const rows = await query<{
+    wallet_addr: string;
+    symbol: string;
+    trades: number;
+    pnl: string;
+    win_rate: string;
+    volume: string;
+  }>(sql, [normalizedSymbol, safeLimit]);
+
+  return rows.map((r) => ({
+    walletAddr: r.wallet_addr,
+    symbol: r.symbol,
+    trades: r.trades,
+    pnl: parseFloat(r.pnl) || 0,
+    winRate: parseFloat(r.win_rate) || 0,
+    volume: parseFloat(r.volume) || 0,
+  }));
+}
+
 // ─── Recent Trades ──────────────────────────────────────────────
 
 async function getRecentTrades(walletAddr: string, limit: number): Promise<TraderTrade[]> {
