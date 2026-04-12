@@ -177,12 +177,17 @@ export async function middleware(request: NextRequest) {
 
   // ── Content-Type + CSRF checks for mutating requests ──
   if (MUTATING_METHODS.has(request.method)) {
-    const contentType = request.headers.get("content-type");
-    if (!contentType || !contentType.includes("application/json")) {
-      return NextResponse.json(
-        { error: "Bad Request" },
-        { status: 415 }
-      );
+    // DELETE requests without body don't need Content-Type
+    const contentLength = request.headers.get("content-length");
+    const hasBody = contentLength !== null && contentLength !== "0";
+    if (request.method !== "DELETE" || hasBody) {
+      const contentType = request.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        return NextResponse.json(
+          { error: "Bad Request" },
+          { status: 415 }
+        );
+      }
     }
 
     const origin = request.headers.get("origin");

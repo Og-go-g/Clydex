@@ -142,10 +142,18 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
 
   const handleDeactivate = async () => {
     try {
-      await fetch("/api/copy/activate", { method: "DELETE" });
+      const res = await fetch("/api/copy/activate", { method: "DELETE" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        addToast({ type: "error", title: "Disable Failed", message: data.error ?? "Unknown error" });
+        return;
+      }
+      addToast({ type: "info", title: "Disabled", message: "Copy trading session deactivated" });
+      setStatus(null);
+      setLoading(true);
       await fetchStatus();
     } catch {
-      // ignore
+      addToast({ type: "error", title: "Error", message: "Network error" });
     }
   };
 
