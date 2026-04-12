@@ -171,14 +171,12 @@ export async function placeOrder(user: NordUser, params: PlaceOrderParams) {
     }
   }
 
-  // Avoid "Precision loss when converting to scaled integer" SDK error.
-  // SDK rounds size using market.sizeDecimals (e.g., 1 for SUI = min 0.1 SUI).
-  // We don't have sizeDecimals in our market cache, so round to 1 decimal (safe for all markets).
-  // Math.round avoids floating-point drift (e.g., 52.0833... → 52.1).
-  const roundedSize = Math.round(params.size * 10) / 10;
+  // Round to 6 decimal places to prevent floating-point drift.
+  // SDK handles market-specific precision via market.sizeDecimals internally.
+  const roundedSize = Math.round(params.size * 1_000_000) / 1_000_000;
 
   if (roundedSize <= 0) {
-    throw new Error(`Order size too small (${params.size.toFixed(4)} base units). Minimum is 0.1. Try a larger dollar amount.`);
+    throw new Error(`Order size too small (${params.size.toFixed(6)} base units). Try a larger dollar amount.`);
   }
 
   return user.placeOrder({
@@ -226,7 +224,7 @@ export async function editOrder(
   if (leverageError) throw new Error(leverageError);
 
   const sdkSide = toSdkSide(params.side);
-  const roundedSize = Math.round(params.size * 10) / 10;
+  const roundedSize = Math.round(params.size * 1_000_000) / 1_000_000;
   if (roundedSize <= 0) throw new Error("Order size too small");
 
   return user.atomic([

@@ -184,8 +184,8 @@ async function withRetry<T>(
     } catch (err) {
       lastErr = err;
       const msg = err instanceof Error ? err.message : String(err);
-      // Don't retry on user errors (insufficient balance, invalid params)
-      if (msg.includes("insufficient") || msg.includes("Invalid") || msg.includes("too small")) {
+      // Don't retry on user/exchange errors that won't change on retry
+      if (msg.includes("insufficient") || msg.includes("Invalid") || msg.includes("too small") || msg.includes("already submitted")) {
         throw err;
       }
       if (attempt < retries) {
@@ -260,7 +260,7 @@ async function executeCopyForFollower(
   }
 
   // Round size (SDK requires min 0.1 granularity)
-  const roundedSize = Math.round(followerDelta * 10) / 10;
+  const roundedSize = Math.round(followerDelta * 1_000_000) / 1_000_000;
   if (roundedSize <= 0) {
     return { success: false, error: "Rounded size is 0" };
   }
@@ -315,7 +315,7 @@ async function executeCopyForFollower(
     } else if (diff.action === "flip") {
       // Step 1: close old position
       const oldSide = diff.prevSide ?? (diff.side === "Long" ? "Short" : "Long");
-      const oldProportionalSize = Math.round(diff.prevSize * ratio * leverageMult * 10) / 10;
+      const oldProportionalSize = Math.round(diff.prevSize * ratio * leverageMult * 1_000_000) / 1_000_000;
       if (oldProportionalSize > 0) {
         try {
           await withRetry(
