@@ -392,7 +392,7 @@ export async function getPerLeaderStats(followerAddr: string): Promise<
     totalTrades: number;
     filledTrades: number;
     failedTrades: number;
-    totalPnl: number;
+    totalVolume: number;
   }>
 > {
   return query<{
@@ -400,7 +400,7 @@ export async function getPerLeaderStats(followerAddr: string): Promise<
     totalTrades: number;
     filledTrades: number;
     failedTrades: number;
-    totalPnl: number;
+    totalVolume: number;
   }>(
     `SELECT
        leader_addr AS "leaderAddr",
@@ -409,10 +409,9 @@ export async function getPerLeaderStats(followerAddr: string): Promise<
        COUNT(*) FILTER (WHERE status = 'failed')::int AS "failedTrades",
        COALESCE(SUM(
          CASE WHEN status = 'filled' AND price IS NOT NULL
-           THEN CASE WHEN side = 'Long' THEN size::numeric * price::numeric
-                     ELSE -size::numeric * price::numeric END
+           THEN ABS(size::numeric * price::numeric)
            ELSE 0 END
-       ), 0)::float AS "totalPnl"
+       ), 0)::float AS "totalVolume"
      FROM copy_trades
      WHERE follower_addr = $1
      GROUP BY leader_addr

@@ -42,13 +42,13 @@ export async function GET() {
     }
 
     // Build leaderStats map for quick lookup
-    const leaderStatsMap: Record<string, { totalTrades: number; filledTrades: number; failedTrades: number; totalPnl: number }> = {};
+    const leaderStatsMap: Record<string, { totalTrades: number; filledTrades: number; failedTrades: number; totalVolume: number }> = {};
     for (const ls of leaderStats) {
       leaderStatsMap[ls.leaderAddr] = {
         totalTrades: ls.totalTrades,
         filledTrades: ls.filledTrades,
         failedTrades: ls.failedTrades,
-        totalPnl: ls.totalPnl,
+        totalVolume: ls.totalVolume,
       };
     }
 
@@ -63,7 +63,7 @@ export async function GET() {
         maxPositionUsdc: s.maxPositionUsdc,
         stopLossPct: s.stopLossPct,
         active: s.active,
-        stats: leaderStatsMap[s.leaderAddr] ?? { totalTrades: 0, filledTrades: 0, failedTrades: 0, totalPnl: 0 },
+        stats: leaderStatsMap[s.leaderAddr] ?? { totalTrades: 0, filledTrades: 0, failedTrades: 0, totalVolume: 0 },
         recentTrades: leaderTradesMap[s.leaderAddr] ?? [],
       })),
       stats,

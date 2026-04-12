@@ -22,7 +22,7 @@ interface LeaderStats {
   totalTrades: number;
   filledTrades: number;
   failedTrades: number;
-  totalPnl: number;
+  totalVolume: number;
 }
 
 interface CopySubscriptionUI {
@@ -68,9 +68,9 @@ function shortenAddr(addr: string): string {
 
 function fmtUsd(n: number): string {
   const abs = Math.abs(n);
-  if (abs >= 1_000_000) return (n > 0 ? "+" : "-") + "$" + (abs / 1_000_000).toFixed(1) + "M";
-  if (abs >= 1_000) return (n > 0 ? "+" : "-") + "$" + (abs / 1_000).toFixed(1) + "K";
-  if (abs > 0) return (n > 0 ? "+$" : "-$") + abs.toFixed(2);
+  if (abs >= 1_000_000) return "$" + (abs / 1_000_000).toFixed(1) + "M";
+  if (abs >= 1_000) return "$" + (abs / 1_000).toFixed(1) + "K";
+  if (abs > 0) return "$" + abs.toFixed(2);
   return "$0";
 }
 
@@ -103,10 +103,10 @@ function LeaderCard({
           <span className="text-[10px] text-[#555]">{sub.leverageMult}x</span>
         </div>
         <div className="flex items-center gap-2">
-          {/* Per-leader PnL badge */}
+          {/* Per-leader volume badge */}
           {sub.stats.filledTrades > 0 && (
-            <span className={`text-[10px] font-mono ${sub.stats.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-              {fmtUsd(sub.stats.totalPnl)}
+            <span className="text-[10px] font-mono text-[#888]">
+              Vol {fmtUsd(sub.stats.totalVolume)}
             </span>
           )}
           <span className="text-[10px] text-[#555]">{sub.stats.filledTrades} trades</span>
@@ -143,9 +143,9 @@ function LeaderCard({
               <p className="text-[11px] font-mono text-[#ccc]">{sub.stats.totalTrades}</p>
             </div>
             <div className="text-center">
-              <p className="text-[9px] text-[#555]">PnL</p>
-              <p className={`text-[11px] font-mono ${sub.stats.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                {fmtUsd(sub.stats.totalPnl)}
+              <p className="text-[9px] text-[#555]">Volume</p>
+              <p className="text-[11px] font-mono text-[#ccc]">
+                {fmtUsd(sub.stats.totalVolume)}
               </p>
             </div>
           </div>
@@ -378,7 +378,6 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
   // Computed: summary stats across all leaders
   const totalAllocation = status?.subscriptions.reduce((sum, s) => sum + parseFloat(s.allocationUsdc), 0) ?? 0;
   const activeLeaders = status?.subscriptions.filter((s) => s.active).length ?? 0;
-  const totalLeaderPnl = status?.subscriptions.reduce((sum, s) => sum + (s.stats?.totalPnl ?? 0), 0) ?? 0;
 
   return (
     <div className="px-3 py-2 space-y-2">
