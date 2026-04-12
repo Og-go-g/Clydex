@@ -128,7 +128,7 @@ export function LeaderboardContent({ onCopyTrader }: { onCopyTrader?: (entry: Le
             disabled={searching || !searchQuery.trim()}
             className="rounded-lg border border-[#262626] bg-[#141414] px-2 py-1 text-[10px] text-[#888] hover:text-white transition-colors disabled:opacity-40"
           >
-            {searching ? "..." : "Go"}
+            {searching ? <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" /> : "Go"}
           </button>
         </div>
         {/* Search result */}

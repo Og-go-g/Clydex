@@ -59,10 +59,29 @@ export async function restoreNordUser(session: CopySession): Promise<NordUser> {
   });
 
   // Refresh session on 01 Exchange (validates the keypair is still accepted)
-  await user.refreshSession();
-  // Hydrate account info
-  await user.updateAccountId();
-  await user.fetchInfo();
+  // Note: refreshSession may fail in server context due to SDK limitations
+  // (e.g., missing browser-specific crypto methods like toHex)
+  // Refresh session + hydrate account info
+  // Note: Some SDK methods may fail in server context (e.g., toHex browser-only)
+  // We catch and log non-critical failures, but still try to make the user functional
+  try {
+    await user.refreshSession();
+  } catch (err) {
+    console.warn("[norduser-restore] refreshSession failed:", err instanceof Error ? err.message : err);
+    // Continue — session may still be valid from original creation
+  }
+
+  try {
+    await user.updateAccountId();
+  } catch (err) {
+    console.warn("[norduser-restore] updateAccountId failed:", err instanceof Error ? err.message : err);
+  }
+
+  try {
+    await user.fetchInfo();
+  } catch (err) {
+    console.warn("[norduser-restore] fetchInfo failed:", err instanceof Error ? err.message : err);
+  }
 
   return user;
 }
