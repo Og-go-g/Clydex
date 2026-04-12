@@ -52,6 +52,10 @@ export function LeaderboardContent({ onCopyTrader }: { onCopyTrader?: (entry: Le
   const [period, setPeriod] = useState<Period>("7d");
   const [data, setData] = useState<LeaderboardEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResult, setSearchResult] = useState<LeaderboardEntry | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -67,8 +71,95 @@ export function LeaderboardContent({ onCopyTrader }: { onCopyTrader?: (entry: Le
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
+  const handleSearch = useCallback(async () => {
+    const q = searchQuery.trim();
+    if (!q) { setSearchResult(null); setSearchError(null); return; }
+
+    // Normalize: if user types just a number, treat as account:ID
+    let addr = q;
+    if (/^\d+$/.test(q)) addr = `account:${q}`;
+
+    setSearching(true);
+    setSearchError(null);
+    setSearchResult(null);
+    try {
+      const res = await fetch(`/api/traders/${encodeURIComponent(addr)}/profile`);
+      if (!res.ok) {
+        setSearchError("Trader not found");
+        return;
+      }
+      const body = await res.json();
+      const profile = body.data ?? body;
+      setSearchResult({
+        walletAddr: profile.walletAddr ?? addr,
+        totalPnl: profile.totalPnl ?? 0,
+        tradingPnl: profile.tradingPnl ?? 0,
+        fundingPnl: profile.fundingPnl ?? 0,
+        totalTrades: profile.totalTrades ?? 0,
+        wins: profile.wins ?? 0,
+        losses: profile.losses ?? 0,
+        winRate: profile.winRate ?? 0,
+        avgPnlPerTrade: profile.avgPnlPerTrade ?? 0,
+        liquidations: profile.liquidations ?? 0,
+        totalVolume: profile.totalVolume ?? 0,
+      });
+    } catch {
+      setSearchError("Search failed");
+    } finally {
+      setSearching(false);
+    }
+  }, [searchQuery]);
+
   return (
     <div className="flex flex-col h-full">
+      {/* Search by ID or wallet */}
+      <div className="px-3 pt-1.5 pb-1">
+        <div className="flex gap-1">
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+            placeholder="Search by ID or wallet..."
+            className="flex-1 rounded-lg border border-[#262626] bg-[#141414] px-2 py-1 text-[10px] font-mono text-white placeholder-[#555] outline-none focus:border-emerald-500/40"
+          />
+          <button
+            onClick={handleSearch}
+            disabled={searching || !searchQuery.trim()}
+            className="rounded-lg border border-[#262626] bg-[#141414] px-2 py-1 text-[10px] text-[#888] hover:text-white transition-colors disabled:opacity-40"
+          >
+            {searching ? "..." : "Go"}
+          </button>
+        </div>
+        {/* Search result */}
+        {searchResult && (
+          <div className="mt-1.5 rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-mono font-semibold text-white">{fmtAddr(searchResult.walletAddr)}</span>
+              <button
+                onClick={() => onCopyTrader?.(searchResult)}
+                className="rounded bg-emerald-500/10 px-2 py-0.5 text-[9px] font-semibold text-emerald-400 hover:bg-emerald-500/20"
+              >
+                Copy
+              </button>
+            </div>
+            <div className="mt-1 flex items-center gap-3 text-[10px]">
+              <span className={searchResult.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}>
+                {fmtPnl(searchResult.totalPnl)}
+              </span>
+              <span className={searchResult.winRate >= 50 ? "text-emerald-400" : "text-red-400"}>
+                {searchResult.winRate.toFixed(0)}%
+              </span>
+              <span className="text-[#666]">{searchResult.totalTrades} trades</span>
+              <span className="text-[#666]">{fmtVol(searchResult.totalVolume)}</span>
+            </div>
+          </div>
+        )}
+        {searchError && (
+          <p className="mt-1 text-[10px] text-red-400">{searchError}</p>
+        )}
+      </div>
+
       {/* Period filter */}
       <div className="flex items-center justify-between px-3 py-1.5">
         <span className="text-[10px] text-muted">
@@ -94,8 +185,9 @@ export function LeaderboardContent({ onCopyTrader }: { onCopyTrader?: (entry: Le
       {/* Table */}
       <div className="overflow-y-auto flex-1">
         {loading ? (
-          <div className="flex h-16 items-center justify-center">
+          <div className="flex h-16 flex-col items-center justify-center gap-2">
             <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
+            <span className="text-[10px] text-[#555]">Loading leaderboard...</span>
           </div>
         ) : data.length === 0 ? (
           <div className="px-3 py-4 text-center text-[10px] text-muted">No data</div>

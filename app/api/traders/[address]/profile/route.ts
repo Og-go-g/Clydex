@@ -15,7 +15,8 @@ export async function GET(
 ) {
   const { address } = await params;
 
-  if (!SOLANA_ADDR_RE.test(address)) {
+  const isAccountId = address.startsWith("account:") && /^\d+$/.test(address.slice(8));
+  if (!isAccountId && !SOLANA_ADDR_RE.test(address)) {
     return NextResponse.json({ error: "Invalid address" }, { status: 400 });
   }
 

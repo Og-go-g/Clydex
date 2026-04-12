@@ -5,9 +5,17 @@ import { useEffect, useRef, useState, useCallback } from "react";
 const WS_URL = "wss://zo-mainnet.n1.xyz/ws";
 const MAX_LEVELS = 200;
 
+interface OrderbookLevel {
+  price: number;
+  size: number;
+}
+
 interface OrderbookRatio {
   bidPct: number;
   askPct: number;
+  topBids: OrderbookLevel[];
+  topAsks: OrderbookLevel[];
+  spread: number;
 }
 
 /** Cap a price-level map to MAX_LEVELS by removing the furthest entries */
@@ -24,8 +32,10 @@ function capMap(map: Map<number, number>, side: "bids" | "asks"): void {
  * 2. Applies incremental deltas from WS (same source as 01 Exchange)
  * 3. Recalculates quote-volume ratio on each delta (throttled to 1s)
  */
+const TOP_LEVELS = 10;
+
 export function useOrderbookRatio(marketId: number, symbol: string, enabled: boolean): OrderbookRatio {
-  const [ratio, setRatio] = useState<OrderbookRatio>({ bidPct: 50, askPct: 50 });
+  const [ratio, setRatio] = useState<OrderbookRatio>({ bidPct: 50, askPct: 50, topBids: [], topAsks: [], spread: 0 });
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const reconnectCount = useRef(0);
@@ -47,12 +57,28 @@ export function useOrderbookRatio(marketId: number, symbol: string, enabled: boo
       for (const [price, size] of bidsMap.current) bidVol += price * size;
       for (const [price, size] of asksMap.current) askVol += price * size;
       const total = bidVol + askVol;
-      if (total > 0) {
-        setRatio({
-          bidPct: (bidVol / total) * 100,
-          askPct: (askVol / total) * 100,
-        });
-      }
+
+      // Extract top N levels sorted by price
+      const sortedBids = [...bidsMap.current.entries()]
+        .sort((a, b) => b[0] - a[0])
+        .slice(0, TOP_LEVELS)
+        .map(([price, size]) => ({ price, size }));
+      const sortedAsks = [...asksMap.current.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .slice(0, TOP_LEVELS)
+        .map(([price, size]) => ({ price, size }));
+
+      const bestBid = sortedBids[0]?.price ?? 0;
+      const bestAsk = sortedAsks[0]?.price ?? 0;
+      const spread = bestAsk > 0 && bestBid > 0 ? bestAsk - bestBid : 0;
+
+      setRatio({
+        bidPct: total > 0 ? (bidVol / total) * 100 : 50,
+        askPct: total > 0 ? (askVol / total) * 100 : 50,
+        topBids: sortedBids,
+        topAsks: sortedAsks,
+        spread,
+      });
     };
 
     if (elapsed >= 1000) {

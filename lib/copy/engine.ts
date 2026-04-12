@@ -14,7 +14,8 @@ import {
   getConsecutiveFailures,
   toggleSubscription,
 } from "./queries";
-import type { CopySubscription, CopySnapshot } from "./queries";
+import type { CopySubscription, CopySnapshot, CopySession } from "./queries";
+import type { NordUser } from "@n1xyz/nord-ts";
 
 // ─── Types ───────────────────────────────────────────────────────
 
@@ -25,7 +26,8 @@ interface PositionDiff {
   prevSize: number;
   newSize: number;
   side: "Long" | "Short";
-  delta: number; // absolute change in base units
+  prevSide?: "Long" | "Short"; // only for flip
+  delta: number;
 }
 
 interface EngineResult {
@@ -33,6 +35,7 @@ interface EngineResult {
   diffsDetected: number;
   ordersPlaced: number;
   ordersFailed: number;
+  skipped: number;
   errors: string[];
   durationMs: number;
 }
@@ -40,42 +43,59 @@ interface EngineResult {
 // ─── Constants ───────────────────────────────────────────────────
 
 const MAX_CONSECUTIVE_FAILURES = 3;
-const DEFAULT_SLIPPAGE = 0.005; // 0.5% slippage tolerance for copy trades
-const MIN_ORDER_SIZE_USD = 1; // skip orders smaller than $1
-const MAX_ALLOCATION_USD = 10_000_000; // $10M hard cap
-const MAX_ORDER_SIZE_BASE = 100_000; // hard cap on base asset units
-const MAX_ERRORS = 100; // cap error array size
+const DEFAULT_SLIPPAGE = 0.005;
+const MIN_ORDER_SIZE_USD = 1;
+const MAX_ALLOCATION_USD = 10_000_000;
+const MAX_ORDER_SIZE_BASE = 100_000;
+const MAX_ERRORS = 100;
+const ORDER_RETRY_COUNT = 2;
+const ORDER_RETRY_DELAY_MS = 1000;
 
-// ─── Account ID Cache (leader addr → accountId) ─────────────────
+// ─── Concurrency Lock ───────────────────────────────────────────
+// Prevents overlapping engine cycles (curl fires every 15s, engine may take longer)
+
+let engineRunning = false;
+
+// ─── Account ID Cache ───────────────────────────────────────────
 
 const accountIdCache = new Map<string, { id: number; ts: number }>();
-const ACCOUNT_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+const ACCOUNT_CACHE_TTL = 10 * 60 * 1000;
 
 async function resolveAccountId(addr: string): Promise<number | null> {
   const cached = accountIdCache.get(addr);
   if (cached && Date.now() - cached.ts < ACCOUNT_CACHE_TTL) return cached.id;
 
   try {
-    // account:N format → extract N directly
     if (addr.startsWith("account:")) {
       const id = parseInt(addr.slice(8), 10);
-      if (!isNaN(id)) {
+      if (!isNaN(id) && id >= 0) {
         accountIdCache.set(addr, { id, ts: Date.now() });
         return id;
       }
     }
-
-    // Solana address → lookup via API
-    const user = await getUser(addr);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const ids = (user as any)?.accountIds ?? [];
+    const user = await getUser(addr) as any;
+    const ids = user?.accountIds ?? [];
     if (ids.length === 0) return null;
-    const id = ids[0];
-    accountIdCache.set(addr, { id, ts: Date.now() });
-    return id;
+    accountIdCache.set(addr, { id: ids[0], ts: Date.now() });
+    return ids[0];
   } catch {
     return null;
   }
+}
+
+// ─── NordUser Cache (per engine cycle) ───────────────────────────
+// Restore once per follower per cycle, not once per diff
+
+const nordUserCache = new Map<string, NordUser>();
+
+async function getOrRestoreNordUser(session: CopySession): Promise<NordUser> {
+  const cached = nordUserCache.get(session.walletAddr);
+  if (cached) return cached;
+
+  const user = await restoreNordUser(session);
+  nordUserCache.set(session.walletAddr, user);
+  return user;
 }
 
 // ─── Position Diff ───────────────────────────────────────────────
@@ -88,7 +108,6 @@ function computePositionDiffs(
 ): PositionDiff[] {
   const diffs: PositionDiff[] = [];
 
-  // Build maps
   const snapMap = new Map<number, CopySnapshot>();
   for (const s of snapshots) snapMap.set(s.marketId, s);
 
@@ -102,29 +121,27 @@ function computePositionDiffs(
     });
   }
 
-  // Check current vs snapshot
   for (const [marketId, curr] of currMap) {
     const snap = snapMap.get(marketId);
     const symbol = marketSymbols[marketId] ?? `M${marketId}`;
 
     if (!snap) {
-      // New position
       diffs.push({
         marketId, symbol, action: "open",
         prevSize: 0, newSize: curr.size, side: curr.side,
         delta: curr.size,
       });
     } else if (snap.side !== curr.side) {
-      // Flipped direction
       diffs.push({
         marketId, symbol, action: "flip",
-        prevSize: parseFloat(snap.size), newSize: curr.size, side: curr.side,
-        delta: curr.size + parseFloat(snap.size), // close old + open new
+        prevSize: parseFloat(snap.size), newSize: curr.size,
+        side: curr.side, prevSide: snap.side as "Long" | "Short",
+        delta: curr.size,
       });
     } else {
       const prevSize = parseFloat(snap.size);
       const diff = curr.size - prevSize;
-      if (Math.abs(diff) < 0.0001) continue; // no meaningful change
+      if (Math.abs(diff) < 0.0001) continue;
 
       diffs.push({
         marketId, symbol,
@@ -135,7 +152,6 @@ function computePositionDiffs(
     }
   }
 
-  // Check closed positions (in snapshot but not current)
   for (const [marketId, snap] of snapMap) {
     if (!currMap.has(marketId)) {
       diffs.push({
@@ -152,57 +168,80 @@ function computePositionDiffs(
   return diffs;
 }
 
-// ─── Copy Single Diff for One Follower ───────────────────────────
+// ─── Retry Helper ────────────────────────────────────────────────
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  retries: number,
+  delayMs: number,
+  label: string,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      // Don't retry on user errors (insufficient balance, invalid params)
+      if (msg.includes("insufficient") || msg.includes("Invalid") || msg.includes("too small")) {
+        throw err;
+      }
+      if (attempt < retries) {
+        console.warn(`[copy-engine] ${label} attempt ${attempt + 1} failed, retrying in ${delayMs}ms: ${msg}`);
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+// ─── Execute Copy for One Follower ───────────────────────────────
 
 async function executeCopyForFollower(
   diff: PositionDiff,
   follower: CopySubscription,
   leaderEquity: number,
+  session: CopySession,
 ): Promise<{ success: boolean; error?: string }> {
-  // Validate session
-  const session = await getSession(follower.followerAddr);
-  if (!session) {
-    return { success: false, error: "No active session" };
-  }
-
-  // Circuit breaker
+  // Circuit breaker — check before any work
   const failures = await getConsecutiveFailures(follower.id);
   if (failures >= MAX_CONSECUTIVE_FAILURES) {
     await toggleSubscription(follower.id, false);
-    return { success: false, error: `Paused: ${failures} consecutive failures` };
+    return { success: false, error: `Auto-paused: ${failures} consecutive failures` };
   }
 
-  // Calculate proportional size — validate all numeric inputs
+  // Validate numeric inputs
   const allocation = parseFloat(follower.allocationUsdc);
   const leverageMult = parseFloat(follower.leverageMult);
   if (!isFinite(allocation) || allocation <= 0 || allocation > MAX_ALLOCATION_USD) {
     return { success: false, error: "Invalid allocation" };
   }
   if (!isFinite(leverageMult) || leverageMult < 1 || leverageMult > 5) {
-    return { success: false, error: "Invalid leverage multiplier" };
+    return { success: false, error: "Invalid leverage" };
   }
   if (!isFinite(leaderEquity) || leaderEquity <= 0) {
-    return { success: false, error: "Leader has zero or invalid equity" };
+    return { success: false, error: "Leader zero equity" };
   }
 
+  // Calculate proportional size
   const ratio = allocation / leaderEquity;
   let followerDelta = diff.delta * ratio * leverageMult;
 
-  // Hard cap on order size to prevent overflow/runaway orders
-  if (!isFinite(followerDelta) || followerDelta < 0) {
-    return { success: false, error: "Invalid calculated size" };
+  if (!isFinite(followerDelta) || followerDelta <= 0) {
+    return { success: false, error: "Invalid size calculation" };
   }
   followerDelta = Math.min(followerDelta, MAX_ORDER_SIZE_BASE);
 
-  // Get mark price for USD value check
+  // Get mark price
   let markPrice = 0;
   try {
     const stats = await getMarketStats(diff.marketId);
-    markPrice = stats.perpStats?.mark_price ?? stats.indexPrice ?? 0;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    markPrice = (stats as any).perpStats?.mark_price ?? (stats as any).indexPrice ?? 0;
   } catch {
-    return { success: false, error: "Failed to get market price" };
+    return { success: false, error: "Failed to get mark price" };
   }
-
   if (!isFinite(markPrice) || markPrice <= 0) {
     return { success: false, error: "Invalid mark price" };
   }
@@ -210,33 +249,45 @@ async function executeCopyForFollower(
   // Cap at maxPositionUsdc
   const maxPos = follower.maxPositionUsdc ? parseFloat(follower.maxPositionUsdc) : null;
   if (maxPos && isFinite(maxPos) && maxPos > 0) {
-    const maxSize = maxPos / markPrice;
-    followerDelta = Math.min(followerDelta, maxSize);
+    followerDelta = Math.min(followerDelta, maxPos / markPrice);
   }
 
   // Skip tiny orders
   const orderValueUsd = followerDelta * markPrice;
   if (!isFinite(orderValueUsd) || orderValueUsd < MIN_ORDER_SIZE_USD) {
-    return { success: false, error: `Order too small: $${orderValueUsd.toFixed(2)}` };
+    return { success: false, error: `Too small: $${orderValueUsd.toFixed(2)}` };
   }
 
-  // Round size to avoid SDK precision errors
+  // Round size (SDK requires min 0.1 granularity)
   const roundedSize = Math.round(followerDelta * 10) / 10;
   if (roundedSize <= 0) {
     return { success: false, error: "Rounded size is 0" };
   }
 
-  // Restore NordUser
-  let nordUser;
+  // Restore NordUser (cached per cycle)
+  let nordUser: NordUser;
   try {
-    nordUser = await restoreNordUser(session);
+    nordUser = await getOrRestoreNordUser(session);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "unknown";
-    console.error(`[copy-engine] session restore failed for ${follower.followerAddr}:`, err);
-    return { success: false, error: `Session restore failed: ${msg}` };
+    console.error(`[copy-engine] restore failed ${follower.followerAddr}:`, err);
+    return { success: false, error: `Session restore: ${msg}` };
   }
 
-  // Log trade intent
+  // Check follower has margin before placing
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const info = (nordUser as any).info ?? {};
+    const availableMargin = info.margins?.omf ?? 0;
+    const marginNeeded = orderValueUsd / leverageMult;
+    if (diff.action !== "close" && diff.action !== "decrease" && availableMargin < marginNeeded * 0.5) {
+      return { success: false, error: `Insufficient margin: need ~$${marginNeeded.toFixed(0)}, have $${availableMargin.toFixed(0)}` };
+    }
+  } catch {
+    // If margin check fails, continue — SDK will reject if truly insufficient
+  }
+
+  // Log trade intent BEFORE attempting
   const tradeId = await insertCopyTrade({
     subscriptionId: follower.id,
     followerAddr: follower.followerAddr,
@@ -249,66 +300,82 @@ async function executeCopyForFollower(
 
   try {
     if (diff.action === "close" || diff.action === "decrease") {
-      // Close or reduce — opposite side, reduce-only
-      await closePosition(nordUser, {
-        symbol: diff.symbol,
-        side: diff.side, // closePosition handles opposite side internally
-        size: roundedSize,
-        slippage: DEFAULT_SLIPPAGE,
-      });
-    } else if (diff.action === "flip") {
-      // Flip: close old position first, then open new direction
-      const oldSide = diff.side === "Long" ? "Short" : "Long";
-      const oldSize = Math.round(diff.prevSize * (allocation / leaderEquity) * leverageMult * 10) / 10;
-      if (oldSize > 0) {
-        await closePosition(nordUser, {
+      await withRetry(
+        () => closePosition(nordUser, {
           symbol: diff.symbol,
-          side: oldSide as "Long" | "Short",
-          size: oldSize,
+          side: diff.side, // closePosition internally flips to opposite
+          size: roundedSize,
           slippage: DEFAULT_SLIPPAGE,
-        });
+        }),
+        ORDER_RETRY_COUNT,
+        ORDER_RETRY_DELAY_MS,
+        `close ${diff.symbol}`,
+      );
+    } else if (diff.action === "flip") {
+      // Step 1: close old position
+      const oldSide = diff.prevSide ?? (diff.side === "Long" ? "Short" : "Long");
+      const oldProportionalSize = Math.round(diff.prevSize * ratio * leverageMult * 10) / 10;
+      if (oldProportionalSize > 0) {
+        try {
+          await withRetry(
+            () => closePosition(nordUser, {
+              symbol: diff.symbol,
+              side: oldSide,
+              size: oldProportionalSize,
+              slippage: DEFAULT_SLIPPAGE,
+            }),
+            ORDER_RETRY_COUNT,
+            ORDER_RETRY_DELAY_MS,
+            `flip-close ${diff.symbol}`,
+          );
+        } catch (err) {
+          // Log close failure but still try to open new direction
+          console.warn(`[copy-engine] flip close failed for ${diff.symbol}, continuing to open:`, err);
+        }
       }
-      // Then open new direction
-      await placeOrder(nordUser, {
-        symbol: diff.symbol,
-        side: diff.side,
-        size: roundedSize,
-        leverage: leverageMult,
-        orderType: "market",
-        slippage: DEFAULT_SLIPPAGE,
-      });
+
+      // Step 2: open new direction
+      await withRetry(
+        () => placeOrder(nordUser, {
+          symbol: diff.symbol,
+          side: diff.side,
+          size: roundedSize,
+          leverage: leverageMult,
+          orderType: "market",
+          slippage: DEFAULT_SLIPPAGE,
+        }),
+        ORDER_RETRY_COUNT,
+        ORDER_RETRY_DELAY_MS,
+        `flip-open ${diff.symbol}`,
+      );
     } else {
-      // Open or increase — place order
-      await placeOrder(nordUser, {
-        symbol: diff.symbol,
-        side: diff.side,
-        size: roundedSize,
-        leverage: leverageMult,
-        orderType: "market",
-        slippage: DEFAULT_SLIPPAGE,
-      });
+      // open or increase
+      await withRetry(
+        () => placeOrder(nordUser, {
+          symbol: diff.symbol,
+          side: diff.side,
+          size: roundedSize,
+          leverage: leverageMult,
+          orderType: "market",
+          slippage: DEFAULT_SLIPPAGE,
+        }),
+        ORDER_RETRY_COUNT,
+        ORDER_RETRY_DELAY_MS,
+        `${diff.action} ${diff.symbol}`,
+      );
     }
 
-    await updateCopyTradeStatus(tradeId, "filled", {
-      price: markPrice.toString(),
-    });
-
+    await updateCopyTradeStatus(tradeId, "filled", { price: markPrice.toString() });
     return { success: true };
   } catch (err) {
-    // Capture full error detail including SDK errors, stack traces
     let errorMsg: string;
     if (err instanceof Error) {
       errorMsg = err.message;
-      // SDK errors sometimes nest cause
-      if (err.cause && err.cause instanceof Error) {
-        errorMsg += ` | cause: ${err.cause.message}`;
-      }
-    } else if (typeof err === "string") {
-      errorMsg = err;
+      if (err.cause instanceof Error) errorMsg += ` | ${err.cause.message}`;
     } else {
-      try { errorMsg = JSON.stringify(err); } catch { errorMsg = "Unknown error"; }
+      errorMsg = typeof err === "string" ? err : "Unknown error";
     }
-    console.error(`[copy-engine] order failed for ${follower.followerAddr} on ${diff.symbol}:`, err);
+    console.error(`[copy-engine] FAILED ${follower.followerAddr} ${diff.action} ${diff.symbol}:`, err);
     await updateCopyTradeStatus(tradeId, "failed", { error: errorMsg.slice(0, 500) });
     return { success: false, error: errorMsg };
   }
@@ -317,24 +384,31 @@ async function executeCopyForFollower(
 // ─── Main Engine Cycle ───────────────────────────────────────────
 
 export async function runCopyEngine(): Promise<EngineResult> {
+  // Concurrency lock — skip if previous cycle still running
+  if (engineRunning) {
+    return {
+      leadersProcessed: 0, diffsDetected: 0, ordersPlaced: 0,
+      ordersFailed: 0, skipped: 0, errors: ["Skipped: previous cycle still running"],
+      durationMs: 0,
+    };
+  }
+
+  engineRunning = true;
   const start = Date.now();
   const result: EngineResult = {
-    leadersProcessed: 0,
-    diffsDetected: 0,
-    ordersPlaced: 0,
-    ordersFailed: 0,
-    errors: [],
-    durationMs: 0,
+    leadersProcessed: 0, diffsDetected: 0, ordersPlaced: 0,
+    ordersFailed: 0, skipped: 0, errors: [], durationMs: 0,
   };
 
   try {
-    // Ensure market cache is loaded
+    // Clear NordUser cache each cycle (forces fresh refreshSession)
+    nordUserCache.clear();
+
     await ensureMarketCache();
     const markets = getCachedMarkets();
     const marketSymbols: Record<number, string> = {};
     for (const m of markets) marketSymbols[m.id] = m.symbol;
 
-    // Get all leaders with active followers
     const leaders = await getActiveLeaders();
     if (leaders.length === 0) {
       result.durationMs = Date.now() - start;
@@ -343,100 +417,100 @@ export async function runCopyEngine(): Promise<EngineResult> {
 
     for (const leaderAddr of leaders) {
       try {
-        // Resolve account ID
         const accountId = await resolveAccountId(leaderAddr);
         if (accountId === null) {
           addError(result, `${leaderAddr}: cannot resolve accountId`);
           continue;
         }
 
-        // Get current positions — validate response structure
-        const account = await getAccount(accountId);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const rawAccount = account as any;
+        const rawAccount = await getAccount(accountId) as any;
         if (!rawAccount || typeof rawAccount !== "object") {
           addError(result, `${leaderAddr}: invalid account response`);
           continue;
         }
+
         const positions = Array.isArray(rawAccount.positions) ? rawAccount.positions : [];
         const margins = rawAccount.margins && typeof rawAccount.margins === "object" ? rawAccount.margins : {};
         const leaderEquity = typeof margins.omf === "number" && isFinite(margins.omf) ? margins.omf : 0;
 
         if (leaderEquity <= 0) {
-          // Leader has no equity — skip (don't copy from empty accounts)
           result.leadersProcessed++;
+          result.skipped++;
           continue;
         }
 
-        // Load snapshots
         const snapshots = await getSnapshots(leaderAddr);
-
-        // First cycle for this leader: initialize snapshots WITHOUT creating diffs
-        // to avoid copying pre-existing positions that were open before subscription
         const isFirstRun = snapshots.length === 0;
 
-        // Always update snapshots (before processing diffs to prevent duplicates on crash)
+        // Update snapshots BEFORE processing (idempotent — UNIQUE constraint handles conflicts)
         await deleteSnapshots(leaderAddr);
         for (const p of positions) {
           const baseSize = p.perp?.baseSize ?? 0;
           if (baseSize === 0) continue;
           await upsertSnapshot(
-            leaderAddr,
-            p.marketId,
+            leaderAddr, p.marketId,
             Math.abs(baseSize).toString(),
             baseSize > 0 ? "Long" : "Short",
           );
         }
 
-        // First run: snapshots initialized, skip diff processing
-        // Next cycle will detect actual changes from this baseline
         if (isFirstRun) {
           result.leadersProcessed++;
           continue;
         }
 
-        // Compute diffs against previous snapshots
         const diffs = computePositionDiffs(snapshots, positions, marketSymbols);
         result.leadersProcessed++;
 
         if (diffs.length === 0) continue;
         result.diffsDetected += diffs.length;
 
-        // Get followers
         const followers = await getFollowersForLeader(leaderAddr);
 
-        // Process each diff for each follower
+        // Pre-validate follower sessions to avoid repeated restore failures
+        const followerSessions = new Map<string, CopySession>();
+        for (const f of followers) {
+          const session = await getSession(f.followerAddr);
+          if (session) {
+            followerSessions.set(f.followerAddr, session);
+          } else {
+            result.skipped++;
+            addError(result, `${f.followerAddr}: no active session`);
+          }
+        }
+
         for (const diff of diffs) {
           for (const follower of followers) {
-            const res = await executeCopyForFollower(diff, follower, leaderEquity);
+            const session = followerSessions.get(follower.followerAddr);
+            if (!session) continue; // already logged above
+
+            const res = await executeCopyForFollower(diff, follower, leaderEquity, session);
             if (res.success) {
               result.ordersPlaced++;
             } else {
               result.ordersFailed++;
-              if (res.error) {
-                addError(result, `${follower.followerAddr}→${diff.symbol}: ${res.error}`);
-              }
+              if (res.error) addError(result, `${follower.followerAddr}→${diff.symbol}: ${res.error}`);
             }
           }
         }
       } catch (err) {
-        const msg = err instanceof Error ? err.message : "Unknown error";
-        addError(result, `${leaderAddr}: ${msg}`);
+        addError(result, `${leaderAddr}: ${err instanceof Error ? err.message : "Unknown"}`);
       }
     }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "Engine failed";
-    addError(result, msg);
+    addError(result, `Engine fatal: ${err instanceof Error ? err.message : "Unknown"}`);
+  } finally {
+    engineRunning = false;
+    nordUserCache.clear(); // clean up restored sessions
+    result.durationMs = Date.now() - start;
   }
 
-  result.durationMs = Date.now() - start;
   return result;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
 function addError(result: EngineResult, msg: string): void {
-  if (result.errors.length < MAX_ERRORS) {
-    result.errors.push(msg);
-  }
+  if (result.errors.length < MAX_ERRORS) result.errors.push(msg);
 }

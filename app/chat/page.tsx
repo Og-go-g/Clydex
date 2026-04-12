@@ -15,8 +15,8 @@ import { useOrderActions } from "@/hooks/useOrderActions";
 import { ClosePositionModal } from "@/components/collateral/ClosePositionModal";
 import { useToast } from "@/components/alerts/ToastProvider";
 import { usePageActive } from "@/hooks/usePageActive";
-import { useChartPanel, useChartPanelSafe } from "@/lib/chat/chart-panel-context";
-import { ChatModeToggle, type ChatMode } from "@/components/chat/ChatModeToggle";
+import { useChartPanel, useChartPanelSafe, type ChatMode } from "@/lib/chat/chart-panel-context";
+import { ChatModeToggle } from "@/components/chat/ChatModeToggle";
 
 const PriceChart = lazy(() =>
   import("@/components/charts/PriceChart").then((m) => ({ default: m.PriceChart }))
@@ -298,16 +298,14 @@ function useStatusToast(
 
 export default function ChatPage() {
   const { activeId, createChat } = useChatSessions();
-  const { setChatId } = useChartPanel();
-  // Chat mode lives here (parent) so it survives ChatContent remounts
-  const [chatMode, setChatMode] = useState<ChatMode>("trading");
+  const { setChatId, chatMode, setChatMode } = useChartPanel();
 
   const handleModeChange = useCallback((mode: ChatMode) => {
     if (mode !== chatMode) {
       setChatMode(mode);
-      createChat(); // new session → ChatContent remounts, but mode persists here
+      createChat(); // new session → ChatContent remounts, mode persists in context
     }
-  }, [chatMode, createChat]);
+  }, [chatMode, setChatMode, createChat]);
 
   // "Trade X" from markets: if pending exists and current chat has messages → create new chat
   const didCreateRef = useRef(false);

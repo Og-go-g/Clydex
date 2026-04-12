@@ -9,6 +9,7 @@ import { useAuth } from "@/lib/auth/context";
 import { INTERVAL_TO_N1, type Interval } from "@/lib/n1/candles";
 import type { PriceChartHandle, IndicatorId } from "@/components/charts/PriceChart";
 import { CopyTradeSection } from "@/components/copytrade/CopyTradeSection";
+import { CompactOrderbook } from "@/components/charts/CompactOrderbook";
 
 const MIN_WIDTH = 320;
 const MAX_WIDTH = 1200;
@@ -42,7 +43,7 @@ interface MarketInfo {
 }
 
 export function ChartPanel() {
-  const { isOpen, marketId, baseAsset, close, setMarket } = useChartPanel();
+  const { isOpen, marketId, baseAsset, close, setMarket, chatMode } = useChartPanel();
   const [allMarkets, setAllMarkets] = useState<MarketInfo[]>([]);
   const [showSelector, setShowSelector] = useState(false);
   const [search, setSearch] = useState("");
@@ -502,7 +503,16 @@ export function ChartPanel() {
             </div>
 
             {/* Compact Leaderboard */}
-            <CopyTradeSection />
+            {chatMode === "copytrade" ? (
+              <CopyTradeSection />
+            ) : (
+              <CompactOrderbook
+                topBids={wsRatio.topBids}
+                topAsks={wsRatio.topAsks}
+                spread={wsRatio.spread}
+                baseAsset={baseAsset}
+              />
+            )}
           </div>
         </div>
         {/* Bottom spacer — matches input area height (border-t aligns with chat input border) */}

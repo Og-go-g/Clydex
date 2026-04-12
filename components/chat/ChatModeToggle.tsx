@@ -1,6 +1,6 @@
 "use client";
 
-export type ChatMode = "trading" | "copytrade";
+import type { ChatMode } from "@/lib/chat/chart-panel-context";
 
 interface ChatModeToggleProps {
   mode: ChatMode;
