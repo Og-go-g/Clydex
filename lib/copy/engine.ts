@@ -231,7 +231,9 @@ async function executeCopyForFollower(
   try {
     nordUser = await restoreNordUser(session);
   } catch (err) {
-    return { success: false, error: `Session restore failed: ${err instanceof Error ? err.message : "unknown"}` };
+    const msg = err instanceof Error ? err.message : "unknown";
+    console.error(`[copy-engine] session restore failed for ${follower.followerAddr}:`, err);
+    return { success: false, error: `Session restore failed: ${msg}` };
   }
 
   // Log trade intent
@@ -272,8 +274,21 @@ async function executeCopyForFollower(
 
     return { success: true };
   } catch (err) {
-    const errorMsg = err instanceof Error ? err.message : "Order failed";
-    await updateCopyTradeStatus(tradeId, "failed", { error: errorMsg });
+    // Capture full error detail including SDK errors, stack traces
+    let errorMsg: string;
+    if (err instanceof Error) {
+      errorMsg = err.message;
+      // SDK errors sometimes nest cause
+      if (err.cause && err.cause instanceof Error) {
+        errorMsg += ` | cause: ${err.cause.message}`;
+      }
+    } else if (typeof err === "string") {
+      errorMsg = err;
+    } else {
+      try { errorMsg = JSON.stringify(err); } catch { errorMsg = "Unknown error"; }
+    }
+    console.error(`[copy-engine] order failed for ${follower.followerAddr} on ${diff.symbol}:`, err);
+    await updateCopyTradeStatus(tradeId, "failed", { error: errorMsg.slice(0, 500) });
     return { success: false, error: errorMsg };
   }
 }
