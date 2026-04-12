@@ -275,17 +275,22 @@ async function executeCopyForFollower(
     return { success: false, error: `Session restore: ${msg}` };
   }
 
-  // Check follower has margin before placing
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const info = (nordUser as any).info ?? {};
-    const availableMargin = info.margins?.omf ?? 0;
-    const marginNeeded = orderValueUsd / leverageMult;
-    if (diff.action !== "close" && diff.action !== "decrease" && availableMargin < marginNeeded * 0.5) {
-      return { success: false, error: `Insufficient margin: need ~$${marginNeeded.toFixed(0)}, have $${availableMargin.toFixed(0)}` };
+  // Margin check via REST API (SDK fetchInfo unreliable server-side)
+  if (diff.action !== "close" && diff.action !== "decrease") {
+    try {
+      const followerAccountId = await resolveAccountId(follower.followerAddr);
+      if (followerAccountId !== null) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const followerAccount = await getAccount(followerAccountId) as any;
+        const availableMargin = followerAccount?.margins?.omf ?? 0;
+        const marginNeeded = orderValueUsd / leverageMult;
+        if (typeof availableMargin === "number" && isFinite(availableMargin) && availableMargin < marginNeeded * 0.5) {
+          return { success: false, error: `Insufficient margin: need ~$${marginNeeded.toFixed(0)}, have $${availableMargin.toFixed(0)}` };
+        }
+      }
+    } catch {
+      // If margin check fails, continue — exchange will reject if truly insufficient
     }
-  } catch {
-    // If margin check fails, continue — SDK will reject if truly insufficient
   }
 
   // Log trade intent BEFORE attempting
