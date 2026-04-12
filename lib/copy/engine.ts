@@ -441,10 +441,15 @@ export async function runCopyEngine(): Promise<EngineResult> {
           continue;
         }
 
+        // Load previous snapshots, compute diffs, THEN update snapshots
         const snapshots = await getSnapshots(leaderAddr);
         const isFirstRun = snapshots.length === 0;
 
-        // Update snapshots BEFORE processing (idempotent — UNIQUE constraint handles conflicts)
+        // Compute diffs BEFORE updating snapshots
+        const diffs = isFirstRun ? [] : computePositionDiffs(snapshots, positions, marketSymbols);
+        result.leadersProcessed++;
+
+        // Now update snapshots to current state (for next cycle)
         await deleteSnapshots(leaderAddr);
         for (const p of positions) {
           const baseSize = p.perp?.baseSize ?? 0;
@@ -455,14 +460,6 @@ export async function runCopyEngine(): Promise<EngineResult> {
             baseSize > 0 ? "Long" : "Short",
           );
         }
-
-        if (isFirstRun) {
-          result.leadersProcessed++;
-          continue;
-        }
-
-        const diffs = computePositionDiffs(snapshots, positions, marketSymbols);
-        result.leadersProcessed++;
 
         if (diffs.length === 0) continue;
         result.diffsDetected += diffs.length;
@@ -484,7 +481,7 @@ export async function runCopyEngine(): Promise<EngineResult> {
         for (const diff of diffs) {
           for (const follower of followers) {
             const session = followerSessions.get(follower.followerAddr);
-            if (!session) continue; // already logged above
+            if (!session) continue;
 
             const res = await executeCopyForFollower(diff, follower, leaderEquity, session);
             if (res.success) {
