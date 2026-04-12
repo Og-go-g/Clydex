@@ -58,6 +58,8 @@ export async function restoreNordUser(session: CopySession): Promise<NordUser> {
     },
   });
 
+  // Refresh session on 01 Exchange (validates the keypair is still accepted)
+  await user.refreshSession();
   // Hydrate account info
   await user.updateAccountId();
   await user.fetchInfo();

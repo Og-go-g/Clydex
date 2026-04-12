@@ -256,8 +256,29 @@ async function executeCopyForFollower(
         size: roundedSize,
         slippage: DEFAULT_SLIPPAGE,
       });
+    } else if (diff.action === "flip") {
+      // Flip: close old position first, then open new direction
+      const oldSide = diff.side === "Long" ? "Short" : "Long";
+      const oldSize = Math.round(diff.prevSize * (allocation / leaderEquity) * leverageMult * 10) / 10;
+      if (oldSize > 0) {
+        await closePosition(nordUser, {
+          symbol: diff.symbol,
+          side: oldSide as "Long" | "Short",
+          size: oldSize,
+          slippage: DEFAULT_SLIPPAGE,
+        });
+      }
+      // Then open new direction
+      await placeOrder(nordUser, {
+        symbol: diff.symbol,
+        side: diff.side,
+        size: roundedSize,
+        leverage: leverageMult,
+        orderType: "market",
+        slippage: DEFAULT_SLIPPAGE,
+      });
     } else {
-      // Open, increase, or flip — place order
+      // Open or increase — place order
       await placeOrder(nordUser, {
         symbol: diff.symbol,
         side: diff.side,
@@ -350,11 +371,11 @@ export async function runCopyEngine(): Promise<EngineResult> {
         // Load snapshots
         const snapshots = await getSnapshots(leaderAddr);
 
-        // Compute diffs
-        const diffs = computePositionDiffs(snapshots, positions, marketSymbols);
-        result.leadersProcessed++;
+        // First cycle for this leader: initialize snapshots WITHOUT creating diffs
+        // to avoid copying pre-existing positions that were open before subscription
+        const isFirstRun = snapshots.length === 0;
 
-        // Always update snapshots (atomic: delete then insert, idempotent via UNIQUE constraint)
+        // Always update snapshots (before processing diffs to prevent duplicates on crash)
         await deleteSnapshots(leaderAddr);
         for (const p of positions) {
           const baseSize = p.perp?.baseSize ?? 0;
@@ -366,6 +387,17 @@ export async function runCopyEngine(): Promise<EngineResult> {
             baseSize > 0 ? "Long" : "Short",
           );
         }
+
+        // First run: snapshots initialized, skip diff processing
+        // Next cycle will detect actual changes from this baseline
+        if (isFirstRun) {
+          result.leadersProcessed++;
+          continue;
+        }
+
+        // Compute diffs against previous snapshots
+        const diffs = computePositionDiffs(snapshots, positions, marketSymbols);
+        result.leadersProcessed++;
 
         if (diffs.length === 0) continue;
         result.diffsDetected += diffs.length;

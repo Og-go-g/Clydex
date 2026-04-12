@@ -38,6 +38,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Cannot follow yourself" }, { status: 400 });
     }
 
+    // Check for existing subscription
+    const existing = (await getSubscriptions(addr)).find((s) => s.leaderAddr === leaderAddr);
+    if (existing) {
+      return NextResponse.json({ error: "You already follow this trader. Modify settings from the Copy Trading panel." }, { status: 409 });
+    }
+
     const id = await createSubscription({
       followerAddr: addr,
       leaderAddr,

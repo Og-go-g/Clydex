@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useAuth } from "@/lib/auth/context";
 import type { LeaderboardEntry } from "./CompactLeaderboard";
 
@@ -51,6 +51,17 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
   // Flow state
   const [step, setStep] = useState<Step>("input");
   const [error, setError] = useState<string | null>(null);
+  const [sessionActive, setSessionActive] = useState<boolean | null>(null);
+
+  // Check if copy trading session is active on open
+  useEffect(() => {
+    if (!isOpen || !isAuthenticated) return;
+    setSessionActive(null);
+    fetch("/api/copy/activate")
+      .then((r) => r.json())
+      .then((d) => setSessionActive(d.active ?? false))
+      .catch(() => setSessionActive(false));
+  }, [isOpen, isAuthenticated]);
 
   const handleClose = useCallback(() => {
     if (step === "submitting") return; // don't close while submitting
@@ -200,8 +211,26 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
             </div>
           )}
 
-          {/* Authenticated flow */}
-          {isAuthenticated && (
+          {/* Session not active */}
+          {isAuthenticated && sessionActive === false && (
+            <div className="py-6 text-center">
+              <p className="text-sm text-gray-400 mb-2">Copy trading is not activated.</p>
+              <p className="text-xs text-gray-500">Enable it in the Copy Trading tab below the chart first, then try again.</p>
+              <button onClick={handleClose} className="mt-4 rounded-xl bg-[#1a1a1a] px-6 py-2 text-sm text-white hover:bg-[#222]">
+                Close
+              </button>
+            </div>
+          )}
+
+          {/* Loading session check */}
+          {isAuthenticated && sessionActive === null && (
+            <div className="flex h-20 items-center justify-center">
+              <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
+            </div>
+          )}
+
+          {/* Authenticated + session active */}
+          {isAuthenticated && sessionActive === true && (
             <>
               {/* Trader info card */}
               <div className="mb-5 rounded-xl border border-[#262626] bg-[#141414] p-4">

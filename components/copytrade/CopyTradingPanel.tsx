@@ -43,6 +43,7 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
   const [error, setError] = useState<string | null>(null);
   const [unfollowTarget, setUnfollowTarget] = useState<string | null>(null);
   const [unfollowing, setUnfollowing] = useState(false);
+  const [showDisableConfirm, setShowDisableConfirm] = useState(false);
   const { addToast } = useToast();
   const prevTradeCountRef = useRef<number>(0);
   const prevFilledRef = useRef<number>(0);
@@ -240,7 +241,7 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
               <span className="h-1.5 w-1.5 rounded-full bg-green-500 animate-pulse" />
               <span>Active until {status.sessionExpires ? new Date(status.sessionExpires).toLocaleDateString() : "—"}</span>
             </div>
-            <button onClick={handleDeactivate} className="text-red-400/60 hover:text-red-400 transition-colors">
+            <button onClick={() => setShowDisableConfirm(true)} className="text-red-400/60 hover:text-red-400 transition-colors">
               Disable
             </button>
           </div>
@@ -297,6 +298,33 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
             </div>
           )}
         </>
+      )}
+
+      {/* Disable confirmation dialog */}
+      {showDisableConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowDisableConfirm(false)}>
+          <div className="w-full max-w-sm rounded-2xl border border-[#262626] bg-[#0f0f0f] p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold text-white mb-3">Disable Copy Trading</h3>
+            <p className="text-xs text-[#888] mb-4">
+              This will deactivate your session. The copy engine will stop mirroring trades.
+              Your subscriptions will be preserved — you can re-enable anytime.
+            </p>
+            <div className="space-y-2">
+              <button
+                onClick={async () => { setShowDisableConfirm(false); await handleDeactivate(); }}
+                className="w-full rounded-xl border border-red-500/30 bg-red-500/10 py-2.5 text-xs font-medium text-red-400 hover:bg-red-500/20 transition-colors"
+              >
+                Disable Copy Trading
+              </button>
+              <button
+                onClick={() => setShowDisableConfirm(false)}
+                className="w-full py-2 text-xs text-[#666] hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Unfollow confirmation dialog */}
