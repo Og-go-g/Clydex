@@ -1,3 +1,6 @@
+// Polyfill MUST be imported before any SDK usage
+import "./polyfill";
+
 import { NordUser } from "@n1xyz/nord-ts";
 import { PublicKey } from "@solana/web3.js";
 import nacl from "tweetnacl";
@@ -9,11 +12,15 @@ import type { CopySession } from "./queries";
 
 /**
  * Restore a NordUser from an encrypted session stored in the DB.
- * This allows the server to place orders autonomously without wallet interaction.
+ * Uses sessionId to skip refreshSession() (which requires wallet signing).
  *
- * The restored user has:
- * - signSessionFn: uses the decrypted session keypair
- * - signMessageFn/signTransactionFn: throws (server cannot sign with user's wallet)
+ * The restored user can:
+ * - Place orders (signed by session keypair)
+ * - Cancel orders, add triggers, close positions
+ *
+ * The restored user CANNOT:
+ * - Create new sessions (requires wallet)
+ * - Deposit/withdraw (requires wallet transaction signing)
  */
 export async function restoreNordUser(session: CopySession): Promise<NordUser> {
   // Decrypt the stored session secret key
@@ -29,7 +36,6 @@ export async function restoreNordUser(session: CopySession): Promise<NordUser> {
   }
 
   // Reconstruct the keypair from secret key
-  // tweetnacl secretKey is 64 bytes: first 32 = seed, last 32 = public key
   const keypair = nacl.sign.keyPair.fromSecretKey(secretKey);
 
   // Verify the public key matches what we stored
@@ -41,12 +47,21 @@ export async function restoreNordUser(session: CopySession): Promise<NordUser> {
   const nord = await getNord();
   const walletPubkey = new PublicKey(session.walletAddr);
 
+  // Parse sessionId if available — allows skipping refreshSession()
+  let sessionId: bigint | undefined;
+  if (session.sessionIdStr && session.sessionIdStr !== "0") {
+    try {
+      sessionId = BigInt(session.sessionIdStr);
+    } catch {
+      console.warn("[norduser-restore] invalid sessionId format:", session.sessionIdStr);
+    }
+  }
+
   const user = await NordUser.new({
     nord,
     walletPubkey,
     sessionPubkey: keypair.publicKey,
-    // Server cannot sign with user's wallet — these should never be called
-    // during copy trading (only session-signed operations are used)
+    sessionId, // If provided, NordUser skips refreshSession internally
     signMessageFn: async () => {
       throw new Error("Wallet signing not available in copy trading mode");
     },
@@ -58,19 +73,18 @@ export async function restoreNordUser(session: CopySession): Promise<NordUser> {
     },
   });
 
-  // Refresh session on 01 Exchange (validates the keypair is still accepted)
-  // Note: refreshSession may fail in server context due to SDK limitations
-  // (e.g., missing browser-specific crypto methods like toHex)
-  // Refresh session + hydrate account info
-  // Note: Some SDK methods may fail in server context (e.g., toHex browser-only)
-  // We catch and log non-critical failures, but still try to make the user functional
-  try {
-    await user.refreshSession();
-  } catch (err) {
-    console.warn("[norduser-restore] refreshSession failed:", err instanceof Error ? err.message : err);
-    // Continue — session may still be valid from original creation
+  // If no sessionId was stored, try refreshSession (may fail server-side)
+  if (!sessionId) {
+    try {
+      await user.refreshSession();
+    } catch (err) {
+      console.warn("[norduser-restore] refreshSession failed (no sessionId stored):", err instanceof Error ? err.message : err);
+      // Can't proceed without valid session
+      throw new Error("Session expired or invalid — user needs to re-enable copy trading");
+    }
   }
 
+  // Hydrate account info (these use session-signed requests, should work)
   try {
     await user.updateAccountId();
   } catch (err) {

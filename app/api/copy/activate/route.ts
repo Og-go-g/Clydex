@@ -15,13 +15,13 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json();
-    const { sessionSecretKey } = body;
+    const { sessionSecretKey, sessionId } = body;
 
     if (!sessionSecretKey || typeof sessionSecretKey !== "string") {
       return NextResponse.json({ error: "sessionSecretKey is required (base58 string)" }, { status: 400 });
     }
 
-    const result = await activateSession(addr, sessionSecretKey);
+    const result = await activateSession(addr, sessionSecretKey, sessionId);
 
     return NextResponse.json({
       success: true,

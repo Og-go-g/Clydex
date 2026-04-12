@@ -16,6 +16,7 @@ const SESSION_TTL_DAYS = 30;
 export async function activateSession(
   walletAddr: string,
   sessionSecretKeyBase58: string,
+  sessionId?: string,
 ): Promise<{ sessionPubkey: string; expiresAt: Date }> {
   // Decode the secret key
   const secretKey = bs58.decode(sessionSecretKeyBase58);
@@ -47,7 +48,7 @@ export async function activateSession(
   const encrypted = encryptSessionKey(secretKey);
   const expiresAt = new Date(Date.now() + SESSION_TTL_DAYS * 24 * 60 * 60 * 1000);
 
-  await upsertSession(walletAddr, encrypted, sessionPubkey, expiresAt);
+  await upsertSession(walletAddr, encrypted, sessionPubkey, expiresAt, sessionId);
 
   return { sessionPubkey, expiresAt };
 }

@@ -1,3 +1,4 @@
+import "./polyfill";
 import { getAccount, getUser, getMarketStats } from "../n1/client";
 import { placeOrder, closePosition } from "../n1/user-client";
 import { ensureMarketCache, getCachedMarkets } from "../n1/constants";

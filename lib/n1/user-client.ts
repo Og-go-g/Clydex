@@ -95,6 +95,7 @@ export async function createNordUserWithSessionKey(params: CreateUserParams): Pr
   user: NordUser;
   sessionSecretKey: Uint8Array;
   sessionPublicKey: Uint8Array;
+  sessionId: string; // bigint as string for JSON transport
 }> {
   const nord = await getNord();
   const sessionKeypair = nacl.sign.keyPair();
@@ -114,10 +115,14 @@ export async function createNordUserWithSessionKey(params: CreateUserParams): Pr
   await user.updateAccountId();
   await user.fetchInfo();
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sessionId = String((user as any).sessionId ?? "0");
+
   return {
     user,
     sessionSecretKey: sessionKeypair.secretKey,
     sessionPublicKey: sessionKeypair.publicKey,
+    sessionId,
   };
 }
 

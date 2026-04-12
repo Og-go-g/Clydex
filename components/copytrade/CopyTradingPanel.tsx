@@ -110,17 +110,20 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
     try {
       // Create NordUser session in browser — wallet signs the session creation
       const { createNordUserWithSessionKey } = await import("@/lib/n1/user-client");
-      const { sessionSecretKey } = await createNordUserWithSessionKey({
+      const { sessionSecretKey, sessionId } = await createNordUserWithSessionKey({
         walletPubkey: publicKey,
         signMessageFn: signMessage,
         signTransactionFn: signTransaction as (tx: import("@solana/web3.js").Transaction) => Promise<import("@solana/web3.js").Transaction>,
       });
 
-      // Send session key to server for encrypted storage
+      // Send session key + sessionId to server for encrypted storage
       const res = await fetch("/api/copy/activate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionSecretKey: bs58.encode(sessionSecretKey) }),
+        body: JSON.stringify({
+          sessionSecretKey: bs58.encode(sessionSecretKey),
+          sessionId,
+        }),
       });
       const data = await res.json();
       if (!res.ok) {

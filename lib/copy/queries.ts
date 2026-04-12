@@ -10,6 +10,7 @@ export interface CopySession extends Record<string, unknown> {
   iv: string;
   authTag: string;
   sessionPubkey: string;
+  sessionIdStr: string | null; // bigint as string
   expiresAt: Date;
   createdAt: Date;
 }
@@ -61,19 +62,21 @@ export async function upsertSession(
   encrypted: EncryptedSession,
   sessionPubkey: string,
   expiresAt: Date,
+  sessionIdStr?: string,
 ): Promise<string> {
   const id = uuid();
   await execute(
-    `INSERT INTO copy_sessions (id, wallet_addr, encrypted_key, iv, auth_tag, session_pubkey, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `INSERT INTO copy_sessions (id, wallet_addr, encrypted_key, iv, auth_tag, session_pubkey, session_id_str, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      ON CONFLICT (wallet_addr) DO UPDATE SET
        encrypted_key = EXCLUDED.encrypted_key,
        iv = EXCLUDED.iv,
        auth_tag = EXCLUDED.auth_tag,
        session_pubkey = EXCLUDED.session_pubkey,
+       session_id_str = EXCLUDED.session_id_str,
        expires_at = EXCLUDED.expires_at,
        created_at = NOW()`,
-    [id, walletAddr, encrypted.ciphertext, encrypted.iv, encrypted.authTag, sessionPubkey, expiresAt],
+    [id, walletAddr, encrypted.ciphertext, encrypted.iv, encrypted.authTag, sessionPubkey, sessionIdStr ?? null, expiresAt],
   );
   return id;
 }
@@ -82,6 +85,7 @@ export async function getSession(walletAddr: string): Promise<CopySession | null
   const rows = await query<CopySession>(
     `SELECT id, wallet_addr AS "walletAddr", encrypted_key AS "encryptedKey",
             iv, auth_tag AS "authTag", session_pubkey AS "sessionPubkey",
+            session_id_str AS "sessionIdStr",
             expires_at AS "expiresAt", created_at AS "createdAt"
      FROM copy_sessions
      WHERE wallet_addr = $1 AND expires_at > NOW()`,
