@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/db";
+import { query } from "@/lib/db-history";
 
 /**
  * GET /api/stats — public endpoint returning aggregate stats.
@@ -7,7 +7,10 @@ import { prisma } from "@/lib/db";
  */
 export async function GET() {
   try {
-    const traders = await prisma.user.count();
+    const rows = await query<{ cnt: string }>(
+      `SELECT COUNT(*)::text AS cnt FROM pnl_totals`,
+    );
+    const traders = parseInt(rows[0]?.cnt ?? "0");
     return NextResponse.json(
       { traders },
       { headers: { "Cache-Control": "public, s-maxage=300, stale-while-revalidate=60" } },
