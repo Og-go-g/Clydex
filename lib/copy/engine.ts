@@ -1,6 +1,7 @@
 import "./polyfill";
+import { query as dbQuery } from "../db-history";
 import { getAccount, getUser, getMarketStats } from "../n1/client";
-import { placeOrder, closePosition } from "../n1/user-client";
+import { placeOrder, closePosition, setTrigger } from "../n1/user-client";
 import { ensureMarketCache, getCachedMarkets } from "../n1/constants";
 import { restoreNordUser } from "./norduser-restore";
 import {
@@ -397,6 +398,32 @@ async function executeCopyForFollower(
     }
 
     await updateCopyTradeStatus(tradeId, "filled", { price: markPrice.toString() });
+
+    // Set stop-loss trigger on exchange if configured (only for open/increase/flip-open)
+    const stopLossPct = follower.stopLossPct ? parseFloat(follower.stopLossPct) : null;
+    if (stopLossPct && isFinite(stopLossPct) && stopLossPct > 0 && stopLossPct <= 100 &&
+        diff.action !== "close" && diff.action !== "decrease") {
+      try {
+        const followerAccountId = await resolveAccountId(follower.followerAddr);
+        const stopPrice = diff.side === "Long"
+          ? markPrice * (1 - stopLossPct / 100)
+          : markPrice * (1 + stopLossPct / 100);
+
+        if (stopPrice > 0 && isFinite(stopPrice)) {
+          await setTrigger(nordUser, {
+            symbol: diff.symbol,
+            side: diff.side as "Long" | "Short",
+            kind: "StopLoss",
+            triggerPrice: Math.round(stopPrice * 1e6) / 1e6,
+            accountId: followerAccountId ?? undefined,
+          });
+        }
+      } catch (err) {
+        // Stop-loss is best-effort — don't fail the trade if trigger fails
+        console.warn(`[copy-engine] stop-loss trigger failed for ${follower.followerAddr} ${diff.symbol}:`, err);
+      }
+    }
+
     return { success: true };
   } catch (err) {
     let errorMsg: string;
@@ -472,23 +499,38 @@ export async function runCopyEngine(): Promise<EngineResult> {
         }
 
         // Load previous snapshots, compute diffs, THEN update snapshots
-        const snapshots = await getSnapshots(leaderAddr);
-        const isFirstRun = snapshots.length === 0;
+        // Advisory lock per leader — prevents concurrent engine cycles from racing on snapshots
+        const lockKey = Buffer.from(leaderAddr).reduce((h, b) => ((h << 5) - h + b) | 0, 0);
+        const lockResult = await dbQuery<{ locked: boolean }>(
+          `SELECT pg_try_advisory_lock($1) AS locked`, [lockKey],
+        );
+        if (!lockResult[0]?.locked) {
+          addError(result, `${leaderAddr}: skipped (locked by another cycle)`);
+          continue;
+        }
 
-        // Compute diffs BEFORE updating snapshots
-        const diffs = isFirstRun ? [] : computePositionDiffs(snapshots, positions, marketSymbols);
-        result.leadersProcessed++;
+        let diffs: PositionDiff[];
+        try {
+          const snapshots = await getSnapshots(leaderAddr);
+          const isFirstRun = snapshots.length === 0;
 
-        // Now update snapshots to current state (for next cycle)
-        await deleteSnapshots(leaderAddr);
-        for (const p of positions) {
-          const baseSize = p.perp?.baseSize ?? 0;
-          if (baseSize === 0) continue;
-          await upsertSnapshot(
-            leaderAddr, p.marketId,
-            Math.abs(baseSize).toString(),
-            baseSize > 0 ? "Long" : "Short",
-          );
+          // Compute diffs BEFORE updating snapshots
+          diffs = isFirstRun ? [] : computePositionDiffs(snapshots, positions, marketSymbols);
+          result.leadersProcessed++;
+
+          // Now update snapshots to current state (for next cycle)
+          await deleteSnapshots(leaderAddr);
+          for (const p of positions) {
+            const baseSize = p.perp?.baseSize ?? 0;
+            if (baseSize === 0) continue;
+            await upsertSnapshot(
+              leaderAddr, p.marketId,
+              Math.abs(baseSize).toString(),
+              baseSize > 0 ? "Long" : "Short",
+            );
+          }
+        } finally {
+          await dbQuery(`SELECT pg_advisory_unlock($1)`, [lockKey]);
         }
 
         if (diffs.length === 0) continue;

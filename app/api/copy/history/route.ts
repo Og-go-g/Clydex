@@ -52,6 +52,7 @@ export async function GET(req: NextRequest) {
     if (msg.includes("ECONNREFUSED") || msg.includes("connect")) {
       return NextResponse.json({ trades: [], total: 0, limit, offset });
     }
-    return NextResponse.json({ error: msg }, { status: 500 });
+    console.error("[copy/history]", msg);
+    return NextResponse.json({ error: "An internal error occurred" }, { status: 500 });
   }
 }

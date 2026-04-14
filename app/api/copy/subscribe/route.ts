@@ -24,16 +24,25 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { leaderAddr, allocationUsdc, leverageMult, maxPositionUsdc, maxTotalPositionUsdc, stopLossPct } = body;
 
-    const isAccountId = typeof leaderAddr === "string" && leaderAddr.startsWith("account:");
-    const isSolanaAddr = typeof leaderAddr === "string" && leaderAddr.length >= 32 && leaderAddr.length <= 44;
+    const isAccountId = typeof leaderAddr === "string" && /^account:\d+$/.test(leaderAddr);
+    const isSolanaAddr = typeof leaderAddr === "string" && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(leaderAddr);
     if (!leaderAddr || (!isAccountId && !isSolanaAddr)) {
       return NextResponse.json({ error: "leaderAddr must be a valid address" }, { status: 400 });
     }
-    if (!allocationUsdc || typeof allocationUsdc !== "number" || allocationUsdc < 10 || allocationUsdc > 10_000_000) {
+    if (!allocationUsdc || typeof allocationUsdc !== "number" || !isFinite(allocationUsdc) || allocationUsdc < 10 || allocationUsdc > 10_000_000) {
       return NextResponse.json({ error: "allocationUsdc must be between $10 and $10,000,000" }, { status: 400 });
     }
-    if (leverageMult !== undefined && (typeof leverageMult !== "number" || leverageMult < 1 || leverageMult > 5)) {
+    if (leverageMult !== undefined && (typeof leverageMult !== "number" || !isFinite(leverageMult) || leverageMult < 1 || leverageMult > 5)) {
       return NextResponse.json({ error: "leverageMult must be between 1 and 5" }, { status: 400 });
+    }
+    if (maxPositionUsdc !== undefined && (typeof maxPositionUsdc !== "number" || !isFinite(maxPositionUsdc) || maxPositionUsdc <= 0)) {
+      return NextResponse.json({ error: "maxPositionUsdc must be a positive number" }, { status: 400 });
+    }
+    if (maxTotalPositionUsdc !== undefined && (typeof maxTotalPositionUsdc !== "number" || !isFinite(maxTotalPositionUsdc) || maxTotalPositionUsdc <= 0)) {
+      return NextResponse.json({ error: "maxTotalPositionUsdc must be a positive number" }, { status: 400 });
+    }
+    if (stopLossPct !== undefined && (typeof stopLossPct !== "number" || !isFinite(stopLossPct) || stopLossPct <= 0 || stopLossPct > 100)) {
+      return NextResponse.json({ error: "stopLossPct must be between 1 and 100" }, { status: 400 });
     }
     if (leaderAddr === addr) {
       return NextResponse.json({ error: "Cannot follow yourself" }, { status: 400 });

@@ -356,6 +356,7 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
                       </div>
                     </div>
                   </div>
+                  {/* Stop Loss */}
                   <div className="mb-5">
                     <label className="mb-1.5 flex items-center gap-1 text-xs font-medium text-gray-400">
                       Stop Loss
@@ -372,6 +373,7 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
                       />
                       <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-500">%</span>
                     </div>
+                    <p className="mt-1 text-[9px] text-gray-600">Sets a stop-loss trigger on the exchange for each copied position</p>
                   </div>
 
                   {/* Summary box */}

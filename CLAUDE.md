@@ -8,7 +8,7 @@ No shortcuts, no placeholders, no "TODO" comments. Ship complete features.
 - **Frontend:** Next.js 16 (App Router, Turbopack), TypeScript, TailwindCSS
 - **Web3:** @solana/web3.js, @solana/wallet-adapter-react, @n1xyz/nord-ts (01 Exchange SDK)
 - **Backend:** REST API routes in Next.js
-- **Database:** PostgreSQL + Prisma ORM (Neon)
+- **Database:** PostgreSQL (local) + Prisma ORM (main DB) + raw pg pool (history/TimescaleDB)
 - **Auth:** SIWS (Sign-In with Solana) via iron-session encrypted cookies
 - **Monitoring:** Sentry, Upstash Redis for rate limiting
 

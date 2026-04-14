@@ -1,5 +1,5 @@
 /**
- * Chat history sync — background sync between localStorage and Neon DB.
+ * Chat history sync — background sync between localStorage and PostgreSQL.
  *
  * Strategy:
  * - localStorage remains the primary source (fast, works offline)

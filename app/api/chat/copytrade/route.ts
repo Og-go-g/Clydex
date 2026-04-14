@@ -347,6 +347,12 @@ export async function POST(req: Request) {
               return { error: "You cannot follow yourself." };
             }
 
+            // Check for existing subscription
+            const existing = (await getSubscriptions(walletAddress)).find((s) => s.leaderAddr === leaderAddr);
+            if (existing) {
+              return { error: `Already following ${fmtAddr(leaderAddr)}. Use the Copy Trading panel to modify settings.` };
+            }
+
             const id = await createSubscription({
               followerAddr: walletAddress,
               leaderAddr,

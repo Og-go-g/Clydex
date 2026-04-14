@@ -91,6 +91,7 @@ export async function GET() {
         recentTrades: [],
       });
     }
-    return NextResponse.json({ error: msg }, { status: 500 });
+    console.error("[copy/status]", msg);
+    return NextResponse.json({ error: "An internal error occurred" }, { status: 500 });
   }
 }
