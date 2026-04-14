@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { prisma } from "@/lib/db";
 import { query } from "@/lib/db-history";
 
 /**
@@ -7,16 +8,17 @@ import { query } from "@/lib/db-history";
  */
 export async function GET() {
   try {
-    const rows = await query<{ cnt: string }>(
-      `SELECT COUNT(*)::text AS cnt FROM pnl_totals`,
-    );
-    const traders = parseInt(rows[0]?.cnt ?? "0");
+    const [users, traderRows] = await Promise.all([
+      prisma.user.count().catch(() => null),
+      query<{ cnt: string }>(`SELECT COUNT(*)::text AS cnt FROM pnl_totals`).catch(() => []),
+    ]);
+    const traders = parseInt(traderRows[0]?.cnt ?? "0");
     return NextResponse.json(
-      { traders },
+      { users, traders },
       { headers: { "Cache-Control": "public, s-maxage=300, stale-while-revalidate=60" } },
     );
   } catch (error) {
     console.error("[api/stats] error:", error);
-    return NextResponse.json({ traders: null }, { status: 500 });
+    return NextResponse.json({ users: null, traders: null }, { status: 500 });
   }
 }

@@ -3,22 +3,22 @@
 import { useState, useEffect } from "react";
 
 export function Footer() {
-  const [traders, setTraders] = useState<number | null>(null);
+  const [users, setUsers] = useState<number | null>(null);
 
   useEffect(() => {
     fetch("/api/stats")
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
-        if (d && typeof d.traders === "number") setTraders(d.traders);
+        if (d && typeof d.users === "number") setUsers(d.users);
       })
       .catch(() => {});
   }, []);
 
   return (
     <footer id="site-footer" className="flex items-center justify-between px-6 py-4 bg-[#0a0a0a]/[0.08] backdrop-blur-sm">
-      {traders !== null ? (
+      {users !== null ? (
         <span className="text-[11px] text-gray-600">
-          <span className="text-gray-400">{traders.toLocaleString()}</span> users
+          <span className="text-gray-400">{users.toLocaleString()}</span> users
         </span>
       ) : (
         <span />
