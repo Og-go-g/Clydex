@@ -11,7 +11,22 @@
  * pnl_history, funding_history) are current. Call recomputeAggregates()
  * immediately after a successful sync cycle.
  *
- * Funding-accounting model is env-controlled (PNL_FUNDING_MODEL):
+ * ─── Duplicate-row handling ─────────────────────────────────────────
+ *
+ * History tables contain duplicate rows per logical event: one inserted
+ * when the account was first seen via placeholder walletAddr 'account:<id>',
+ * a second when sync later resolved the real Solana address. The unique
+ * constraint is on (walletAddr, marketId, time) — different walletAddr for
+ * the same event bypasses it.
+ *
+ * We dedupe inline via DISTINCT ON (accountId, marketId, time), preferring
+ * rows with a real walletAddr so newer/more-complete fills win. This keeps
+ * totals correct without mutating storage; an async cleanup migration will
+ * eventually drop placeholder rows where a real one exists.
+ *
+ * ─── Funding accounting ─────────────────────────────────────────────
+ *
+ * Env-controlled via PNL_FUNDING_MODEL:
  *   - "pnl-only"      — totalFundingPnl = SUM(pnl_history.settledFundingPnl)   [default]
  *   - "funding-only"  — totalFundingPnl = SUM(funding_history.fundingPnl)
  *   - "both"          — totalFundingPnl = SUM of both (use only if 01.xyz double-counts)
@@ -48,33 +63,55 @@ export async function recomputePnlTotals(
   walletAddr: string,
   model: FundingModel = getFundingModel(),
 ): Promise<void> {
-  // Funding term varies per model. Trading term is always the same.
-  // All three branches are plain SELECT subqueries, filtered on accountId.
-  const fundingSql = ((): string => {
+  // Dedupe rule (same for all CTEs below): DISTINCT ON (accountId, marketId, time)
+  // with ORDER BY preferring real walletAddr over 'account:%' placeholder.
+  // This collapses duplicate rows that entered the table before the
+  // accountId→real-wallet mapping was resolved.
+
+  // CTEs hold trading + settled-funding pulled from deduped pnl_history
+  // and optional standalone funding pulled from deduped funding_history.
+  // The final INSERT picks a different funding term per model.
+  const fundingExpr = ((): string => {
     switch (model) {
       case "pnl-only":
-        return `COALESCE((SELECT SUM("settledFundingPnl")::numeric
-                            FROM pnl_history WHERE "accountId" = $1), 0)`;
+        return `COALESCE(pnl.settled, 0)`;
       case "funding-only":
-        return `COALESCE((SELECT SUM("fundingPnl")::numeric
-                            FROM funding_history WHERE "accountId" = $1), 0)`;
+        return `COALESCE(fund.standalone, 0)`;
       case "both":
-        return `(
-          COALESCE((SELECT SUM("settledFundingPnl")::numeric
-                      FROM pnl_history     WHERE "accountId" = $1), 0)
-          +
-          COALESCE((SELECT SUM("fundingPnl")::numeric
-                      FROM funding_history WHERE "accountId" = $1), 0)
-        )`;
+        return `COALESCE(pnl.settled, 0) + COALESCE(fund.standalone, 0)`;
     }
   })();
 
   await execute(
-    `WITH agg AS (
-       SELECT
-         COALESCE((SELECT SUM("tradingPnl")::numeric
-                     FROM pnl_history WHERE "accountId" = $1), 0)::numeric AS trading,
-         ${fundingSql}::numeric AS funding
+    `WITH pnl_dedup AS (
+       SELECT DISTINCT ON ("accountId", "marketId", "time")
+              "tradingPnl"::numeric        AS trading_pnl,
+              "settledFundingPnl"::numeric AS settled_funding
+       FROM pnl_history
+       WHERE "accountId" = $1
+       ORDER BY "accountId", "marketId", "time",
+                (CASE WHEN "walletAddr" LIKE 'account:%' THEN 1 ELSE 0 END)
+     ),
+     pnl AS (
+       SELECT SUM(trading_pnl)::numeric   AS trading,
+              SUM(settled_funding)::numeric AS settled
+       FROM pnl_dedup
+     ),
+     fund_dedup AS (
+       SELECT DISTINCT ON ("accountId", "marketId", "time")
+              "fundingPnl"::numeric AS funding_pnl
+       FROM funding_history
+       WHERE "accountId" = $1
+       ORDER BY "accountId", "marketId", "time",
+                (CASE WHEN "walletAddr" LIKE 'account:%' THEN 1 ELSE 0 END)
+     ),
+     fund AS (
+       SELECT SUM(funding_pnl)::numeric AS standalone FROM fund_dedup
+     ),
+     agg AS (
+       SELECT COALESCE(pnl.trading, 0)::numeric AS trading,
+              (${fundingExpr})::numeric         AS funding
+       FROM pnl LEFT JOIN fund ON TRUE
      )
      INSERT INTO pnl_totals (
        id, "accountId", "walletAddr",
@@ -112,8 +149,20 @@ export async function recomputeVolumeCalendar(
   accountId: number,
   walletAddr: string,
 ): Promise<number> {
+  // DISTINCT ON (tradeId, role) dedupes placeholder+real rows the same way
+  // recomputePnlTotals does for (marketId, time). Role is part of the key
+  // because the same tradeId legitimately appears twice when both taker
+  // and maker sides of a trade are tracked.
   return execute(
-    `INSERT INTO volume_calendar (
+    `WITH dedup AS (
+       SELECT DISTINCT ON ("tradeId", role)
+              "time", size, price, role, fee
+       FROM trade_history
+       WHERE "accountId" = $1
+       ORDER BY "tradeId", role,
+                (CASE WHEN "walletAddr" LIKE 'account:%' THEN 1 ELSE 0 END)
+     )
+     INSERT INTO volume_calendar (
        id, "accountId", "walletAddr", date,
        volume, "makerVolume", "takerVolume",
        "makerFees", "takerFees", "totalFees"
@@ -129,8 +178,7 @@ export async function recomputeVolumeCalendar(
        COALESCE(SUM(fee::numeric)                   FILTER (WHERE role = 'maker'), 0) AS maker_fees,
        COALESCE(SUM(fee::numeric)                   FILTER (WHERE role = 'taker'), 0) AS taker_fees,
        COALESCE(SUM(fee::numeric), 0)                                               AS total_fees
-     FROM trade_history
-     WHERE "accountId" = $1
+     FROM dedup
      GROUP BY date_trunc('day', "time")
      ON CONFLICT ("walletAddr", date) DO UPDATE SET
        "accountId"   = EXCLUDED."accountId",
