@@ -59,3 +59,21 @@ USER nextjs
 EXPOSE 3000
 
 CMD ["node", "server.js"]
+
+# ─── Stage 4: Worker ──────────────────────────────────────────
+# Background job processor — runs tsx against full source tree.
+# Needs node_modules, source code, and generated Prisma clients.
+FROM node:22-alpine AS worker
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+
+# Regenerate Prisma clients (same as builder — isolated filesystem per stage)
+RUN npx prisma generate --schema prisma/schema.prisma && \
+    npx prisma generate --schema prisma/history.prisma
+
+# Worker runs as root for simplicity (same host network as app, no UID concerns)
+CMD ["npx", "tsx", "worker/index.ts"]

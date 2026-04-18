@@ -1,5 +1,6 @@
 import "./polyfill";
 import { query as dbQuery } from "../db-history";
+import { withRetry } from "../util/retry";
 import { getAccount, getUser, getMarketStats } from "../n1/client";
 import { placeOrder, closePosition, setTrigger } from "../n1/user-client";
 import { ensureMarketCache, getCachedMarkets } from "../n1/constants";
@@ -170,33 +171,7 @@ function computePositionDiffs(
   return diffs;
 }
 
-// ─── Retry Helper ────────────────────────────────────────────────
-
-async function withRetry<T>(
-  fn: () => Promise<T>,
-  retries: number,
-  delayMs: number,
-  label: string,
-): Promise<T> {
-  let lastErr: unknown;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      lastErr = err;
-      const msg = err instanceof Error ? err.message : String(err);
-      // Don't retry on user/exchange errors that won't change on retry
-      if (msg.includes("insufficient") || msg.includes("Invalid") || msg.includes("too small") || msg.includes("already submitted")) {
-        throw err;
-      }
-      if (attempt < retries) {
-        console.warn(`[copy-engine] ${label} attempt ${attempt + 1} failed, retrying in ${delayMs}ms: ${msg}`);
-        await new Promise((r) => setTimeout(r, delayMs));
-      }
-    }
-  }
-  throw lastErr;
-}
+// withRetry extracted to lib/util/retry.ts
 
 // ─── Execute Copy for One Follower ───────────────────────────────
 

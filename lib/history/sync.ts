@@ -1,6 +1,8 @@
 import { historyPool, query, execute, uuid } from "@/lib/db-history";
 import { N1_MAINNET_URL } from "@/lib/n1/constants";
 import { ensureMarketCache, getCachedMarkets } from "@/lib/n1/constants";
+import type { FetchContext } from "./fetch-context";
+import { retryableFetch, BROWSER_HEADERS } from "./fetch-context";
 import type { HistoryType, SyncResult, SyncProgress } from "./types";
 
 // ─── 01 Exchange API Types ────────────────────────────────────────
@@ -96,15 +98,27 @@ interface PaginatedResponse<T> {
 const API_BASE = N1_MAINNET_URL;
 const PAGE_SIZE = 50;
 
-async function fetchPage<T>(url: string): Promise<PaginatedResponse<T>> {
-  const res = await fetch(url, {
-    headers: { "Accept": "application/json" },
-    signal: AbortSignal.timeout(15_000),
-  });
+async function fetchPage<T>(url: string, ctx?: FetchContext): Promise<PaginatedResponse<T>> {
+  const res = ctx?.agent
+    ? await retryableFetch(url, {
+        headers: { "Accept": "application/json" },
+        agent: ctx.agent,
+        timeoutMs: 15_000,
+        retries: 3,
+      })
+    : await fetch(url, {
+        headers: { "Accept": "application/json" },
+        signal: AbortSignal.timeout(15_000),
+      });
+
   if (!res.ok) {
     throw new Error(`01 API error: ${res.status} ${res.statusText} for ${url}`);
   }
   const body = await res.json();
+
+  if (ctx?.postDelayMs) {
+    await new Promise((r) => setTimeout(r, ctx.postDelayMs));
+  }
 
   if (Array.isArray(body)) {
     return { data: body as T[], hasMore: body.length >= PAGE_SIZE, cursor: undefined };
@@ -144,7 +158,7 @@ async function setCursor(walletAddr: string, type: HistoryType, cursor: string):
 
 // ─── Individual Sync Functions ────────────────────────────────────
 
-async function syncTrades(accountId: number, walletAddr: string, since?: string): Promise<SyncResult> {
+async function syncTrades(accountId: number, walletAddr: string, since?: string, ctx?: FetchContext): Promise<SyncResult> {
   let totalInserted = 0;
 
   for (const role of ["taker", "maker"] as const) {
@@ -157,7 +171,7 @@ async function syncTrades(accountId: number, walletAddr: string, since?: string)
       if (since) url += `&since=${encodeURIComponent(since)}`;
       if (cursor) url += `&startInclusive=${encodeURIComponent(String(cursor))}`;
 
-      const page = await fetchPage<ApiTrade>(url);
+      const page = await fetchPage<ApiTrade>(url, ctx);
       if (page.data.length === 0) break;
 
       const tradeIds = page.data.map((t) => String(t.tradeId));
@@ -192,7 +206,7 @@ async function syncTrades(accountId: number, walletAddr: string, since?: string)
   return { type: "trades", inserted: totalInserted, hasMore: false };
 }
 
-async function syncOrders(accountId: number, walletAddr: string, since?: string): Promise<SyncResult> {
+async function syncOrders(accountId: number, walletAddr: string, since?: string, ctx?: FetchContext): Promise<SyncResult> {
   let totalInserted = 0;
   let cursor: string | undefined;
   let hasMore = true;
@@ -202,7 +216,7 @@ async function syncOrders(accountId: number, walletAddr: string, since?: string)
     if (since) url += `&since=${encodeURIComponent(since)}`;
     if (cursor) url += `&startInclusive=${encodeURIComponent(String(cursor))}`;
 
-    const page = await fetchPage<ApiOrder>(url);
+    const page = await fetchPage<ApiOrder>(url, ctx);
     if (page.data.length === 0) break;
 
     const d = page.data;
@@ -239,7 +253,7 @@ async function syncOrders(accountId: number, walletAddr: string, since?: string)
   return { type: "orders", inserted: totalInserted, hasMore: false };
 }
 
-async function syncPnl(accountId: number, walletAddr: string, since?: string): Promise<SyncResult> {
+async function syncPnl(accountId: number, walletAddr: string, since?: string, ctx?: FetchContext): Promise<SyncResult> {
   let totalInserted = 0;
   let cursor: string | undefined;
   let hasMore = true;
@@ -249,7 +263,7 @@ async function syncPnl(accountId: number, walletAddr: string, since?: string): P
     if (since) url += `&since=${encodeURIComponent(since)}`;
     if (cursor) url += `&startInclusive=${encodeURIComponent(String(cursor))}`;
 
-    const page = await fetchPage<ApiPnl>(url);
+    const page = await fetchPage<ApiPnl>(url, ctx);
     if (page.data.length === 0) break;
 
     const d = page.data;
@@ -278,7 +292,7 @@ async function syncPnl(accountId: number, walletAddr: string, since?: string): P
   return { type: "pnl", inserted: totalInserted, hasMore: false };
 }
 
-async function syncFunding(accountId: number, walletAddr: string, since?: string): Promise<SyncResult> {
+async function syncFunding(accountId: number, walletAddr: string, since?: string, ctx?: FetchContext): Promise<SyncResult> {
   let totalInserted = 0;
   let cursor: string | undefined;
   let hasMore = true;
@@ -288,7 +302,7 @@ async function syncFunding(accountId: number, walletAddr: string, since?: string
     if (since) url += `&since=${encodeURIComponent(since)}`;
     if (cursor) url += `&startInclusive=${encodeURIComponent(String(cursor))}`;
 
-    const page = await fetchPage<ApiFunding>(url);
+    const page = await fetchPage<ApiFunding>(url, ctx);
     if (page.data.length === 0) break;
 
     const d = page.data;
@@ -316,7 +330,7 @@ async function syncFunding(accountId: number, walletAddr: string, since?: string
   return { type: "funding", inserted: totalInserted, hasMore: false };
 }
 
-async function syncDeposits(accountId: number, walletAddr: string, since?: string): Promise<SyncResult> {
+async function syncDeposits(accountId: number, walletAddr: string, since?: string, ctx?: FetchContext): Promise<SyncResult> {
   let totalInserted = 0;
   let cursor: string | undefined;
   let hasMore = true;
@@ -326,7 +340,7 @@ async function syncDeposits(accountId: number, walletAddr: string, since?: strin
     if (since) url += `&since=${encodeURIComponent(since)}`;
     if (cursor) url += `&startInclusive=${encodeURIComponent(String(cursor))}`;
 
-    const page = await fetchPage<ApiDeposit>(url);
+    const page = await fetchPage<ApiDeposit>(url, ctx);
     if (page.data.length === 0) break;
 
     const d = page.data;
@@ -353,7 +367,7 @@ async function syncDeposits(accountId: number, walletAddr: string, since?: strin
   return { type: "deposits", inserted: totalInserted, hasMore: false };
 }
 
-async function syncWithdrawals(accountId: number, walletAddr: string, since?: string): Promise<SyncResult> {
+async function syncWithdrawals(accountId: number, walletAddr: string, since?: string, ctx?: FetchContext): Promise<SyncResult> {
   let totalInserted = 0;
   let cursor: string | undefined;
   let hasMore = true;
@@ -363,7 +377,7 @@ async function syncWithdrawals(accountId: number, walletAddr: string, since?: st
     if (since) url += `&since=${encodeURIComponent(since)}`;
     if (cursor) url += `&startInclusive=${encodeURIComponent(String(cursor))}`;
 
-    const page = await fetchPage<ApiWithdrawal>(url);
+    const page = await fetchPage<ApiWithdrawal>(url, ctx);
     if (page.data.length === 0) break;
 
     const d = page.data;
@@ -391,7 +405,7 @@ async function syncWithdrawals(accountId: number, walletAddr: string, since?: st
   return { type: "withdrawals", inserted: totalInserted, hasMore: false };
 }
 
-async function syncLiquidations(accountId: number, walletAddr: string, since?: string): Promise<SyncResult> {
+async function syncLiquidations(accountId: number, walletAddr: string, since?: string, ctx?: FetchContext): Promise<SyncResult> {
   let totalInserted = 0;
   let cursor: string | undefined;
   let hasMore = true;
@@ -401,7 +415,7 @@ async function syncLiquidations(accountId: number, walletAddr: string, since?: s
     if (since) url += `&since=${encodeURIComponent(since)}`;
     if (cursor) url += `&startInclusive=${encodeURIComponent(String(cursor))}`;
 
-    const page = await fetchPage<ApiLiquidation>(url);
+    const page = await fetchPage<ApiLiquidation>(url, ctx);
     if (page.data.length === 0) break;
 
     const d = page.data;
@@ -432,25 +446,31 @@ async function syncLiquidations(accountId: number, walletAddr: string, since?: s
 }
 
 // ─── 01.xyz Frontend API Sync ────────────────────────────────────
+// BROWSER_HEADERS imported from ./fetch-context
 
 const FRONTEND_API = "https://01.xyz/api";
-const BROWSER_HEADERS: Record<string, string> = {
-  Accept: "application/json, text/plain, */*",
-  "Accept-Language": "en-US,en;q=0.9",
-  "User-Agent":
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-  Referer: "https://01.xyz/",
-  Origin: "https://01.xyz",
-};
 
-export async function syncVolumeCalendar(accountId: number, walletAddr: string): Promise<number> {
+export async function syncVolumeCalendar(
+  accountId: number,
+  walletAddr: string,
+  ctx?: FetchContext,
+): Promise<number> {
   try {
-    const res = await fetch(`${FRONTEND_API}/volume-calendar/${accountId}`, {
-      headers: BROWSER_HEADERS,
-      signal: AbortSignal.timeout(15_000),
-    });
+    const url = `${FRONTEND_API}/volume-calendar/${accountId}`;
+    const res = ctx?.agent
+      ? await retryableFetch(url, {
+          headers: BROWSER_HEADERS,
+          agent: ctx.agent,
+          timeoutMs: 15_000,
+          retries: 3,
+        })
+      : await fetch(url, {
+          headers: BROWSER_HEADERS,
+          signal: AbortSignal.timeout(15_000),
+        });
     if (!res.ok) return 0;
     const body = await res.json();
+    if (ctx?.postDelayMs) await new Promise((r) => setTimeout(r, ctx.postDelayMs));
     const days = body.days ?? {};
     const entries = Object.entries(days) as [string, Record<string, number>][];
     if (entries.length === 0) return 0;
@@ -481,14 +501,27 @@ export async function syncVolumeCalendar(accountId: number, walletAddr: string):
   }
 }
 
-export async function syncPnlTotals(accountId: number, walletAddr: string): Promise<boolean> {
+export async function syncPnlTotals(
+  accountId: number,
+  walletAddr: string,
+  ctx?: FetchContext,
+): Promise<boolean> {
   try {
-    const res = await fetch(`${FRONTEND_API}/pnl-totals/${accountId}`, {
-      headers: BROWSER_HEADERS,
-      signal: AbortSignal.timeout(15_000),
-    });
+    const url = `${FRONTEND_API}/pnl-totals/${accountId}`;
+    const res = ctx?.agent
+      ? await retryableFetch(url, {
+          headers: BROWSER_HEADERS,
+          agent: ctx.agent,
+          timeoutMs: 15_000,
+          retries: 3,
+        })
+      : await fetch(url, {
+          headers: BROWSER_HEADERS,
+          signal: AbortSignal.timeout(15_000),
+        });
     if (!res.ok) return false;
     const body = await res.json();
+    if (ctx?.postDelayMs) await new Promise((r) => setTimeout(r, ctx.postDelayMs));
 
     await historyPool.query(
       `INSERT INTO pnl_totals (id, "accountId", "walletAddr", "totalPnl", "totalTradingPnl", "totalFundingPnl", "fetchedAt")
@@ -515,7 +548,9 @@ export async function syncPnlTotals(accountId: number, walletAddr: string): Prom
 
 // ─── Sync Dispatcher ──────────────────────────────────────────────
 
-const SYNC_FNS: Record<HistoryType, (accountId: number, walletAddr: string, since?: string) => Promise<SyncResult>> = {
+type SyncFn = (accountId: number, walletAddr: string, since?: string, ctx?: FetchContext) => Promise<SyncResult>;
+
+const SYNC_FNS: Record<HistoryType, SyncFn> = {
   trades: syncTrades,
   orders: syncOrders,
   pnl: syncPnl,
@@ -531,6 +566,7 @@ export async function syncAllHistory(
   accountId: number,
   walletAddr: string,
   onProgress?: (progress: SyncProgress) => void,
+  ctx?: FetchContext,
 ): Promise<SyncResult[]> {
   await ensureMarketCache();
 
@@ -542,7 +578,7 @@ export async function syncAllHistory(
     const syncFn = SYNC_FNS[type];
 
     try {
-      const result = await syncFn(accountId, walletAddr, since ?? undefined);
+      const result = await syncFn(accountId, walletAddr, since ?? undefined, ctx);
       results.push(result);
       await setCursor(walletAddr, type, new Date().toISOString());
     } catch (err) {
@@ -557,8 +593,8 @@ export async function syncAllHistory(
   // Also sync 01.xyz frontend data (volume-calendar + pnl-totals)
   try {
     await Promise.all([
-      syncVolumeCalendar(accountId, walletAddr),
-      syncPnlTotals(accountId, walletAddr),
+      syncVolumeCalendar(accountId, walletAddr, ctx),
+      syncPnlTotals(accountId, walletAddr, ctx),
     ]);
   } catch (err) {
     console.error(`[history/sync] frontend API sync failed for ${walletAddr}:`, err);
@@ -571,6 +607,7 @@ export async function syncHistoryType(
   accountId: number,
   walletAddr: string,
   type: HistoryType,
+  ctx?: FetchContext,
 ): Promise<SyncResult> {
   await ensureMarketCache();
 
@@ -578,7 +615,7 @@ export async function syncHistoryType(
   const syncFn = SYNC_FNS[type];
 
   try {
-    const result = await syncFn(accountId, walletAddr, since ?? undefined);
+    const result = await syncFn(accountId, walletAddr, since ?? undefined, ctx);
     await setCursor(walletAddr, type, new Date().toISOString());
     return result;
   } catch (err) {
