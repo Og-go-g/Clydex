@@ -63,4 +63,28 @@ ON CONFLICT ("accountId") DO NOTHING;
 
 SELECT COUNT(*) AS seeded_rows FROM account_pubkey;
 
+-- ─── Ownership / grants ───────────────────────────────────────────────────
+-- The worker connects under a non-superuser role. When this file is run via
+-- `sudo -u postgres psql`, the table ends up owned by `postgres` and the
+-- worker role gets `permission denied`. Match ownership to whoever owns the
+-- existing history tables (pnl_history is a safe representative).
+
+DO $$
+DECLARE
+  owner_name text;
+BEGIN
+  SELECT tableowner INTO owner_name FROM pg_tables
+    WHERE schemaname = 'public' AND tablename = 'pnl_history'
+    LIMIT 1;
+
+  IF owner_name IS NULL OR owner_name = current_user THEN
+    RAISE NOTICE 'skipping account_pubkey ownership change (owner=%)', owner_name;
+    RETURN;
+  END IF;
+
+  EXECUTE format('ALTER TABLE account_pubkey OWNER TO %I', owner_name);
+  EXECUTE format('GRANT ALL PRIVILEGES ON TABLE account_pubkey TO %I', owner_name);
+  RAISE NOTICE 'account_pubkey owner → %', owner_name;
+END $$;
+
 COMMIT;
