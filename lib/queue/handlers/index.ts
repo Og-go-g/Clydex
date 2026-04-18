@@ -13,8 +13,11 @@ import { handleLeaderboardBatch } from "./leaderboard-batch";
 import { handleSyncUserHistory } from "./sync-user-history";
 import { handleOnDemandRefresh } from "./on-demand-refresh";
 import { handleSyncUsersEnqueuer } from "./sync-users-enqueuer";
+import { handleResolveWallets } from "./resolve-wallets";
+import { handleResolveWalletsBatch } from "./resolve-wallets-batch";
 
 const BATCH_CONCURRENCY = Number(process.env.WORKER_BATCH_CONCURRENCY || "5");
+const RESOLVE_CONCURRENCY = Number(process.env.RESOLVE_WALLETS_CONCURRENCY || "3");
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyJob<T = any> = { id: string; name: string; data: T };
@@ -75,5 +78,30 @@ export async function registerHandlers(boss: PgBoss): Promise<void> {
     },
   );
 
-  console.log(`[worker] handlers registered (batch concurrency: ${BATCH_CONCURRENCY})`);
+  // Wallet resolver — orchestrator (one at a time)
+  await boss.work<Payloads[typeof JOB.resolveWallets]>(
+    JOB.resolveWallets,
+    { localConcurrency: 1 },
+    async (jobs) => {
+      for (const j of jobs) {
+        await handleResolveWallets(j as AnyJob<Payloads[typeof JOB.resolveWallets]>);
+      }
+    },
+  );
+
+  // Wallet resolver — batch workers
+  await boss.work<Payloads[typeof JOB.resolveWalletsBatch]>(
+    JOB.resolveWalletsBatch,
+    { localConcurrency: RESOLVE_CONCURRENCY },
+    async (jobs) => {
+      for (const j of jobs) {
+        await handleResolveWalletsBatch(j as AnyJob<Payloads[typeof JOB.resolveWalletsBatch]>);
+      }
+    },
+  );
+
+  console.log(
+    `[worker] handlers registered (batch concurrency: ${BATCH_CONCURRENCY}, ` +
+    `resolve concurrency: ${RESOLVE_CONCURRENCY})`,
+  );
 }

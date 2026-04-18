@@ -198,3 +198,22 @@ model PnlTotals {
 
   @@map("pnl_totals")
 }
+
+// ---------------------------------------------------------------------------
+//  AccountPubkey — canonical accountId → solana pubkey mapping
+//
+//  Populated by the resolve-wallets pg-boss job (every 15 min) and the
+//  scripts/resolve-all-wallets.ts one-off backfill. Feeds the whole pipeline
+//  so raw/aggregate tables can be rewritten from `account:<id>` placeholders
+//  to real wallet addresses.
+// ---------------------------------------------------------------------------
+model AccountPubkey {
+  accountId      Int       @id
+  pubkey         String?                        // NULL when notFound or transient failure
+  notFound       Boolean   @default(false)      // 404 from /account/{id}/pubkey
+  failedAttempts Int       @default(0) @db.SmallInt
+  resolvedAt     DateTime?
+  lastCheckedAt  DateTime  @default(now())
+
+  @@map("account_pubkey")
+}

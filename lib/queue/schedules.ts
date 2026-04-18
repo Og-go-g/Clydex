@@ -34,6 +34,11 @@ export async function registerSchedules(boss: PgBoss): Promise<void> {
   // Per-user history fan-out — nightly 02:00 UTC
   await boss.schedule(JOB.syncUsersEnqueuer, "0 2 * * *", {});
 
+  // Wallet resolver — every 15 min. Picks up new accounts (delta against
+  // /accounts/count) and retries 404-marked rows. Delta is tiny once the
+  // one-off backfill has run, so cadence can stay frequent.
+  await boss.schedule(JOB.resolveWallets, "*/15 * * * *", {});
+
   console.log("[worker] schedules registered");
 }
 
@@ -43,5 +48,6 @@ export async function registerSchedules(boss: PgBoss): Promise<void> {
 export async function clearSchedules(boss: PgBoss): Promise<void> {
   await boss.unschedule(JOB.refreshTier);
   await boss.unschedule(JOB.syncUsersEnqueuer);
+  await boss.unschedule(JOB.resolveWallets);
   console.log("[worker] schedules cleared");
 }

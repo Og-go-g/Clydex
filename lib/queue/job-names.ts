@@ -4,11 +4,13 @@
  */
 
 export const JOB = {
-  refreshTier:       "refresh-leaderboard-tier",
-  leaderboardBatch:  "leaderboard-batch",
-  syncUserHistory:   "sync-user-history",
-  onDemandRefresh:   "on-demand-refresh",
-  syncUsersEnqueuer: "sync-users-enqueuer",
+  refreshTier:         "refresh-leaderboard-tier",
+  leaderboardBatch:    "leaderboard-batch",
+  syncUserHistory:     "sync-user-history",
+  onDemandRefresh:     "on-demand-refresh",
+  syncUsersEnqueuer:   "sync-users-enqueuer",
+  resolveWallets:      "resolve-wallets",
+  resolveWalletsBatch: "resolve-wallets-batch",
 } as const;
 
 export type JobName = (typeof JOB)[keyof typeof JOB];
@@ -16,11 +18,13 @@ export type JobName = (typeof JOB)[keyof typeof JOB];
 export type TierId = 1 | 2 | 3 | 4 | "spot";
 
 export interface Payloads {
-  [JOB.refreshTier]:       { tier: TierId };
-  [JOB.leaderboardBatch]:  { accountIds: number[]; wallets: string[]; tier: number };
-  [JOB.syncUserHistory]:   { walletAddr: string; accountId: number };
-  [JOB.onDemandRefresh]:   { accountId: number; walletAddr: string; requestedBy?: string };
-  [JOB.syncUsersEnqueuer]: Record<string, never>;
+  [JOB.refreshTier]:         { tier: TierId };
+  [JOB.leaderboardBatch]:    { accountIds: number[]; wallets: string[]; tier: number };
+  [JOB.syncUserHistory]:     { walletAddr: string; accountId: number };
+  [JOB.onDemandRefresh]:     { accountId: number; walletAddr: string; requestedBy?: string };
+  [JOB.syncUsersEnqueuer]:   Record<string, never>;
+  [JOB.resolveWallets]:      Record<string, never>;
+  [JOB.resolveWalletsBatch]: { accountIds: number[] };
 }
 
 // Priority ordering — higher runs first
