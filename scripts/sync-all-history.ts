@@ -29,7 +29,6 @@ import type { Agent } from "http";
 // ═══════════════════════════════════════════════════════════════════
 
 const API = "https://zo-mainnet.n1.xyz";
-const FRONTEND_API = "https://01.xyz/api";
 const MAX_ID = Number(process.argv.find(a => a.startsWith("--to="))?.split("=")[1] || "12000");
 const FROM_ID = Number(process.argv.find(a => a.startsWith("--from="))?.split("=")[1] || "0");
 const PAGE = 250;
@@ -39,7 +38,6 @@ const FORCE = process.argv.includes("--force");
 // Rate limiting — respect 01 API limits
 const API_DELAY_MS = 100;          // 100ms between API calls (~10 req/s, safe with proxies)
 const BETWEEN_ACCOUNTS_MS = 500;   // 500ms pause between accounts
-const FRONTEND_API_DELAY_MS = 3000; // 3s between 01.xyz frontend API calls (behind Vercel WAF)
 const RETRY_COUNT = 3;
 const RETRY_BACKOFF_MS = 5_000;
 
@@ -122,35 +120,10 @@ async function get(url: string): Promise<Record<string, unknown> | null> {
   return null;
 }
 
-/** Rate-limited fetch for 01.xyz frontend API (behind Vercel WAF) */
-const BROWSER_HEADERS: Record<string, string> = {
-  Accept: "application/json, text/plain, */*",
-  "Accept-Language": "en-US,en;q=0.9",
-  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-  Referer: "https://01.xyz/",
-  Origin: "https://01.xyz",
-};
-
-async function getFrontend(url: string): Promise<Record<string, unknown> | null> {
-  for (let i = 0; i < RETRY_COUNT; i++) {
-    try {
-      const res = await fetch(url, {
-        headers: BROWSER_HEADERS,
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (res.status === 429 || res.status === 403) {
-        const waitMs = FRONTEND_API_DELAY_MS * (i + 2);
-        await sleep(waitMs);
-        continue;
-      }
-      if (!res.ok) return null;
-      return await res.json() as Record<string, unknown>;
-    } catch {
-      if (i < RETRY_COUNT - 1) await sleep(RETRY_BACKOFF_MS);
-    }
-  }
-  return null;
-}
+// Former 01.xyz frontend-API helpers (pnl-totals, volume-calendar) are gone.
+// Those endpoints are behind a Vercel WAF challenge that blocks automated
+// clients; we now recompute both aggregates locally from trade_history /
+// pnl_history / funding_history. See syncVolumeCalendar / syncPnlTotals.
 
 // ═══════════════════════════════════════════════════════════════════
 //  MARKET SYMBOLS
@@ -374,64 +347,88 @@ async function syncLiquidations(id: number, w: string): Promise<number> {
 //  01.XYZ FRONTEND API — volume calendar + PnL totals
 // ═══════════════════════════════════════════════════════════════════
 
+// Aggregate into volume_calendar / pnl_totals from the raw history tables
+// we just synced. The 01.xyz frontend API that used to serve these is now
+// WAF-protected and blocks automated clients; the numbers below are a pure
+// recomputation of what that API would have returned. Keep this function's
+// output shape (row count / boolean) identical to the old one so the main
+// loop below doesn't need to change.
+
 async function syncVolumeCalendar(id: number, w: string): Promise<number> {
-  const body = await getFrontend(`${FRONTEND_API}/volume-calendar/${id}`);
-  if (!body) return 0;
-
-  const days = (body.days ?? {}) as Record<string, Record<string, number>>;
-  const entries = Object.entries(days);
-  if (entries.length === 0) return 0;
-
   try {
     const result = await db.query(
-      `INSERT INTO volume_calendar (id, "accountId", "walletAddr", date, volume, "makerVolume", "takerVolume", "makerFees", "takerFees", "totalFees")
-       SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::text[], $5::numeric[], $6::numeric[], $7::numeric[], $8::numeric[], $9::numeric[], $10::numeric[])
+      `INSERT INTO volume_calendar (
+         id, "accountId", "walletAddr", date,
+         volume, "makerVolume", "takerVolume",
+         "makerFees", "takerFees", "totalFees"
+       )
+       SELECT
+         gen_random_uuid(), $1::int, $2::text,
+         to_char(date_trunc('day', "time"), 'YYYY-MM-DD'),
+         COALESCE(SUM(size::numeric * price::numeric), 0),
+         COALESCE(SUM(size::numeric * price::numeric) FILTER (WHERE role = 'maker'), 0),
+         COALESCE(SUM(size::numeric * price::numeric) FILTER (WHERE role = 'taker'), 0),
+         COALESCE(SUM(fee::numeric)                   FILTER (WHERE role = 'maker'), 0),
+         COALESCE(SUM(fee::numeric)                   FILTER (WHERE role = 'taker'), 0),
+         COALESCE(SUM(fee::numeric), 0)
+       FROM trade_history
+       WHERE "accountId" = $1
+       GROUP BY date_trunc('day', "time")
        ON CONFLICT ("walletAddr", date) DO UPDATE SET
-         volume = EXCLUDED.volume, "makerVolume" = EXCLUDED."makerVolume", "takerVolume" = EXCLUDED."takerVolume",
-         "makerFees" = EXCLUDED."makerFees", "takerFees" = EXCLUDED."takerFees", "totalFees" = EXCLUDED."totalFees"`,
-      [
-        entries.map(() => crypto.randomUUID()),
-        entries.map(() => id), entries.map(() => w),
-        entries.map(([date]) => date),
-        entries.map(([, d]) => String(d.volume ?? 0)),
-        entries.map(([, d]) => String(d.makerVolume ?? 0)),
-        entries.map(([, d]) => String(d.takerVolume ?? 0)),
-        entries.map(([, d]) => String(d.makerFees ?? 0)),
-        entries.map(([, d]) => String(d.takerFees ?? 0)),
-        entries.map(([, d]) => String(d.totalFees ?? 0)),
-      ],
+         "accountId"   = EXCLUDED."accountId",
+         volume        = EXCLUDED.volume,
+         "makerVolume" = EXCLUDED."makerVolume",
+         "takerVolume" = EXCLUDED."takerVolume",
+         "makerFees"   = EXCLUDED."makerFees",
+         "takerFees"   = EXCLUDED."takerFees",
+         "totalFees"   = EXCLUDED."totalFees"`,
+      [id, w],
     );
     return result.rowCount ?? 0;
   } catch (err) {
     const msg = err instanceof Error ? err.message.slice(0, 60) : String(err);
-    process.stdout.write(`\n    [!] volume-calendar DB insert failed: ${msg}\n`);
+    process.stdout.write(`\n    [!] volume-calendar recompute failed: ${msg}\n`);
     return 0;
   }
 }
 
 async function syncPnlTotals(id: number, w: string): Promise<boolean> {
-  const body = await getFrontend(`${FRONTEND_API}/pnl-totals/${id}`);
-  if (!body) return false;
+  // Funding model matches lib/history/aggregate.ts (PNL_FUNDING_MODEL env,
+  // default "pnl-only"). Keep them in sync — see that file for context.
+  const model = (process.env.PNL_FUNDING_MODEL ?? "pnl-only").toLowerCase();
+  const fundingSql = model === "funding-only"
+    ? `COALESCE((SELECT SUM("fundingPnl")::numeric FROM funding_history WHERE "accountId" = $1), 0)`
+    : model === "both"
+      ? `(COALESCE((SELECT SUM("settledFundingPnl")::numeric FROM pnl_history WHERE "accountId" = $1), 0)
+         + COALESCE((SELECT SUM("fundingPnl")::numeric FROM funding_history WHERE "accountId" = $1), 0))`
+      : `COALESCE((SELECT SUM("settledFundingPnl")::numeric FROM pnl_history WHERE "accountId" = $1), 0)`;
 
   try {
     await db.query(
-      `INSERT INTO pnl_totals (id, "accountId", "walletAddr", "totalPnl", "totalTradingPnl", "totalFundingPnl", "fetchedAt")
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `WITH agg AS (
+         SELECT
+           COALESCE((SELECT SUM("tradingPnl")::numeric FROM pnl_history WHERE "accountId" = $1), 0)::numeric AS trading,
+           ${fundingSql}::numeric AS funding
+       )
+       INSERT INTO pnl_totals (
+         id, "accountId", "walletAddr",
+         "totalPnl", "totalTradingPnl", "totalFundingPnl", "fetchedAt"
+       )
+       SELECT gen_random_uuid(), $1::int, $2::text,
+              trading + funding, trading, funding, NOW()
+       FROM agg
        ON CONFLICT ("walletAddr") DO UPDATE SET
-         "totalPnl" = EXCLUDED."totalPnl", "totalTradingPnl" = EXCLUDED."totalTradingPnl",
-         "totalFundingPnl" = EXCLUDED."totalFundingPnl", "fetchedAt" = EXCLUDED."fetchedAt"`,
-      [
-        crypto.randomUUID(), id, w,
-        String(body.totalPnl ?? 0),
-        String(body.totalTradingPnl ?? 0),
-        String(body.totalFundingPnl ?? 0),
-        new Date(),
-      ],
+         "accountId"       = EXCLUDED."accountId",
+         "totalPnl"        = EXCLUDED."totalPnl",
+         "totalTradingPnl" = EXCLUDED."totalTradingPnl",
+         "totalFundingPnl" = EXCLUDED."totalFundingPnl",
+         "fetchedAt"       = EXCLUDED."fetchedAt"`,
+      [id, w],
     );
     return true;
   } catch (err) {
     const msg = err instanceof Error ? err.message.slice(0, 60) : String(err);
-    process.stdout.write(`\n    [!] pnl-totals DB insert failed: ${msg}\n`);
+    process.stdout.write(`\n    [!] pnl-totals recompute failed: ${msg}\n`);
     return false;
   }
 }
@@ -551,24 +548,20 @@ async function processAccount(id: number, logPrefix: string): Promise<{
 
   const sdkTotal = Object.values(counts).reduce((a, b) => a + b, 0);
 
-  // 01.xyz frontend API — only for accounts that have actual trading data
-  // Skip empty accounts to avoid hammering Vercel WAF for nothing
+  // Aggregates (volume_calendar + pnl_totals) are now recomputed locally
+  // from the raw tables we just synced — no external HTTP.
   if (!shuttingDown && sdkTotal > 0) {
-    process.stdout.write(`\r${logPrefix} syncing volume-calendar    `);
+    process.stdout.write(`\r${logPrefix} recomputing aggregates     `);
     try { counts.volume = await syncVolumeCalendar(id, wallet); } catch (err) {
       const msg = err instanceof Error ? err.message.slice(0, 60) : String(err);
       process.stdout.write(`\n    [!] volume-calendar failed: ${msg}\n`);
       counts.volume = 0;
     }
-    await sleep(FRONTEND_API_DELAY_MS);
-
     if (!shuttingDown) {
-      process.stdout.write(`\r${logPrefix} syncing pnl-totals         `);
       try { await syncPnlTotals(id, wallet); } catch (err) {
         const msg = err instanceof Error ? err.message.slice(0, 60) : String(err);
         process.stdout.write(`\n    [!] pnl-totals failed: ${msg}\n`);
       }
-      await sleep(FRONTEND_API_DELAY_MS);
     }
   }
 
@@ -595,7 +588,7 @@ async function main() {
   console.log(`  Range:       ${FROM_ID} → ${MAX_ID}`);
   console.log(`  Concurrency: ${CONCURRENCY}`);
   console.log(`  Page size:   ${PAGE}`);
-  console.log(`  API delay:   ${API_DELAY_MS}ms (SDK) / ${FRONTEND_API_DELAY_MS}ms (01.xyz)`);
+  console.log(`  API delay:   ${API_DELAY_MS}ms (SDK)`);
   if (PROXIES.length) console.log(`  Proxies:     ${PROXIES.length} rotating`);
   console.log("");
 

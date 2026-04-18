@@ -2,7 +2,8 @@ import { historyPool, query, execute, uuid } from "@/lib/db-history";
 import { N1_MAINNET_URL } from "@/lib/n1/constants";
 import { ensureMarketCache, getCachedMarkets } from "@/lib/n1/constants";
 import type { FetchContext } from "./fetch-context";
-import { retryableFetch, BROWSER_HEADERS } from "./fetch-context";
+import { retryableFetch } from "./fetch-context";
+import { recomputePnlTotals, recomputeVolumeCalendar, recomputeAggregates } from "./aggregate";
 import type { HistoryType, SyncResult, SyncProgress } from "./types";
 
 // ─── 01 Exchange API Types ────────────────────────────────────────
@@ -445,58 +446,23 @@ async function syncLiquidations(accountId: number, walletAddr: string, since?: s
   return { type: "liquidations", inserted: totalInserted, hasMore: false };
 }
 
-// ─── 01.xyz Frontend API Sync ────────────────────────────────────
-// BROWSER_HEADERS imported from ./fetch-context
-
-const FRONTEND_API = "https://01.xyz/api";
+// ─── Aggregated views: pnl_totals + volume_calendar ───────────────
+// Historically fetched from the 01.xyz frontend API (/api/pnl-totals/:id,
+// /api/volume-calendar/:id), which is now behind a Vercel WAF JS challenge.
+// Both values are pure aggregations over the raw tables above, so we
+// recompute them locally. Callers keep the same signatures for backward
+// compatibility — the `ctx` argument is accepted and ignored (no HTTP).
+// See lib/history/aggregate.ts for the actual SQL and funding-model options.
 
 export async function syncVolumeCalendar(
   accountId: number,
   walletAddr: string,
-  ctx?: FetchContext,
+  _ctx?: FetchContext,
 ): Promise<number> {
   try {
-    const url = `${FRONTEND_API}/volume-calendar/${accountId}`;
-    const res = ctx?.agent
-      ? await retryableFetch(url, {
-          headers: BROWSER_HEADERS,
-          agent: ctx.agent,
-          timeoutMs: 15_000,
-          retries: 3,
-        })
-      : await fetch(url, {
-          headers: BROWSER_HEADERS,
-          signal: AbortSignal.timeout(15_000),
-        });
-    if (!res.ok) return 0;
-    const body = await res.json();
-    if (ctx?.postDelayMs) await new Promise((r) => setTimeout(r, ctx.postDelayMs));
-    const days = body.days ?? {};
-    const entries = Object.entries(days) as [string, Record<string, number>][];
-    if (entries.length === 0) return 0;
-
-    const result = await historyPool.query(
-      `INSERT INTO volume_calendar (id, "accountId", "walletAddr", date, volume, "makerVolume", "takerVolume", "makerFees", "takerFees", "totalFees")
-       SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::text[], $5::numeric[], $6::numeric[], $7::numeric[], $8::numeric[], $9::numeric[], $10::numeric[])
-       ON CONFLICT ("walletAddr", date) DO UPDATE SET
-         volume = EXCLUDED.volume, "makerVolume" = EXCLUDED."makerVolume", "takerVolume" = EXCLUDED."takerVolume",
-         "makerFees" = EXCLUDED."makerFees", "takerFees" = EXCLUDED."takerFees", "totalFees" = EXCLUDED."totalFees"`,
-      [
-        entries.map(() => uuid()),
-        entries.map(() => accountId),
-        entries.map(() => walletAddr),
-        entries.map(([date]) => date),
-        entries.map(([, d]) => String(d.volume ?? 0)),
-        entries.map(([, d]) => String(d.makerVolume ?? 0)),
-        entries.map(([, d]) => String(d.takerVolume ?? 0)),
-        entries.map(([, d]) => String(d.makerFees ?? 0)),
-        entries.map(([, d]) => String(d.takerFees ?? 0)),
-        entries.map(([, d]) => String(d.totalFees ?? 0)),
-      ],
-    );
-    return result.rowCount ?? 0;
+    return await recomputeVolumeCalendar(accountId, walletAddr);
   } catch (err) {
-    console.error(`[sync] volume-calendar/${accountId} failed:`, err);
+    console.error(`[sync] recompute volume-calendar/${accountId} failed:`, err);
     return 0;
   }
 }
@@ -504,44 +470,13 @@ export async function syncVolumeCalendar(
 export async function syncPnlTotals(
   accountId: number,
   walletAddr: string,
-  ctx?: FetchContext,
+  _ctx?: FetchContext,
 ): Promise<boolean> {
   try {
-    const url = `${FRONTEND_API}/pnl-totals/${accountId}`;
-    const res = ctx?.agent
-      ? await retryableFetch(url, {
-          headers: BROWSER_HEADERS,
-          agent: ctx.agent,
-          timeoutMs: 15_000,
-          retries: 3,
-        })
-      : await fetch(url, {
-          headers: BROWSER_HEADERS,
-          signal: AbortSignal.timeout(15_000),
-        });
-    if (!res.ok) return false;
-    const body = await res.json();
-    if (ctx?.postDelayMs) await new Promise((r) => setTimeout(r, ctx.postDelayMs));
-
-    await historyPool.query(
-      `INSERT INTO pnl_totals (id, "accountId", "walletAddr", "totalPnl", "totalTradingPnl", "totalFundingPnl", "fetchedAt")
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT ("walletAddr") DO UPDATE SET
-         "totalPnl" = EXCLUDED."totalPnl", "totalTradingPnl" = EXCLUDED."totalTradingPnl",
-         "totalFundingPnl" = EXCLUDED."totalFundingPnl", "fetchedAt" = EXCLUDED."fetchedAt"`,
-      [
-        uuid(),
-        accountId,
-        walletAddr,
-        String(body.totalPnl ?? 0),
-        String(body.totalTradingPnl ?? 0),
-        String(body.totalFundingPnl ?? 0),
-        new Date(body.fetchedAt ?? new Date().toISOString()),
-      ],
-    );
+    await recomputePnlTotals(accountId, walletAddr);
     return true;
   } catch (err) {
-    console.error(`[sync] pnl-totals/${accountId} failed:`, err);
+    console.error(`[sync] recompute pnl-totals/${accountId} failed:`, err);
     return false;
   }
 }
@@ -590,14 +525,13 @@ export async function syncAllHistory(
     onProgress?.({ total: types.length, completed: results.length, results });
   }
 
-  // Also sync 01.xyz frontend data (volume-calendar + pnl-totals)
+  // Rebuild aggregated tables (pnl_totals + volume_calendar) from the raw
+  // data we just synced. Pure SQL, no external HTTP — replaces the old
+  // Vercel frontend API fetch that now sits behind a WAF challenge.
   try {
-    await Promise.all([
-      syncVolumeCalendar(accountId, walletAddr, ctx),
-      syncPnlTotals(accountId, walletAddr, ctx),
-    ]);
+    await recomputeAggregates(accountId, walletAddr);
   } catch (err) {
-    console.error(`[history/sync] frontend API sync failed for ${walletAddr}:`, err);
+    console.error(`[history/sync] aggregate recompute failed for ${walletAddr}:`, err);
   }
 
   return results;

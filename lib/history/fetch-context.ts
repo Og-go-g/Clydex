@@ -115,12 +115,7 @@ export async function retryableFetch(
   throw lastErr instanceof Error ? lastErr : new Error(`Fetch failed for ${url}`);
 }
 
-// ─── Browser headers for 01.xyz frontend API ─────────────────────
-
-export const BROWSER_HEADERS: Record<string, string> = {
-  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-  "Accept": "application/json, text/plain, */*",
-  "Accept-Language": "en-US,en;q=0.9",
-  "Referer": "https://01.xyz/",
-  "Origin": "https://01.xyz",
-};
+// BROWSER_HEADERS was used to spoof a browser when calling the 01.xyz
+// frontend API. That API is now aggregated locally (see lib/history/aggregate.ts),
+// so the helper is no longer needed. Kept this comment as a breadcrumb —
+// if we ever re-introduce a browser-emulating fetch path, redefine here.

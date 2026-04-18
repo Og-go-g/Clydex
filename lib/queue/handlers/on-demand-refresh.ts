@@ -1,12 +1,17 @@
 /**
- * on-demand-refresh — high priority single account refresh.
- * Triggered from API routes when user opens profile or clicks Copy.
+ * on-demand-refresh — high-priority single-account refresh.
+ *
+ * Triggered from API routes when a user opens a profile or clicks Copy.
+ * Does the same work as leaderboard-batch but for exactly one account,
+ * with no pacing (priority 10 in the queue ordering).
+ *
+ * If the scheduled tier job already holds the advisory lock, we skip —
+ * the user will see fresh data once the scheduled refresh finishes.
  */
 
 import { JOB, type Payloads } from "../job-names";
 import { withAccountLock } from "../advisory-lock";
-import { syncPnlTotals, syncVolumeCalendar } from "@/lib/history/sync";
-import { nextProxyAgent, type FetchContext } from "@/lib/history/fetch-context";
+import { syncAllHistory } from "@/lib/history/sync";
 import { markTierRefreshed } from "@/lib/history/tier-selector";
 
 export async function handleOnDemandRefresh(
@@ -15,14 +20,7 @@ export async function handleOnDemandRefresh(
   const { accountId, walletAddr } = job.data;
 
   const result = await withAccountLock(accountId, async () => {
-    const ctx: FetchContext = {
-      agent: nextProxyAgent(),
-      postDelayMs: 1000,
-      label: `on-demand-${accountId}`,
-    };
-
-    await syncPnlTotals(accountId, walletAddr, ctx);
-    await syncVolumeCalendar(accountId, walletAddr, ctx);
+    await syncAllHistory(accountId, walletAddr);
     await markTierRefreshed(accountId);
     return true;
   });

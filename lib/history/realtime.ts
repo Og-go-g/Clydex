@@ -7,6 +7,7 @@
 
 import { N1_MAINNET_URL } from "@/lib/n1/constants";
 import { ensureMarketCache, getCachedMarkets } from "@/lib/n1/constants";
+import { query } from "@/lib/db-history";
 import type {
   TradeHistoryRow,
   OrderHistoryRow,
@@ -19,7 +20,6 @@ import type {
 // ─── Constants ───────────────────────────────────────────────────
 
 const SDK_API = N1_MAINNET_URL;
-const FRONTEND_API = "https://01.xyz/api";
 const PAGE_SIZE = 50;
 
 // ─── SDK API helpers ─────────────────────────────────────────────
@@ -242,60 +242,79 @@ export async function fetchRecentFunding(
   }));
 }
 
-// ─── 01.xyz Frontend API ─────────────────────────────────────────
-// These endpoints are behind Vercel WAF — use browser-like headers.
-
-const BROWSER_HEADERS: Record<string, string> = {
-  Accept: "application/json, text/plain, */*",
-  "Accept-Language": "en-US,en;q=0.9",
-  "User-Agent":
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-  Referer: "https://01.xyz/",
-  Origin: "https://01.xyz",
-};
+// ─── Aggregated views (from local pnl_totals / volume_calendar) ──
+//
+// Formerly fetched directly from the 01.xyz frontend API, now read from
+// the tables the pg-boss worker rebuilds locally. The data you get here
+// is only as fresh as the last tier refresh (Tier 1 = every 30 min).
+// Callers that need absolute freshness should enqueue an on-demand-refresh
+// job and retry in a few seconds.
 
 export async function fetchVolumeCalendar(
   accountId: number,
 ): Promise<Record<string, VolumeCalendarDay>> {
-  try {
-    const res = await fetch(`${FRONTEND_API}/volume-calendar/${accountId}`, {
-      headers: BROWSER_HEADERS,
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!res.ok) return {};
-    const body = await res.json();
-    const days: Record<string, VolumeCalendarDay> = {};
-    for (const [date, data] of Object.entries(body.days ?? {})) {
-      const d = data as Record<string, number>;
-      days[date] = {
-        date,
-        volume: d.volume ?? 0,
-        makerVolume: d.makerVolume ?? 0,
-        takerVolume: d.takerVolume ?? 0,
-        makerFees: d.makerFees ?? 0,
-        takerFees: d.takerFees ?? 0,
-        totalFees: d.totalFees ?? 0,
-      };
-    }
-    return days;
-  } catch (err) {
-    console.error(`[realtime] volume-calendar/${accountId} failed:`, err);
-    return {};
+  const rows = await query<{
+    date: string;
+    volume: string;
+    makerVolume: string;
+    takerVolume: string;
+    makerFees: string;
+    takerFees: string;
+    totalFees: string;
+  }>(
+    `SELECT date,
+            volume::text,
+            "makerVolume"::text,
+            "takerVolume"::text,
+            "makerFees"::text,
+            "takerFees"::text,
+            "totalFees"::text
+     FROM volume_calendar
+     WHERE "accountId" = $1
+     ORDER BY date`,
+    [accountId],
+  );
+
+  const days: Record<string, VolumeCalendarDay> = {};
+  for (const r of rows) {
+    days[r.date] = {
+      date: r.date,
+      volume: parseFloat(r.volume) || 0,
+      makerVolume: parseFloat(r.makerVolume) || 0,
+      takerVolume: parseFloat(r.takerVolume) || 0,
+      makerFees: parseFloat(r.makerFees) || 0,
+      takerFees: parseFloat(r.takerFees) || 0,
+      totalFees: parseFloat(r.totalFees) || 0,
+    };
   }
+  return days;
 }
 
 export async function fetchPnlTotals(
   accountId: number,
 ): Promise<PnlTotalsData | null> {
-  try {
-    const res = await fetch(`${FRONTEND_API}/pnl-totals/${accountId}`, {
-      headers: BROWSER_HEADERS,
-      signal: AbortSignal.timeout(15_000),
-    });
-    if (!res.ok) return null;
-    return (await res.json()) as PnlTotalsData;
-  } catch (err) {
-    console.error(`[realtime] pnl-totals/${accountId} failed:`, err);
-    return null;
-  }
+  const rows = await query<{
+    totalPnl: string;
+    totalTradingPnl: string;
+    totalFundingPnl: string;
+    fetchedAt: Date;
+  }>(
+    `SELECT "totalPnl"::text,
+            "totalTradingPnl"::text,
+            "totalFundingPnl"::text,
+            "fetchedAt"
+     FROM pnl_totals
+     WHERE "accountId" = $1
+     LIMIT 1`,
+    [accountId],
+  );
+  const r = rows[0];
+  if (!r) return null;
+  return {
+    totalPnl: parseFloat(r.totalPnl) || 0,
+    totalTradingPnl: parseFloat(r.totalTradingPnl) || 0,
+    totalFundingPnl: parseFloat(r.totalFundingPnl) || 0,
+    fetchedAt: r.fetchedAt.toISOString(),
+    accountId: String(accountId),
+  };
 }
