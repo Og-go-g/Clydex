@@ -1,6 +1,8 @@
 services:
   app:
-    build: .
+    build:
+      context: .
+      target: runner
     container_name: clydex-app
     restart: unless-stopped
     network_mode: host
