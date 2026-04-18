@@ -38,7 +38,7 @@ import {
 
 const CONCURRENCY = Number(process.env.RESOLVE_CONCURRENCY || "5");
 const PACING_MS = Number(process.env.RESOLVE_PACING_MS || "50");
-const FROM_ID = Number(process.argv.find((a) => a.startsWith("--from="))?.split("=")[1] || "1");
+const FROM_ID = Number(process.argv.find((a) => a.startsWith("--from="))?.split("=")[1] || "0");
 const TO_ARG = process.argv.find((a) => a.startsWith("--to="))?.split("=")[1];
 const SKIP_FETCH = process.argv.includes("--skip-fetch");
 const SKIP_PROPAGATE = process.argv.includes("--skip-propagate");
