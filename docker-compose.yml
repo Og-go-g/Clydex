@@ -9,10 +9,13 @@ services:
     env_file:
       - .env
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/"]
+      # 127.0.0.1 explicitly — Alpine's wget resolves `localhost` to ::1 (IPv6),
+      # but Next.js binds only to 0.0.0.0 (IPv4), giving false "unhealthy".
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 30s
 
   nginx:
     image: nginx:alpine
