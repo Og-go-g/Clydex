@@ -12,7 +12,7 @@ datasource db {
 // ---------------------------------------------------------------------------
 model TradeHistory {
   id          String   @id @default(cuid())
-  tradeId     String   @unique              // 01 Exchange trade ID (dedup key)
+  tradeId     String                         // 01 Exchange trade ID (dedup key — globally unique on-chain)
   accountId   Int                            // N1 account ID
   walletAddr  String                         // Solana wallet address (for lookup)
   marketId    Int
@@ -24,6 +24,11 @@ model TradeHistory {
   fee         Decimal  @db.Decimal(30, 18)   // fee paid
   time        DateTime                       // trade timestamp from API
 
+  // TimescaleDB hypertable requires `time` inside every unique index.
+  // Pre-existing @unique(tradeId) migrated to this composite on 2026-04-19.
+  // tradeId is still effectively globally unique (one tradeId → one time),
+  // so the composite preserves the same invariant.
+  @@unique([tradeId, time])
   @@index([walletAddr, time])
   @@index([walletAddr, marketId])
   @@index([accountId, time])

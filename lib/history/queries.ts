@@ -492,7 +492,7 @@ async function insertFreshOrders(orders: OrderHistoryRow[]): Promise<void> {
   await historyPool.query(
     `INSERT INTO order_history (id, "orderId", "accountId", "walletAddr", "marketId", symbol, side, "placedSize", "filledSize", "placedPrice", "orderValue", "fillMode", "fillStatus", status, "isReduceOnly", "addedAt", "updatedAt")
      SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::numeric[], $11::numeric[], $12::text[], $13::text[], $14::text[], $15::boolean[], $16::timestamptz[], $17::timestamptz[])
-     ON CONFLICT ("orderId") DO NOTHING`,
+     ON CONFLICT DO NOTHING`,
     [
       orders.map(() => uuid()),
       orders.map((o) => o.orderId),

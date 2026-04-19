@@ -192,9 +192,12 @@ async function syncTrades(accountId: number, walletAddr: string, since?: string,
       const ids = page.data.map(() => uuid());
 
       const result = await historyPool.query(
+        // ON CONFLICT without target — catches ANY unique violation on the
+        // table. Keeps INSERT working across unique-index refactors
+        // (e.g. TimescaleDB hypertable requires (tradeId, time) on 2026-04-19).
         `INSERT INTO trade_history (id, "tradeId", "accountId", "walletAddr", "marketId", symbol, side, size, price, role, fee, "time")
          SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::text[], $11::numeric[], $12::timestamptz[])
-         ON CONFLICT ("tradeId") DO NOTHING`,
+         ON CONFLICT DO NOTHING`,
         [ids, tradeIds, accountIds, wallets, marketIds, symbols, sides, sizes, prices, roles, fees, times],
       );
       totalInserted += result.rowCount ?? 0;
@@ -222,9 +225,10 @@ async function syncOrders(accountId: number, walletAddr: string, since?: string,
 
     const d = page.data;
     const result = await historyPool.query(
+      // Target-less ON CONFLICT — same motivation as trade_history above.
       `INSERT INTO order_history (id, "orderId", "accountId", "walletAddr", "marketId", symbol, side, "placedSize", "filledSize", "placedPrice", "orderValue", "fillMode", "fillStatus", status, "isReduceOnly", "addedAt", "updatedAt")
        SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::numeric[], $11::numeric[], $12::text[], $13::text[], $14::text[], $15::boolean[], $16::timestamptz[], $17::timestamptz[])
-       ON CONFLICT ("orderId") DO NOTHING`,
+       ON CONFLICT DO NOTHING`,
       [
         d.map(() => uuid()),
         d.map((o) => String(o.orderId)),
