@@ -11,11 +11,20 @@
 -- PREREQUISITES
 -- -------------
 -- 1. timescaledb package installed (apt), shared_preload_libraries=timescaledb.
--- 2. This file assumes trade_history has its OLD unique(tradeId) — this
---    migration swaps it to (tradeId, time) because hypertables require `time`
---    inside every unique index.
--- 3. sync.ts already switched to target-less ON CONFLICT so the unique swap
---    is transparent to the app.
+-- 2. sync.ts already switched to target-less ON CONFLICT so unique-index
+--    swaps are transparent to INSERTs.
+--
+-- IMPORTANT CONSTRAINT
+-- --------------------
+-- TimescaleDB requires the partitioning column (`time`) to be part of EVERY
+-- unique constraint on a hypertable. This includes the PRIMARY KEY. We drop:
+--   - trade_history UNIQUE(tradeId)            → replaced with (tradeId, time)
+--   - pnl_history / funding_history / trade_history PRIMARY KEY(id)
+--     We don't replace with composite PK — existing @@unique(accountId, marketId, time)
+--     on pnl/funding and (tradeId, time) on trade act as the uniqueness guarantee.
+--     The `id` column stays (Prisma default, still populated by INSERT) but
+--     without a PK constraint. History DB is only queried via raw SQL
+--     (lib/db-history.ts), never via Prisma client, so no runtime impact.
 --
 -- RUN ORDER
 -- ---------
@@ -23,13 +32,12 @@
 --   sudo -u postgres psql -d clydex_history -f <this file>
 --   docker compose start worker
 --
--- The full pass takes ~5-20 minutes depending on disk speed; chunk migration
--- holds ACCESS EXCLUSIVE on each table while copying rows.
+-- The full pass takes ~5-20 minutes; chunk migration holds ACCESS EXCLUSIVE.
 --
 -- IDEMPOTENT
 -- ----------
--- Every DDL uses IF NOT EXISTS / IF EXISTS / already-a-hypertable guards.
--- Safe to re-run: it will skip what's already in place and finish the rest.
+-- Every DDL uses IF NOT EXISTS / IF EXISTS / if_not_exists=TRUE.
+-- Safe to re-run: partial progress is picked up from where it stopped.
 -- ============================================================================
 
 \timing on
@@ -40,58 +48,30 @@ CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
 
 SELECT extname, extversion FROM pg_extension WHERE extname = 'timescaledb';
 
--- ─── 2. trade_history unique swap (tradeId → tradeId+time) ─────────────────
--- Must happen BEFORE create_hypertable.
+-- ─── 2. Drop constraints that TimescaleDB will reject ─────────────────────
+-- (a) trade_history old unique(tradeId) — replaced by (tradeId, time)
 
-DO $$
-DECLARE
-  old_idx text;
-BEGIN
-  -- Prisma names it trade_history_tradeId_key — find whatever UNIQUE(tradeId only) exists
-  SELECT i.indexrelid::regclass::text INTO old_idx
-  FROM pg_index i
-  JOIN pg_class c ON c.oid = i.indrelid
-  WHERE c.relname = 'trade_history'
-    AND i.indisunique
-    AND array_length(i.indkey, 1) = 1
-    AND (SELECT attname FROM pg_attribute WHERE attrelid = i.indrelid AND attnum = i.indkey[0]) = 'tradeId';
-
-  IF old_idx IS NOT NULL THEN
-    RAISE NOTICE 'Will drop old unique index: %', old_idx;
-  ELSE
-    RAISE NOTICE 'Old unique(tradeId) already absent — nothing to drop';
-  END IF;
-END $$;
-
--- Build the new composite unique index WITHOUT blocking writes (if worker was
--- left running by accident).
+-- Build the new composite unique FIRST so there's never a window of
+-- no-uniqueness on tradeId.
 CREATE UNIQUE INDEX IF NOT EXISTS trade_history_tradeid_time_uniq
   ON trade_history ("tradeId", "time");
 
--- Drop the old one. Uses a DO block so it works whatever the old name is.
-DO $$
-DECLARE
-  old_idx text;
-BEGIN
-  SELECT i.indexrelid::regclass::text INTO old_idx
-  FROM pg_index i
-  JOIN pg_class c ON c.oid = i.indrelid
-  WHERE c.relname = 'trade_history'
-    AND i.indisunique
-    AND array_length(i.indkey, 1) = 1
-    AND (SELECT attname FROM pg_attribute WHERE attrelid = i.indrelid AND attnum = i.indkey[0]) = 'tradeId';
+-- Drop the old unique constraint. Prisma default name is
+-- "trade_history_tradeId_key". IF EXISTS so re-runs don't fail.
+ALTER TABLE trade_history DROP CONSTRAINT IF EXISTS "trade_history_tradeId_key";
 
-  IF old_idx IS NOT NULL THEN
-    EXECUTE format('ALTER TABLE trade_history DROP CONSTRAINT IF EXISTS %I', split_part(old_idx, '.', 2));
-    EXECUTE format('DROP INDEX IF EXISTS %s', old_idx);
-    RAISE NOTICE 'Dropped %', old_idx;
-  END IF;
-END $$;
+-- (b) Primary keys on id — hypertable requires time in every unique index,
+-- and `id` alone doesn't satisfy that. Drop the PK; rely on existing
+-- @@unique constraints for uniqueness.
+
+ALTER TABLE pnl_history     DROP CONSTRAINT IF EXISTS pnl_history_pkey;
+ALTER TABLE funding_history DROP CONSTRAINT IF EXISTS funding_history_pkey;
+ALTER TABLE trade_history   DROP CONSTRAINT IF EXISTS trade_history_pkey;
 
 -- ─── 3. Hypertable conversion ──────────────────────────────────────────────
--- chunk_time_interval tuned per table:
---   pnl_history / trade_history: 7 days (dense tables, one chunk ≈ 100-800 MB)
---   funding_history: 30 days (less dense, keep fewer chunks)
+-- chunk_time_interval:
+--   pnl_history / trade_history: 7 days (dense tables → chunks ~100-800 MB)
+--   funding_history: 30 days (sparse → fewer chunks)
 
 SELECT create_hypertable(
   'pnl_history', 'time',
@@ -120,11 +100,6 @@ FROM timescaledb_information.hypertables
 WHERE hypertable_name IN ('pnl_history','funding_history','trade_history');
 
 -- ─── 4. Enable compression ─────────────────────────────────────────────────
--- segmentby = "accountId" because ~every query filters by accountId; grouping
--- rows of the same account inside a chunk gives the best compression ratio +
--- fast filtered reads.
--- orderby = time DESC so the most recent row in a compressed segment is first
--- (speeds up "latest N" queries).
 
 ALTER TABLE pnl_history SET (
   timescaledb.compress,
@@ -151,7 +126,6 @@ SELECT add_compression_policy('funding_history', INTERVAL '7 days', if_not_exist
 SELECT add_compression_policy('trade_history',   INTERVAL '7 days', if_not_exists => TRUE);
 
 -- ─── 6. Compress pre-existing old chunks immediately ──────────────────────
--- The policy runs on a schedule; we want the space savings right now.
 
 DO $$
 DECLARE
@@ -168,7 +142,7 @@ BEGIN
   LOOP
     EXECUTE format('SELECT compress_chunk(%L)', c.chunk_schema || '.' || c.chunk_name);
     compressed_count := compressed_count + 1;
-    RAISE NOTICE 'Compressed % (% of %)', c.chunk_name, compressed_count, c.hypertable_name;
+    RAISE NOTICE 'Compressed % (total so far: %)', c.chunk_name, compressed_count;
   END LOOP;
 
   RAISE NOTICE 'Total chunks compressed: %', compressed_count;
@@ -176,16 +150,20 @@ END $$;
 
 -- ─── 7. Verification ───────────────────────────────────────────────────────
 
+-- Per-hypertable summary
 SELECT hypertable_name,
-       pg_size_pretty(hypertable_size(format('%I.%I', hypertable_schema, hypertable_name)::regclass)) AS size,
        num_chunks,
-       compression_enabled
+       compression_enabled,
+       pg_size_pretty(hypertable_size(format('%I.%I', hypertable_schema, hypertable_name)::regclass)) AS total_size
 FROM timescaledb_information.hypertables
-WHERE hypertable_name IN ('pnl_history','funding_history','trade_history');
+WHERE hypertable_name IN ('pnl_history','funding_history','trade_history')
+ORDER BY hypertable_name;
 
-SELECT hypertable_name,
-       pg_size_pretty(before_compression_total_bytes::bigint)  AS before,
-       pg_size_pretty(after_compression_total_bytes::bigint)   AS after,
+-- Compression ratio per hypertable. hypertable_compression_stats() returns
+-- one row per hypertable with no name column, so we prefix with a literal.
+SELECT 'pnl_history' AS hypertable,
+       pg_size_pretty(before_compression_total_bytes::bigint) AS before,
+       pg_size_pretty(after_compression_total_bytes::bigint)  AS after,
        ROUND(
          (before_compression_total_bytes::numeric / NULLIF(after_compression_total_bytes, 0)), 1
        ) AS ratio
