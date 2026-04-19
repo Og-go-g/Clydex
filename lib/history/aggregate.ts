@@ -120,6 +120,13 @@ export async function recomputePnlTotals(
      SELECT gen_random_uuid(), $1::int, $2::text,
             trading + funding, trading, funding, NOW()
      FROM agg
+     -- Do not materialize a row for accounts with no trading activity.
+     -- SUM(...) over an empty table returns one NULL row (coalesced to 0),
+     -- so without this guard every empty account got a phantom 0-PnL
+     -- pnl_totals row. Leaderboard selectors then showed thousands of
+     -- zero-PnL ghosts in the tail. See session 2026-04-19.
+     WHERE EXISTS (SELECT 1 FROM pnl_history     WHERE "accountId" = $1)
+        OR EXISTS (SELECT 1 FROM funding_history WHERE "accountId" = $1)
      ON CONFLICT ("walletAddr") DO UPDATE SET
        "accountId"       = EXCLUDED."accountId",
        "totalPnl"        = EXCLUDED."totalPnl",
