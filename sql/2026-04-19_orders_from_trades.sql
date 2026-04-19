@@ -45,13 +45,17 @@ ALTER TABLE trade_history ADD COLUMN IF NOT EXISTS "orderId" TEXT;
 -- actually carry an orderId (i.e. new trades synced after this migration).
 -- The query pattern is "WHERE accountId = X AND orderId IS NOT NULL
 -- GROUP BY orderId", so (accountId, orderId) covers both filter and grouping.
+--
+-- CONCURRENTLY is NOT allowed on TimescaleDB hypertables — it must create
+-- indexes on every chunk, which is incompatible with the concurrent path.
+-- A plain CREATE INDEX takes an AccessExclusive lock but the WHERE clause
+-- keeps it cheap: only 51 rows qualify at first, index builds in ms.
 
-COMMIT;
-
--- CREATE INDEX CONCURRENTLY must run outside a transaction.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS trade_history_accountid_orderid_idx
+CREATE INDEX IF NOT EXISTS trade_history_accountid_orderid_idx
   ON trade_history ("accountId", "orderId")
   WHERE "orderId" IS NOT NULL;
+
+COMMIT;
 
 -- ─── 3. Drop order_history ─────────────────────────────────────────────────
 -- Safe once new code is deployed and /api/history/orders is derived from
