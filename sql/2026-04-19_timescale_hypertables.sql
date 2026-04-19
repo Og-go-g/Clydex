@@ -56,9 +56,13 @@ SELECT extname, extversion FROM pg_extension WHERE extname = 'timescaledb';
 CREATE UNIQUE INDEX IF NOT EXISTS trade_history_tradeid_time_uniq
   ON trade_history ("tradeId", "time");
 
--- Drop the old unique constraint. Prisma default name is
--- "trade_history_tradeId_key". IF EXISTS so re-runs don't fail.
+-- Drop the old unique constraint AND the underlying index. On this
+-- deployment the constraint was previously removed manually but the
+-- index was left behind (pg_constraint empty, pg_indexes still has the
+-- row), so ALTER TABLE DROP CONSTRAINT alone is not enough — DROP INDEX
+-- catches the orphaned case.
 ALTER TABLE trade_history DROP CONSTRAINT IF EXISTS "trade_history_tradeId_key";
+DROP INDEX IF EXISTS "trade_history_tradeId_key";
 
 -- (b) Primary keys on id — hypertable requires time in every unique index,
 -- and `id` alone doesn't satisfy that. Drop the PK; rely on existing
