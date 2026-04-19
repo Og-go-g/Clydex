@@ -23,6 +23,7 @@ model TradeHistory {
   role        String                         // "taker" | "maker"
   fee         Decimal  @db.Decimal(30, 18)   // fee paid
   time        DateTime                       // trade timestamp from API
+  orderId     String?                        // Parent order ID. Used to derive "Order History" via GROUP BY — replaces the standalone order_history table as of 2026-04-19.
 
   // TimescaleDB hypertable requires `time` inside every unique index.
   // Pre-existing @unique(tradeId) migrated to this composite on 2026-04-19.
@@ -32,6 +33,7 @@ model TradeHistory {
   @@index([walletAddr, time])
   @@index([walletAddr, marketId])
   @@index([accountId, time])
+  @@index([accountId, orderId])              // supports GROUP BY orderId for /api/history/orders
   @@map("trade_history")
 }
 
@@ -126,33 +128,9 @@ model LiquidationHistory {
   @@map("liquidation_history")
 }
 
-// ---------------------------------------------------------------------------
-//  OrderHistory — order placement/fill/cancel history
-// ---------------------------------------------------------------------------
-model OrderHistory {
-  id                  String   @id @default(cuid())
-  orderId             String   @unique              // 01 Exchange order ID (dedup key)
-  accountId           Int
-  walletAddr          String
-  marketId            Int
-  symbol              String                         // "SOLUSD"
-  side                String                         // "Long" | "Short"
-  placedSize          Decimal  @db.Decimal(30, 18)
-  filledSize          Decimal? @db.Decimal(30, 18)   // null if unfilled
-  placedPrice         Decimal  @db.Decimal(30, 18)
-  orderValue          Decimal  @db.Decimal(30, 18)   // placedPrice * placedSize
-  fillMode            String                         // "PostOnly" | "ImmediateOrCancel" | "Limit" etc.
-  fillStatus          String                         // "Filled" | "Unfilled"
-  status              String                         // "Filled" | "Cancelled" | "Expired" etc.
-  isReduceOnly        Boolean  @default(false)
-  addedAt             DateTime                       // order placement time
-  updatedAt           DateTime                       // last status update time
-
-  @@index([walletAddr, addedAt])
-  @@index([walletAddr, marketId])
-  @@index([accountId, addedAt])
-  @@map("order_history")
-}
+// OrderHistory model removed on 2026-04-19. "Order History" tab is now
+// derived from trade_history grouped by orderId — see lib/history/queries.ts
+// (getOrderHistoryFromTrades) and sql/2026-04-19_orders_from_trades.sql.
 
 // ---------------------------------------------------------------------------
 //  SyncCursor — tracks last synced position per wallet per history type

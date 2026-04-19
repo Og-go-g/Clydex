@@ -1,7 +1,6 @@
 import { query, toCamelRows } from "@/lib/db-history";
 import {
   fetchRecentTrades,
-  fetchRecentOrders,
   fetchRecentPnl,
   fetchRecentFunding,
 } from "./realtime";
@@ -35,28 +34,95 @@ function clampLimit(limit?: number): number {
   return Math.min(limit, MAX_LIMIT);
 }
 
-// ─── Order History ────────────────────────────────────────────────
+// ─── Order History (derived from trade_history) ──────────────────
+//
+// As of 2026-04-19 the standalone order_history table has been retired.
+// The "Order History" tab is synthesized from trade_history rows grouped
+// by orderId. See lib/history/types.ts#OrderHistoryRow for the full field
+// mapping — placedPrice is a weighted-average fill price, fillMode is
+// PostOnly iff every fill was role=maker, isReduceOnly is not recoverable
+// and reported as false. Cancelled / unfilled orders are not visible via
+// this view (accepted trade-off — they're noise for retail UX).
 
 export async function getOrderHistory(params: PaginationParams): Promise<PagedResult<OrderHistoryRow>> {
   const { walletAddr, marketId, offset = 0 } = params;
   const limit = clampLimit(params.limit);
 
+  // marketId filter applied BEFORE the group so the count matches exactly.
+  // orderId IS NOT NULL — trades synced before 2026-04-19 carry NULL and
+  // can't be reconstructed as "orders" because we never stored the parent
+  // order id on those rows. Users still see the raw executions on the
+  // Trades tab.
+  const filterSql = `WHERE "walletAddr" = $1
+                       AND "orderId" IS NOT NULL
+                       AND ($2::int IS NULL OR "marketId" = $2)`;
+
+  interface Row extends Record<string, unknown> {
+    order_id: string;
+    account_id: number;
+    market_id: number;
+    symbol: string;
+    side: string;
+    total_size: string;
+    total_value: string;
+    avg_price: string;
+    all_maker: boolean;
+    first_time: Date;
+    last_time: Date;
+  }
+
   const [dataRows, countRows] = await Promise.all([
-    query(
-      `SELECT * FROM order_history
-       WHERE "walletAddr" = $1 AND ($2::int IS NULL OR "marketId" = $2)
-       ORDER BY "addedAt" DESC LIMIT $3 OFFSET $4`,
+    query<Row>(
+      `SELECT
+         "orderId"       AS order_id,
+         MIN("accountId")::int  AS account_id,
+         MIN("marketId")::int   AS market_id,
+         MIN(symbol)            AS symbol,
+         MIN(side)              AS side,
+         SUM(size)::text        AS total_size,
+         SUM(size * price)::text                                     AS total_value,
+         (SUM(size * price) / NULLIF(SUM(size), 0))::text            AS avg_price,
+         BOOL_AND(role = 'maker')                                    AS all_maker,
+         MIN("time")            AS first_time,
+         MAX("time")            AS last_time
+       FROM trade_history
+       ${filterSql}
+       GROUP BY "orderId"
+       ORDER BY MAX("time") DESC
+       LIMIT $3 OFFSET $4`,
       [walletAddr, marketId ?? null, limit, offset],
     ),
     query<{ count: string }>(
-      `SELECT count(*)::text AS count FROM order_history
-       WHERE "walletAddr" = $1 AND ($2::int IS NULL OR "marketId" = $2)`,
+      `SELECT COUNT(DISTINCT "orderId")::text AS count
+       FROM trade_history
+       ${filterSql}`,
       [walletAddr, marketId ?? null],
     ),
   ]);
 
+  const data: OrderHistoryRow[] = dataRows.map((r) => ({
+    // UI uses `id` as React key — orderId is unique enough here.
+    id: r.order_id,
+    orderId: r.order_id,
+    accountId: r.account_id,
+    walletAddr,
+    marketId: r.market_id,
+    symbol: r.symbol,
+    side: r.side,
+    placedSize: r.total_size,
+    filledSize: r.total_size,
+    placedPrice: r.avg_price ?? "0",
+    orderValue: r.total_value,
+    fillMode: r.all_maker ? "PostOnly" : "Limit",
+    fillStatus: "Filled",
+    status: "Filled",
+    isReduceOnly: false,
+    addedAt: r.first_time,
+    updatedAt: r.last_time,
+  }));
+
   return {
-    data: toCamelRows<OrderHistoryRow>(dataRows),
+    data,
     total: parseInt(countRows[0]?.count ?? "0", 10),
     limit,
     offset,
@@ -405,21 +471,17 @@ export async function getTradeHistoryRealtime(params: RealtimeParams): Promise<P
 }
 
 /**
- * Realtime order history: mini-sync then paginate from DB.
+ * Realtime order history — deprecated alias that now just calls
+ * getOrderHistory. The derived-from-trades view picks up any fresh trades
+ * that the Trade realtime path synced, so there's no separate fetch here.
  */
 export async function getOrderHistoryRealtime(params: RealtimeParams): Promise<PagedResult<OrderHistoryRow>> {
-  const { walletAddr, accountId, marketId } = params;
-
-  const lastSync = await getLastSyncTime(walletAddr);
-  if (lastSync) {
-    const since = lastSync.toISOString();
-    const freshOrders = await fetchRecentOrders(accountId, walletAddr, since).catch(() => [] as OrderHistoryRow[]);
-    if (freshOrders.length > 0) {
-      await insertFreshOrders(freshOrders);
-    }
-  }
-
-  return getOrderHistory({ walletAddr, marketId, limit: params.limit, offset: params.offset });
+  return getOrderHistory({
+    walletAddr: params.walletAddr,
+    marketId:   params.marketId,
+    limit:      params.limit,
+    offset:     params.offset,
+  });
 }
 
 /**
@@ -446,10 +508,15 @@ import { historyPool, uuid } from "@/lib/db-history";
 
 async function insertFreshTrades(trades: TradeHistoryRow[]): Promise<void> {
   if (trades.length === 0) return;
+  // ON CONFLICT DO NOTHING without target — same reasoning as
+  // lib/history/sync.ts#syncTrades: the unique index moved from
+  // (tradeId) → (tradeId, time) when we hypertable'd the table on
+  // 2026-04-19, and target-less is future-proof.
+  // orderId also written so these new rows feed the derived Order History.
   await historyPool.query(
-    `INSERT INTO trade_history (id, "tradeId", "accountId", "walletAddr", "marketId", symbol, side, size, price, role, fee, "time")
-     SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::text[], $11::numeric[], $12::timestamptz[])
-     ON CONFLICT ("tradeId") DO NOTHING`,
+    `INSERT INTO trade_history (id, "tradeId", "accountId", "walletAddr", "marketId", symbol, side, size, price, role, fee, "time", "orderId")
+     SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::text[], $11::numeric[], $12::timestamptz[], $13::text[])
+     ON CONFLICT DO NOTHING`,
     [
       trades.map(() => uuid()),
       trades.map((t) => t.tradeId),
@@ -463,16 +530,20 @@ async function insertFreshTrades(trades: TradeHistoryRow[]): Promise<void> {
       trades.map((t) => t.role),
       trades.map((t) => t.fee),
       trades.map((t) => new Date(t.time)),
+      trades.map((t) => t.orderId ?? null),
     ],
   );
 }
 
 async function insertFreshPnl(pnl: PnlHistoryRow[]): Promise<void> {
   if (pnl.length === 0) return;
+  // Target-less ON CONFLICT so the insert survives unique-index swaps;
+  // current constraint is ("accountId","marketId","time") after the
+  // 2026-04-18 unique-by-accountid migration.
   await historyPool.query(
     `INSERT INTO pnl_history (id, "accountId", "walletAddr", "marketId", symbol, "tradingPnl", "settledFundingPnl", "positionSize", "time")
      SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::numeric[], $7::numeric[], $8::numeric[], $9::timestamptz[])
-     ON CONFLICT ("walletAddr", "marketId", "time") DO NOTHING`,
+     ON CONFLICT DO NOTHING`,
     [
       pnl.map(() => uuid()),
       pnl.map((p) => p.accountId),
@@ -487,40 +558,15 @@ async function insertFreshPnl(pnl: PnlHistoryRow[]): Promise<void> {
   );
 }
 
-async function insertFreshOrders(orders: OrderHistoryRow[]): Promise<void> {
-  if (orders.length === 0) return;
-  await historyPool.query(
-    `INSERT INTO order_history (id, "orderId", "accountId", "walletAddr", "marketId", symbol, side, "placedSize", "filledSize", "placedPrice", "orderValue", "fillMode", "fillStatus", status, "isReduceOnly", "addedAt", "updatedAt")
-     SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::numeric[], $11::numeric[], $12::text[], $13::text[], $14::text[], $15::boolean[], $16::timestamptz[], $17::timestamptz[])
-     ON CONFLICT DO NOTHING`,
-    [
-      orders.map(() => uuid()),
-      orders.map((o) => o.orderId),
-      orders.map((o) => o.accountId),
-      orders.map((o) => o.walletAddr),
-      orders.map((o) => o.marketId),
-      orders.map((o) => o.symbol),
-      orders.map((o) => o.side),
-      orders.map((o) => o.placedSize),
-      orders.map((o) => o.filledSize),
-      orders.map((o) => o.placedPrice),
-      orders.map((o) => o.orderValue),
-      orders.map((o) => o.fillMode),
-      orders.map((o) => o.fillStatus),
-      orders.map((o) => o.status),
-      orders.map((o) => o.isReduceOnly),
-      orders.map((o) => new Date(o.addedAt)),
-      orders.map((o) => new Date(o.updatedAt)),
-    ],
-  );
-}
+// insertFreshOrders removed on 2026-04-19 — order_history is gone.
 
 async function insertFreshFunding(funding: FundingHistoryRow[]): Promise<void> {
   if (funding.length === 0) return;
+  // Target-less ON CONFLICT — current unique is ("accountId","marketId","time").
   await historyPool.query(
     `INSERT INTO funding_history (id, "accountId", "walletAddr", "marketId", symbol, "fundingPnl", "positionSize", "time")
      SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::numeric[], $7::numeric[], $8::timestamptz[])
-     ON CONFLICT ("walletAddr", "marketId", "time") DO NOTHING`,
+     ON CONFLICT DO NOTHING`,
     [
       funding.map(() => uuid()),
       funding.map((f) => f.accountId),

@@ -10,7 +10,6 @@ import { ensureMarketCache, getCachedMarkets } from "@/lib/n1/constants";
 import { query } from "@/lib/db-history";
 import type {
   TradeHistoryRow,
-  OrderHistoryRow,
   PnlHistoryRow,
   FundingHistoryRow,
   VolumeCalendarDay,
@@ -90,21 +89,8 @@ interface ApiTrade {
   orderId: number;
 }
 
-interface ApiOrder {
-  orderId: number;
-  traderId: number;
-  marketId: number;
-  side: string;
-  placedSize: number;
-  filledSize: number | null;
-  placedPrice: number;
-  fillMode: string;
-  finalizationReason: string;
-  isReduceOnly: boolean;
-  marketSymbol: string;
-  addedAt: string;
-  updatedAt: string;
-}
+// ApiOrder removed on 2026-04-19 along with fetchRecentOrders — the
+// "Order History" tab is now derived from trade_history.
 
 interface ApiPnl {
   tradingPnl: number;
@@ -156,6 +142,7 @@ export async function fetchRecentTrades(
         role,
         fee: "0",
         time: new Date(t.time),
+        orderId: t.orderId != null ? String(t.orderId) : null,
       });
     }
   }
@@ -163,37 +150,7 @@ export async function fetchRecentTrades(
   return results;
 }
 
-export async function fetchRecentOrders(
-  accountId: number,
-  walletAddr: string,
-  since: string,
-): Promise<OrderHistoryRow[]> {
-  await ensureMarketCache();
-
-  const orders = await fetchAll<ApiOrder>(
-    `${SDK_API}/account/${accountId}/orders?since=${encodeURIComponent(since)}`,
-  );
-
-  return orders.map((o) => ({
-    id: `ro-${o.orderId}`,
-    orderId: String(o.orderId),
-    accountId,
-    walletAddr,
-    marketId: o.marketId,
-    symbol: o.marketSymbol ?? marketSymbol(o.marketId),
-    side: o.side === "bid" ? "Long" : "Short",
-    placedSize: String(o.placedSize ?? 0),
-    filledSize: o.filledSize != null ? String(o.filledSize) : null,
-    placedPrice: String(o.placedPrice ?? 0),
-    orderValue: String((o.placedPrice ?? 0) * (o.placedSize ?? 0)),
-    fillMode: o.fillMode ?? "unknown",
-    fillStatus: o.filledSize != null && o.filledSize > 0 ? "Filled" : "Unfilled",
-    status: o.finalizationReason ?? "unknown",
-    isReduceOnly: o.isReduceOnly ?? false,
-    addedAt: new Date(o.addedAt),
-    updatedAt: new Date(o.updatedAt),
-  }));
-}
+// fetchRecentOrders removed on 2026-04-19 — see realtime ApiOrder comment.
 
 export async function fetchRecentPnl(
   accountId: number,

@@ -14,12 +14,30 @@ export interface TradeHistoryRow {
   role: string;
   fee: string;
   time: Date;
+  // Parent order id. Nullable because rows synced before 2026-04-19 never
+  // populated this column. New sync path writes it — see sync.ts#syncTrades.
+  orderId: string | null;
 }
 
 export interface TradeWithPnlRow extends TradeHistoryRow {
   closedPnl: string | null;
 }
 
+/**
+ * Row shape for the "Order History" UI — same schema as the old order_history
+ * table for zero UI churn, but synthesized from trade_history rows grouped by
+ * orderId. Some fields are best-effort reconstructions (see
+ * lib/history/queries.ts#getOrderHistoryFromTrades):
+ *   - placedSize / filledSize  → SUM(trade.size) for all fills of this order
+ *   - placedPrice              → weighted-average fill price
+ *   - orderValue               → SUM(trade.size * trade.price)
+ *   - fillMode                 → "PostOnly" iff every fill was role=maker, else "Limit"
+ *   - fillStatus / status      → always "Filled" (we can only see filled orders)
+ *   - isReduceOnly             → always false (not recoverable from trades)
+ *   - updatedAt                → MAX(trade.time), addedAt → MIN(trade.time)
+ * Cancelled and unfilled orders are not visible via this view — accepted
+ * trade-off for retail UX. See `sql/2026-04-19_orders_from_trades.sql`.
+ */
 export interface OrderHistoryRow {
   id: string;
   orderId: string;
@@ -152,7 +170,9 @@ export interface PnlTotalsRow {
   fetchedAt: Date;
 }
 
-export type HistoryType = "trades" | "orders" | "pnl" | "funding" | "deposits" | "withdrawals" | "liquidations";
+// "orders" removed on 2026-04-19 — derived from trade_history GROUP BY orderId
+// via /api/history/orders, no longer synced as a separate type.
+export type HistoryType = "trades" | "pnl" | "funding" | "deposits" | "withdrawals" | "liquidations";
 
 export interface SyncResult {
   type: HistoryType;

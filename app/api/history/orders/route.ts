@@ -1,9 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthAddress } from "@/lib/auth/session";
-import { getCachedAccountId } from "@/lib/n1/account-cache";
-import { getOrderHistoryRealtime, getOrderHistory } from "@/lib/history/queries";
+import { getOrderHistory } from "@/lib/history/queries";
 import { safeInt } from "@/lib/history/validate";
 
+/**
+ * GET /api/history/orders — the authenticated user's filled orders.
+ *
+ * As of 2026-04-19 the response is derived from trade_history grouped by
+ * orderId (see getOrderHistory in lib/history/queries.ts). There's no
+ * standalone order_history table anymore and no separate mini-sync —
+ * whenever the Trade tab syncs fresh trades, those same rows feed this
+ * view through their orderId column.
+ */
 export async function GET(req: NextRequest) {
   const address = await getAuthAddress();
   if (!address) {
@@ -16,12 +24,6 @@ export async function GET(req: NextRequest) {
   const offset = safeInt(params.get("offset"));
 
   try {
-    const accountId = await getCachedAccountId(address);
-    if (accountId !== null) {
-      const result = await getOrderHistoryRealtime({ walletAddr: address, accountId, marketId, limit, offset });
-      return NextResponse.json(result);
-    }
-
     const result = await getOrderHistory({ walletAddr: address, marketId, limit, offset });
     return NextResponse.json(result);
   } catch (error) {

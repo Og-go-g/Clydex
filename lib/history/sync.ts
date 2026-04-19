@@ -8,22 +8,6 @@ import type { HistoryType, SyncResult, SyncProgress } from "./types";
 
 // ─── 01 Exchange API Types ────────────────────────────────────────
 
-interface ApiOrder {
-  orderId: number;
-  traderId: number;
-  marketId: number;
-  side: string;
-  placedSize: number;
-  filledSize: number | null;
-  placedPrice: number;
-  fillMode: string;
-  finalizationReason: string;
-  isReduceOnly: boolean;
-  marketSymbol: string;
-  addedAt: string;
-  updatedAt: string;
-}
-
 interface ApiTrade {
   tradeId: number;
   price: number;
@@ -190,15 +174,20 @@ async function syncTrades(accountId: number, walletAddr: string, since?: string,
       const fees = page.data.map(() => "0");
       const times = page.data.map((t) => new Date(t.time));
       const ids = page.data.map(() => uuid());
+      // orderId links trade → parent order. Used by /api/history/orders to
+      // derive the "Order History" tab (GROUP BY orderId) instead of
+      // maintaining a separate order_history table. The column is nullable,
+      // so pre-2026-04-19 trades stay consistent; new syncs populate it.
+      const orderIds = page.data.map((t) => (t.orderId != null ? String(t.orderId) : null));
 
       const result = await historyPool.query(
         // ON CONFLICT without target — catches ANY unique violation on the
         // table. Keeps INSERT working across unique-index refactors
         // (e.g. TimescaleDB hypertable requires (tradeId, time) on 2026-04-19).
-        `INSERT INTO trade_history (id, "tradeId", "accountId", "walletAddr", "marketId", symbol, side, size, price, role, fee, "time")
-         SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::text[], $11::numeric[], $12::timestamptz[])
+        `INSERT INTO trade_history (id, "tradeId", "accountId", "walletAddr", "marketId", symbol, side, size, price, role, fee, "time", "orderId")
+         SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::text[], $11::numeric[], $12::timestamptz[], $13::text[])
          ON CONFLICT DO NOTHING`,
-        [ids, tradeIds, accountIds, wallets, marketIds, symbols, sides, sizes, prices, roles, fees, times],
+        [ids, tradeIds, accountIds, wallets, marketIds, symbols, sides, sizes, prices, roles, fees, times, orderIds],
       );
       totalInserted += result.rowCount ?? 0;
 
@@ -210,53 +199,9 @@ async function syncTrades(accountId: number, walletAddr: string, since?: string,
   return { type: "trades", inserted: totalInserted, hasMore: false };
 }
 
-async function syncOrders(accountId: number, walletAddr: string, since?: string, ctx?: FetchContext): Promise<SyncResult> {
-  let totalInserted = 0;
-  let cursor: string | undefined;
-  let hasMore = true;
-
-  while (hasMore) {
-    let url = `${API_BASE}/account/${accountId}/orders?pageSize=${PAGE_SIZE}`;
-    if (since) url += `&since=${encodeURIComponent(since)}`;
-    if (cursor) url += `&startInclusive=${encodeURIComponent(String(cursor))}`;
-
-    const page = await fetchPage<ApiOrder>(url, ctx);
-    if (page.data.length === 0) break;
-
-    const d = page.data;
-    const result = await historyPool.query(
-      // Target-less ON CONFLICT — same motivation as trade_history above.
-      `INSERT INTO order_history (id, "orderId", "accountId", "walletAddr", "marketId", symbol, side, "placedSize", "filledSize", "placedPrice", "orderValue", "fillMode", "fillStatus", status, "isReduceOnly", "addedAt", "updatedAt")
-       SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::numeric[], $11::numeric[], $12::text[], $13::text[], $14::text[], $15::boolean[], $16::timestamptz[], $17::timestamptz[])
-       ON CONFLICT DO NOTHING`,
-      [
-        d.map(() => uuid()),
-        d.map((o) => String(o.orderId)),
-        d.map(() => accountId),
-        d.map(() => walletAddr),
-        d.map((o) => o.marketId),
-        d.map((o) => o.marketSymbol ?? marketSymbol(o.marketId)),
-        d.map((o) => o.side === "bid" ? "Long" : "Short"),
-        d.map((o) => String(o.placedSize ?? 0)),
-        d.map((o) => o.filledSize != null ? String(o.filledSize) : null),
-        d.map((o) => String(o.placedPrice ?? 0)),
-        d.map((o) => String((o.placedPrice ?? 0) * (o.placedSize ?? 0))),
-        d.map((o) => o.fillMode ?? "unknown"),
-        d.map((o) => o.filledSize != null && o.filledSize > 0 ? "Filled" : "Unfilled"),
-        d.map((o) => o.finalizationReason ?? "unknown"),
-        d.map((o) => o.isReduceOnly ?? false),
-        d.map((o) => new Date(o.addedAt)),
-        d.map((o) => new Date(o.updatedAt)),
-      ],
-    );
-    totalInserted += result.rowCount ?? 0;
-
-    cursor = page.cursor;
-    hasMore = page.hasMore && !!cursor;
-  }
-
-  return { type: "orders", inserted: totalInserted, hasMore: false };
-}
+// syncOrders removed on 2026-04-19. /account/{id}/orders is no longer hit;
+// the "Order History" tab is derived from trade_history GROUP BY orderId
+// (see lib/history/queries.ts#getOrderHistoryFromTrades).
 
 async function syncPnl(accountId: number, walletAddr: string, since?: string, ctx?: FetchContext): Promise<SyncResult> {
   let totalInserted = 0;
@@ -496,7 +441,6 @@ type SyncFn = (accountId: number, walletAddr: string, since?: string, ctx?: Fetc
 
 const SYNC_FNS: Record<HistoryType, SyncFn> = {
   trades: syncTrades,
-  orders: syncOrders,
   pnl: syncPnl,
   funding: syncFunding,
   deposits: syncDeposits,
@@ -509,27 +453,22 @@ const SYNC_FNS: Record<HistoryType, SyncFn> = {
 /**
  * Sync all relevant history types for one account.
  *
- * `orders` is EXCLUDED by default — market-maker accounts have 25M+ orders
- * each, which blew up a 75 GB disk on the Hetzner box. Orders are not read
- * by leaderboard or copy trading. Callers that genuinely need orders (the
- * authenticated user opening their own History modal) pass
- * `{ includeOrders: true }` explicitly.
- *
- * See commit e32b66b ("exclude orders from bulk sync — too large for
- * market-makers") — same decision, now applied to the worker pipeline too.
+ * `orders` was previously a sync type of its own but has been removed as of
+ * 2026-04-19. Market-maker accounts have 25M+ orders each, which blew up a
+ * 75 GB disk on the Hetzner box (see commit e32b66b and the disk-crash
+ * incident). Orders are now derived from trade_history grouped by orderId
+ * — that covers every filled order for zero extra sync cost. See
+ * lib/history/queries.ts#getOrderHistoryFromTrades.
  */
 export async function syncAllHistory(
   accountId: number,
   walletAddr: string,
   onProgress?: (progress: SyncProgress) => void,
   ctx?: FetchContext,
-  options?: { includeOrders?: boolean },
 ): Promise<SyncResult[]> {
   await ensureMarketCache();
 
-  const types: HistoryType[] = options?.includeOrders
-    ? ["trades", "orders", "pnl", "funding", "deposits", "withdrawals", "liquidations"]
-    : ["trades", "pnl", "funding", "deposits", "withdrawals", "liquidations"];
+  const types: HistoryType[] = ["trades", "pnl", "funding", "deposits", "withdrawals", "liquidations"];
   const results: SyncResult[] = [];
 
   for (const type of types) {

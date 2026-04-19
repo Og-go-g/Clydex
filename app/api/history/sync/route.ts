@@ -43,13 +43,10 @@ export async function POST() {
     // Link bulk-synced data to real wallet address
     await linkAccountToWallet(accountId, address);
 
-    // Incremental sync — only fetches since last cursor.
-    // includeOrders:true because this is the authenticated user looking at
-    // their own History modal — one account's orders is cheap.
-    // Bulk / leaderboard paths keep the default (orders excluded).
-    const results = await syncAllHistory(accountId, address, undefined, undefined, {
-      includeOrders: true,
-    });
+    // Incremental sync — only fetches since last cursor. Orders are no
+    // longer a separate sync type as of 2026-04-19 — the "Order History"
+    // tab is derived from trade_history grouped by orderId.
+    const results = await syncAllHistory(accountId, address);
     return NextResponse.json({ results });
   } catch (error) {
     console.error("[api/history/sync] error:", error);

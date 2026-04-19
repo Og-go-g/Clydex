@@ -162,14 +162,15 @@ export async function propagateWallet(accountId: number, realWallet: string): Pr
       updated[t] = r.rowCount ?? 0;
     }
 
-    // 2. trade_history / order_history — unique on tradeId/orderId (not walletAddr).
-    for (const t of ["trade_history", "order_history"]) {
+    // 2. trade_history — unique on (tradeId, time), no twin risk on walletAddr.
+    // order_history was removed on 2026-04-19.
+    {
       const r = await client.query(
-        `UPDATE ${t} SET "walletAddr" = $1
+        `UPDATE trade_history SET "walletAddr" = $1
          WHERE "accountId" = $2 AND "walletAddr" = $3`,
         [realWallet, accountId, placeholder],
       );
-      updated[t] = r.rowCount ?? 0;
+      updated.trade_history = r.rowCount ?? 0;
     }
 
     // 3. deposit_history / withdrawal_history — unique on (walletAddr, time, amount).

@@ -30,7 +30,7 @@ export async function linkAccountToWallet(accountId: number, walletAddr: string)
 
     const tables = [
       "trade_history",
-      "order_history",
+      // order_history removed 2026-04-19 — derived from trade_history now.
       "pnl_history",
       "funding_history",
       "deposit_history",
