@@ -269,9 +269,13 @@ async function syncPnl(accountId: number, walletAddr: string, since?: string, ct
 
     const d = page.data;
     const result = await historyPool.query(
+      // Unique constraint is on ("accountId", "marketId", "time") after the
+      // 2026-04-18 schema fix. ON CONFLICT ("walletAddr", "marketId", "time")
+      // here used to crash every insert once the wallet-scoped index was
+      // dropped — see sql/2026-04-18_unique_by_accountid.sql.
       `INSERT INTO pnl_history (id, "accountId", "walletAddr", "marketId", symbol, "tradingPnl", "settledFundingPnl", "positionSize", "time")
        SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::numeric[], $7::numeric[], $8::numeric[], $9::timestamptz[])
-       ON CONFLICT ("walletAddr", "marketId", "time") DO NOTHING`,
+       ON CONFLICT ("accountId", "marketId", "time") DO NOTHING`,
       [
         d.map(() => uuid()),
         d.map(() => accountId),
@@ -308,9 +312,10 @@ async function syncFunding(accountId: number, walletAddr: string, since?: string
 
     const d = page.data;
     const result = await historyPool.query(
+      // Same constraint swap as pnl_history — see unique-by-accountid migration.
       `INSERT INTO funding_history (id, "accountId", "walletAddr", "marketId", symbol, "fundingPnl", "positionSize", "time")
        SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::numeric[], $7::numeric[], $8::timestamptz[])
-       ON CONFLICT ("walletAddr", "marketId", "time") DO NOTHING`,
+       ON CONFLICT ("accountId", "marketId", "time") DO NOTHING`,
       [
         d.map(() => uuid()),
         d.map(() => accountId),
@@ -497,15 +502,30 @@ const SYNC_FNS: Record<HistoryType, SyncFn> = {
 
 // ─── Public API ───────────────────────────────────────────────────
 
+/**
+ * Sync all relevant history types for one account.
+ *
+ * `orders` is EXCLUDED by default — market-maker accounts have 25M+ orders
+ * each, which blew up a 75 GB disk on the Hetzner box. Orders are not read
+ * by leaderboard or copy trading. Callers that genuinely need orders (the
+ * authenticated user opening their own History modal) pass
+ * `{ includeOrders: true }` explicitly.
+ *
+ * See commit e32b66b ("exclude orders from bulk sync — too large for
+ * market-makers") — same decision, now applied to the worker pipeline too.
+ */
 export async function syncAllHistory(
   accountId: number,
   walletAddr: string,
   onProgress?: (progress: SyncProgress) => void,
   ctx?: FetchContext,
+  options?: { includeOrders?: boolean },
 ): Promise<SyncResult[]> {
   await ensureMarketCache();
 
-  const types: HistoryType[] = ["trades", "orders", "pnl", "funding", "deposits", "withdrawals", "liquidations"];
+  const types: HistoryType[] = options?.includeOrders
+    ? ["trades", "orders", "pnl", "funding", "deposits", "withdrawals", "liquidations"]
+    : ["trades", "pnl", "funding", "deposits", "withdrawals", "liquidations"];
   const results: SyncResult[] = [];
 
   for (const type of types) {
