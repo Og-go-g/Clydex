@@ -43,18 +43,16 @@ function clampLimit(limit?: number): number {
 // PostOnly iff every fill was role=maker, isReduceOnly is not recoverable
 // and reported as false. Cancelled / unfilled orders are not visible via
 // this view (accepted trade-off — they're noise for retail UX).
+//
+// COALESCE("orderId", "tradeId") lets pre-2026-04-19 rows (orderId=NULL,
+// not backfilled by ON CONFLICT DO NOTHING) appear as single-fill orders
+// keyed by tradeId, so users keep full Order History visibility.
 
 export async function getOrderHistory(params: PaginationParams): Promise<PagedResult<OrderHistoryRow>> {
   const { walletAddr, marketId, offset = 0 } = params;
   const limit = clampLimit(params.limit);
 
-  // marketId filter applied BEFORE the group so the count matches exactly.
-  // orderId IS NOT NULL — trades synced before 2026-04-19 carry NULL and
-  // can't be reconstructed as "orders" because we never stored the parent
-  // order id on those rows. Users still see the raw executions on the
-  // Trades tab.
   const filterSql = `WHERE "walletAddr" = $1
-                       AND "orderId" IS NOT NULL
                        AND ($2::int IS NULL OR "marketId" = $2)`;
 
   interface Row extends Record<string, unknown> {
@@ -74,7 +72,7 @@ export async function getOrderHistory(params: PaginationParams): Promise<PagedRe
   const [dataRows, countRows] = await Promise.all([
     query<Row>(
       `SELECT
-         "orderId"       AS order_id,
+         COALESCE("orderId", "tradeId") AS order_id,
          MIN("accountId")::int  AS account_id,
          MIN("marketId")::int   AS market_id,
          MIN(symbol)            AS symbol,
@@ -87,13 +85,13 @@ export async function getOrderHistory(params: PaginationParams): Promise<PagedRe
          MAX("time")            AS last_time
        FROM trade_history
        ${filterSql}
-       GROUP BY "orderId"
+       GROUP BY COALESCE("orderId", "tradeId")
        ORDER BY MAX("time") DESC
        LIMIT $3 OFFSET $4`,
       [walletAddr, marketId ?? null, limit, offset],
     ),
     query<{ count: string }>(
-      `SELECT COUNT(DISTINCT "orderId")::text AS count
+      `SELECT COUNT(DISTINCT COALESCE("orderId", "tradeId"))::text AS count
        FROM trade_history
        ${filterSql}`,
       [walletAddr, marketId ?? null],
