@@ -67,6 +67,54 @@ function shortenAddr(addr: string): string {
   return addr.slice(0, 4) + "..." + addr.slice(-4);
 }
 
+/**
+ * Broadcast a request for the leaderboard to search for this address.
+ * CompactLeaderboard listens for it, fills its search input, and runs
+ * the query. Decoupled via window event so the two panels don't need
+ * to share state or context.
+ */
+export const LEADERBOARD_SEARCH_EVENT = "clydex:leaderboard-search";
+
+function broadcastLeaderboardSearch(addr: string) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(LEADERBOARD_SEARCH_EVENT, { detail: addr }));
+  // Scroll the user to the leaderboard so they see the result
+  const el = document.querySelector("[data-leaderboard-root]");
+  if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// ─── Sort ──────────────────────────────────────────────────────
+
+type SortMode = "default" | "allocation" | "trades" | "volume";
+
+const SORT_LABELS: Record<SortMode, string> = {
+  default: "Default",
+  allocation: "Allocation",
+  trades: "Trades",
+  volume: "Volume",
+};
+
+function sortSubscriptions(
+  subs: CopySubscriptionUI[],
+  mode: SortMode,
+): CopySubscriptionUI[] {
+  if (mode === "default") return subs;
+  // Don't mutate — caller may have memoized reference equality
+  const copy = [...subs];
+  switch (mode) {
+    case "allocation":
+      copy.sort((a, b) => parseFloat(b.allocationUsdc) - parseFloat(a.allocationUsdc));
+      break;
+    case "trades":
+      copy.sort((a, b) => b.stats.filledTrades - a.stats.filledTrades);
+      break;
+    case "volume":
+      copy.sort((a, b) => b.stats.totalVolume - a.stats.totalVolume);
+      break;
+  }
+  return copy;
+}
+
 function fmtUsd(n: number): string {
   const abs = Math.abs(n);
   if (abs >= 1_000_000) return "$" + (abs / 1_000_000).toFixed(1) + "M";
@@ -84,6 +132,7 @@ function LeaderCard({
   onToggleActive,
   onUnfollow,
   onSaveSettings,
+  onAddrClick,
 }: {
   sub: CopySubscriptionUI;
   expanded: boolean;
@@ -91,6 +140,7 @@ function LeaderCard({
   onToggleActive: () => void;
   onUnfollow: () => void;
   onSaveSettings: (id: string, settings: Record<string, unknown>) => Promise<void>;
+  onAddrClick: (addr: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -136,7 +186,25 @@ function LeaderCard({
       >
         <div className="flex items-center gap-2">
           <span className={`h-1.5 w-1.5 rounded-full flex-shrink-0 ${sub.active ? "bg-green-500" : "bg-[#555]"}`} />
-          <span className="text-xs font-mono text-[#ccc]">{shortenAddr(sub.leaderAddr)}</span>
+          <span
+            role="button"
+            tabIndex={0}
+            onClick={(e) => {
+              e.stopPropagation();
+              onAddrClick(sub.leaderAddr);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                e.stopPropagation();
+                onAddrClick(sub.leaderAddr);
+              }
+            }}
+            title="View leader profile"
+            className="text-xs font-mono text-[#ccc] hover:text-emerald-400 transition-colors cursor-pointer underline-offset-2 hover:underline"
+          >
+            {shortenAddr(sub.leaderAddr)}
+          </span>
           <span className="text-[10px] text-[#666]">${parseFloat(sub.allocationUsdc).toFixed(0)}</span>
           <span className="text-[10px] text-[#555]">{sub.leverageMult}x</span>
         </div>
@@ -321,6 +389,7 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
     isHealthy: boolean;
     lastRunAgoSec: number | null;
   } | null>(null);
+  const [sortMode, setSortMode] = useState<SortMode>("default");
   const { addToast } = useToast();
   const prevTradeCountRef = useRef<number>(0);
   const prevFilledRef = useRef<number>(0);
@@ -526,6 +595,23 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
   const totalAllocation = status?.subscriptions.reduce((sum, s) => sum + parseFloat(s.allocationUsdc), 0) ?? 0;
   const activeLeaders = status?.subscriptions.filter((s) => s.active).length ?? 0;
 
+  // Session expiry countdown
+  const daysUntilExpiry = status?.sessionExpires
+    ? Math.max(
+        0,
+        Math.ceil(
+          (new Date(status.sessionExpires).getTime() - Date.now()) /
+            (24 * 60 * 60 * 1000),
+        ),
+      )
+    : null;
+  const expiringSoon = daysUntilExpiry !== null && daysUntilExpiry <= 3;
+
+  // Sorted leaders — controlled by sortMode state declared below
+  const sortedSubscriptions = status?.subscriptions
+    ? sortSubscriptions(status.subscriptions, sortMode)
+    : [];
+
   return (
     <div className="px-3 py-2 space-y-2">
       {/* Not authenticated */}
@@ -619,6 +705,29 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
             </div>
           )}
 
+          {/* Session expiry warning — only when ≤3 days left. Renew re-runs the same
+              activation flow, which upserts the session (old one is replaced). */}
+          {expiringSoon && (
+            <div className="flex items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[10px] text-amber-200">
+              <div className="flex items-center gap-1.5">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <polyline points="12 6 12 12 16 14" />
+                </svg>
+                <span className="font-medium">
+                  Session expires in {daysUntilExpiry === 0 ? "<1 day" : `${daysUntilExpiry} day${daysUntilExpiry === 1 ? "" : "s"}`}
+                </span>
+              </div>
+              <button
+                onClick={handleActivate}
+                disabled={activating}
+                className="shrink-0 rounded-md bg-amber-500/20 px-2 py-0.5 text-[10px] font-medium text-amber-200 hover:bg-amber-500/30 transition-colors disabled:opacity-50"
+              >
+                {activating ? "Renewing..." : "Renew"}
+              </button>
+            </div>
+          )}
+
           {/* Multi-leader summary bar */}
           {status.subscriptions.length > 0 && (
             <div className="flex items-center gap-3 rounded-lg border border-[#262626] bg-[#0a0a0a] px-3 py-2 text-[10px]">
@@ -657,7 +766,22 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
             </div>
           ) : (
             <div className="space-y-1.5">
-              {status.subscriptions.map((sub) => (
+              {/* Sort control — hidden for ≤1 leader (nothing to sort) */}
+              {status.subscriptions.length > 1 && (
+                <div className="flex items-center justify-end gap-1 text-[9px] text-[#666]">
+                  <span>Sort:</span>
+                  <select
+                    value={sortMode}
+                    onChange={(e) => setSortMode(e.target.value as SortMode)}
+                    className="rounded border border-[#262626] bg-[#0a0a0a] px-1.5 py-0.5 text-[10px] text-[#ccc] outline-none focus:border-emerald-500/40"
+                  >
+                    {(Object.keys(SORT_LABELS) as SortMode[]).map((m) => (
+                      <option key={m} value={m}>{SORT_LABELS[m]}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {sortedSubscriptions.map((sub) => (
                 <LeaderCard
                   key={sub.id}
                   sub={sub}
@@ -668,6 +792,7 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
                   onToggleActive={() => handleToggle(sub.id, !sub.active)}
                   onUnfollow={() => setUnfollowTarget(sub.leaderAddr)}
                   onSaveSettings={handleSaveSettings}
+                  onAddrClick={broadcastLeaderboardSearch}
                 />
               ))}
             </div>

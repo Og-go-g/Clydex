@@ -71,11 +71,15 @@ export function LeaderboardContent({ onCopyTrader }: { onCopyTrader?: (entry: Le
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  const handleSearch = useCallback(async () => {
-    const q = searchQuery.trim();
+  /**
+   * Run the search for a specific address. Separated from handleSearch so
+   * external events (e.g. clicking a leader addr in CopyTradingPanel) can
+   * trigger it without racing the searchQuery setState cycle.
+   */
+  const runSearchFor = useCallback(async (rawQuery: string) => {
+    const q = rawQuery.trim();
     if (!q) { setSearchResult(null); setSearchError(null); return; }
 
-    // Normalize: if user types just a number, treat as account:ID
     let addr = q;
     if (/^\d+$/.test(q)) addr = `account:${q}`;
 
@@ -108,10 +112,26 @@ export function LeaderboardContent({ onCopyTrader }: { onCopyTrader?: (entry: Le
     } finally {
       setSearching(false);
     }
-  }, [searchQuery]);
+  }, []);
+
+  const handleSearch = useCallback(() => runSearchFor(searchQuery), [runSearchFor, searchQuery]);
+
+  // Listen for external "open leader profile" events — dispatched by
+  // CopyTradingPanel when the user clicks a leader's address. Fills the
+  // search input and runs the query without the user retyping.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const addr = (e as CustomEvent<string>).detail;
+      if (typeof addr !== "string" || !addr) return;
+      setSearchQuery(addr);
+      runSearchFor(addr);
+    };
+    window.addEventListener("clydex:leaderboard-search", handler);
+    return () => window.removeEventListener("clydex:leaderboard-search", handler);
+  }, [runSearchFor]);
 
   return (
-    <div className="flex flex-col h-full">
+    <div data-leaderboard-root className="flex flex-col h-full">
       {/* Search by ID or wallet */}
       <div className="px-3 pt-1.5 pb-1">
         <div className="flex gap-1">
