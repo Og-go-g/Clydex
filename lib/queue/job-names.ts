@@ -11,6 +11,7 @@ export const JOB = {
   syncUsersEnqueuer:   "sync-users-enqueuer",
   resolveWallets:      "resolve-wallets",
   resolveWalletsBatch: "resolve-wallets-batch",
+  copyEngineTick:      "copy-engine-tick",
 } as const;
 
 export type JobName = (typeof JOB)[keyof typeof JOB];
@@ -25,6 +26,7 @@ export interface Payloads {
   [JOB.syncUsersEnqueuer]:   Record<string, never>;
   [JOB.resolveWallets]:      Record<string, never>;
   [JOB.resolveWalletsBatch]: { accountIds: number[] };
+  [JOB.copyEngineTick]:      Record<string, never>;
 }
 
 // Priority ordering — higher runs first

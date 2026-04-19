@@ -317,6 +317,10 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
   const [unfollowing, setUnfollowing] = useState(false);
   const [showDisableConfirm, setShowDisableConfirm] = useState(false);
   const [expandedLeader, setExpandedLeader] = useState<string | null>(null);
+  const [engineHealth, setEngineHealth] = useState<{
+    isHealthy: boolean;
+    lastRunAgoSec: number | null;
+  } | null>(null);
   const { addToast } = useToast();
   const prevTradeCountRef = useRef<number>(0);
   const prevFilledRef = useRef<number>(0);
@@ -364,6 +368,36 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
     const interval = setInterval(fetchStatus, 30_000);
     return () => clearInterval(interval);
   }, [isAuthenticated, status?.sessionActive, fetchStatus]);
+
+  // Engine health — polled while session is active with subscriptions,
+  // because only then does engine downtime actually affect the user.
+  useEffect(() => {
+    if (!isAuthenticated || !status?.sessionActive) return;
+    if ((status?.subscriptions?.length ?? 0) === 0) return;
+
+    let cancelled = false;
+    const fetchHealth = async () => {
+      try {
+        const res = await fetch("/api/copy/health", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) {
+          setEngineHealth({
+            isHealthy: Boolean(data.isHealthy),
+            lastRunAgoSec: data.lastRunAgoSec ?? null,
+          });
+        }
+      } catch {
+        // Network hiccup — keep last state, don't blink the banner
+      }
+    };
+    fetchHealth();
+    const id = setInterval(fetchHealth, 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [isAuthenticated, status?.sessionActive, status?.subscriptions?.length]);
 
   // Expose refresh function to parent via ref
   useEffect(() => {
@@ -565,6 +599,25 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
               Disable
             </button>
           </div>
+
+          {/* Engine health banner — shown only when something is wrong so UI stays quiet in the happy path */}
+          {engineHealth && !engineHealth.isHealthy && status.subscriptions.length > 0 && (
+            <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-[10px] text-red-300 leading-relaxed">
+              <div className="flex items-center gap-1.5 font-medium">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 9v4M12 17h.01M10.29 3.86l-8.14 14a2 2 0 001.71 3h16.28a2 2 0 001.71-3l-8.14-14a2 2 0 00-3.42 0z" />
+                </svg>
+                Copy engine delayed
+              </div>
+              <div className="mt-0.5 text-[#a66]">
+                Last cycle{" "}
+                {engineHealth.lastRunAgoSec !== null
+                  ? `${engineHealth.lastRunAgoSec}s ago`
+                  : "never"}
+                {" "}— your leaders&apos; trades may not be mirrored right now. We&apos;re auto-retrying.
+              </div>
+            </div>
+          )}
 
           {/* Multi-leader summary bar */}
           {status.subscriptions.length > 0 && (

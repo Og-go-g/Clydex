@@ -39,6 +39,12 @@ export async function registerSchedules(boss: PgBoss): Promise<void> {
   // one-off backfill has run, so cadence can stay frequent.
   await boss.schedule(JOB.resolveWallets, "*/15 * * * *", {});
 
+  // Copy trading engine — every minute. Handler internally runs 4 cycles
+  // of runCopyEngine() spaced 15s apart, giving ~15s mirror-lag for copy
+  // traders. Replaces the legacy host-level curl cron that was invisible
+  // to code review and silently stopped when PG died on 2026-04-19.
+  await boss.schedule(JOB.copyEngineTick, "* * * * *", {});
+
   console.log("[worker] schedules registered");
 }
 
@@ -49,5 +55,6 @@ export async function clearSchedules(boss: PgBoss): Promise<void> {
   await boss.unschedule(JOB.refreshTier);
   await boss.unschedule(JOB.syncUsersEnqueuer);
   await boss.unschedule(JOB.resolveWallets);
+  await boss.unschedule(JOB.copyEngineTick);
   console.log("[worker] schedules cleared");
 }

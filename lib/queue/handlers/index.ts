@@ -15,6 +15,7 @@ import { handleOnDemandRefresh } from "./on-demand-refresh";
 import { handleSyncUsersEnqueuer } from "./sync-users-enqueuer";
 import { handleResolveWallets } from "./resolve-wallets";
 import { handleResolveWalletsBatch } from "./resolve-wallets-batch";
+import { handleCopyEngineTick } from "./copy-engine-tick";
 
 const BATCH_CONCURRENCY = Number(process.env.WORKER_BATCH_CONCURRENCY || "5");
 const RESOLVE_CONCURRENCY = Number(process.env.RESOLVE_WALLETS_CONCURRENCY || "3");
@@ -96,6 +97,17 @@ export async function registerHandlers(boss: PgBoss): Promise<void> {
     async (jobs) => {
       for (const j of jobs) {
         await handleResolveWalletsBatch(j as AnyJob<Payloads[typeof JOB.resolveWalletsBatch]>);
+      }
+    },
+  );
+
+  // Copy trading engine — 1 job/min, each runs 4 x 15s cycles
+  await boss.work<Payloads[typeof JOB.copyEngineTick]>(
+    JOB.copyEngineTick,
+    { localConcurrency: 1 },
+    async (jobs) => {
+      for (const j of jobs) {
+        await handleCopyEngineTick(j as AnyJob<Payloads[typeof JOB.copyEngineTick]>);
       }
     },
   );
