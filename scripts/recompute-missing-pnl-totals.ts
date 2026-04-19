@@ -31,14 +31,23 @@ async function main(): Promise<void> {
   await ensureMarketCache();
 
   const { rows } = await historyPool.query<{ accountId: number; walletAddr: string }>(
-    `SELECT DISTINCT ph."accountId", ap.pubkey AS "walletAddr"
-     FROM pnl_history ph
-     JOIN account_pubkey ap ON ap."accountId" = ph."accountId"
+    // Union both raw sources: an account is eligible for pnl_totals if it
+    // has pnl_history (closed positions) OR funding_history (open positions
+    // accruing funding). The original query only covered pnl_history, so
+    // funding-only accounts were missed and stayed invisible to Tier-4.
+    `WITH active AS (
+       SELECT DISTINCT "accountId" FROM pnl_history
+       UNION
+       SELECT DISTINCT "accountId" FROM funding_history
+     )
+     SELECT a."accountId", ap.pubkey AS "walletAddr"
+     FROM active a
+     JOIN account_pubkey ap ON ap."accountId" = a."accountId"
      WHERE ap.pubkey IS NOT NULL
        AND NOT EXISTS (
-         SELECT 1 FROM pnl_totals pt WHERE pt."accountId" = ph."accountId"
+         SELECT 1 FROM pnl_totals pt WHERE pt."accountId" = a."accountId"
        )
-     ORDER BY ph."accountId"`,
+     ORDER BY a."accountId"`,
   );
 
   if (rows.length === 0) {
