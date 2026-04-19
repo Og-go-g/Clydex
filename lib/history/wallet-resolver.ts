@@ -17,6 +17,7 @@
 import { historyPool, query, execute } from "@/lib/db-history";
 import { N1_MAINNET_URL } from "@/lib/n1/constants";
 import { retryableFetch, type FetchContext } from "./fetch-context";
+import { recomputeAggregates } from "./aggregate";
 
 export interface AccountPubkeyRow {
   accountId: number;
@@ -284,6 +285,25 @@ export async function propagateWallet(accountId: number, realWallet: string): Pr
     throw err;
   } finally {
     client.release();
+  }
+
+  // Rebuild pnl_totals + volume_calendar for this account from raw tables.
+  //
+  // Propagation moved existing rows from placeholder → real wallet, but it
+  // did NOT create pnl_totals rows for accounts that had raw history under
+  // 'account:<id>' yet never had pnl_totals materialized (common for
+  // bulk-synced accounts that never went through the tier pipeline). Without
+  // this, Tier-4 selector can't see them (selector reads from pnl_totals),
+  // so they stay invisible in the leaderboard forever.
+  //
+  // recomputeAggregates is idempotent — re-running for already-fresh totals
+  // just overwrites with the same numbers.
+  try {
+    await recomputeAggregates(accountId, realWallet);
+  } catch (err) {
+    // Don't fail the whole propagation if aggregate recompute bombs —
+    // the UPDATEs above are the critical path. Tier-4 will pick it up later.
+    console.warn(`[propagateWallet] aggregate recompute failed for ${accountId}:`, err);
   }
 
   return { tablesUpdated: updated, tablesCleaned: cleaned };
