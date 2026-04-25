@@ -8,7 +8,19 @@
  */
 
 import type { PgBoss } from "pg-boss";
-import { JOB } from "./job-names";
+import { JOB, TIER_IDS, tierScheduleName, type TierId } from "./job-names";
+
+// Cron per tier. Each tier gets its own pg-boss queue + schedule row
+// (see `tierScheduleName` rationale in job-names.ts). Offsets between
+// tiers (7, 13, etc.) keep their executions from clashing inside the
+// same minute on a small worker.
+const TIER_CRONS: Record<string, string> = {
+  "1":     "*/30 * * * *", // top 500 + copy leaders
+  "2":     "7 * * * *",    // interacted accounts
+  "3":     "13 */6 * * *", // active traders
+  "4":     "0 3 * * *",    // everyone else
+  "spot":  "0 6 * * *",    // 500 random T4 spot check
+};
 
 export async function registerSchedules(boss: PgBoss): Promise<void> {
   if (process.env.WORKER_SCHEDULES_ENABLED === "false") {
@@ -16,20 +28,23 @@ export async function registerSchedules(boss: PgBoss): Promise<void> {
     return;
   }
 
-  // Tier 1: top 500 + copy leaders — every 30 min
-  await boss.schedule(JOB.refreshTier, "*/30 * * * *", { tier: 1 });
+  // Tiered leaderboard refresh — one queue + schedule per tier.
+  for (const tier of TIER_IDS) {
+    const cron = TIER_CRONS[String(tier)];
+    if (!cron) throw new Error(`[schedules] no cron defined for tier=${tier}`);
+    await boss.schedule(tierScheduleName(tier), cron, { tier });
+  }
 
-  // Tier 2: interacted accounts — hourly, offset 7 min to avoid clash with T1
-  await boss.schedule(JOB.refreshTier, "7 * * * *", { tier: 2 });
-
-  // Tier 3: active traders — every 6 hours, offset 13 min
-  await boss.schedule(JOB.refreshTier, "13 */6 * * *", { tier: 3 });
-
-  // Tier 4: everyone else — nightly 03:00 UTC
-  await boss.schedule(JOB.refreshTier, "0 3 * * *", { tier: 4 });
-
-  // Spot check — daily 06:00 UTC
-  await boss.schedule(JOB.refreshTier, "0 6 * * *", { tier: "spot" });
+  // Cleanup legacy single-row schedule from the pre-fix deploy. The old
+  // code registered every tier under `JOB.refreshTier`, so only the last
+  // tier (spot) survived in `pgboss.schedule`. Now that real schedules
+  // live under `refresh-leaderboard-tier-{tier}`, drop the orphan row so
+  // it stops firing duplicates.
+  try {
+    await boss.unschedule(JOB.refreshTier);
+  } catch {
+    /* fine on fresh DBs that never had the legacy row */
+  }
 
   // Per-user history fan-out — nightly 02:00 UTC
   await boss.schedule(JOB.syncUsersEnqueuer, "0 2 * * *", {});
@@ -52,6 +67,10 @@ export async function registerSchedules(boss: PgBoss): Promise<void> {
  * Remove all schedules — used by rollback.
  */
 export async function clearSchedules(boss: PgBoss): Promise<void> {
+  for (const tier of TIER_IDS) {
+    await boss.unschedule(tierScheduleName(tier));
+  }
+  // Legacy name (in case it persisted from the pre-fix deploy).
   await boss.unschedule(JOB.refreshTier);
   await boss.unschedule(JOB.syncUsersEnqueuer);
   await boss.unschedule(JOB.resolveWallets);

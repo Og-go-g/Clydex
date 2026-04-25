@@ -7,7 +7,7 @@
  */
 
 import type { PgBoss } from "pg-boss";
-import { JOB, type Payloads } from "../job-names";
+import { JOB, TIER_IDS, tierScheduleName, type Payloads } from "../job-names";
 import { handleRefreshTier } from "./refresh-leaderboard-tier";
 import { handleLeaderboardBatch } from "./leaderboard-batch";
 import { handleSyncUserHistory } from "./sync-user-history";
@@ -24,16 +24,21 @@ const RESOLVE_CONCURRENCY = Number(process.env.RESOLVE_WALLETS_CONCURRENCY || "3
 type AnyJob<T = any> = { id: string; name: string; data: T };
 
 export async function registerHandlers(boss: PgBoss): Promise<void> {
-  // Tier orchestrator — one at a time
-  await boss.work<Payloads[typeof JOB.refreshTier]>(
-    JOB.refreshTier,
-    { localConcurrency: 1 },
-    async (jobs) => {
-      for (const j of jobs) {
-        await handleRefreshTier(j as AnyJob<Payloads[typeof JOB.refreshTier]>);
-      }
-    },
-  );
+  // Tier orchestrator — one queue per tier (pg-boss v12 schedules are
+  // keyed by queue name, see `tierScheduleName` rationale in job-names.ts).
+  // All five queues route to the same `handleRefreshTier`, which reads
+  // `data.tier` to do the right thing.
+  for (const tier of TIER_IDS) {
+    await boss.work<Payloads[typeof JOB.refreshTier]>(
+      tierScheduleName(tier),
+      { localConcurrency: 1 },
+      async (jobs) => {
+        for (const j of jobs) {
+          await handleRefreshTier(j as AnyJob<Payloads[typeof JOB.refreshTier]>);
+        }
+      },
+    );
+  }
 
   // Batch workers — N parallel (one per proxy slot)
   await boss.work<Payloads[typeof JOB.leaderboardBatch]>(

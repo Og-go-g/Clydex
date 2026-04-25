@@ -18,6 +18,22 @@ export type JobName = (typeof JOB)[keyof typeof JOB];
 
 export type TierId = 1 | 2 | 3 | 4 | "spot";
 
+// All tiers in registration order — single source of truth for both
+// `lib/queue/schedules.ts` and `lib/queue/handlers/index.ts`.
+export const TIER_IDS: readonly TierId[] = [1, 2, 3, 4, "spot"] as const;
+
+/**
+ * Per-tier queue name for pg-boss. Each tier needs a distinct queue name
+ * because pg-boss v12 keys `pgboss.schedule` rows by name (PK) — so a
+ * single queue can have only one schedule. Routing every tier through
+ * `JOB.refreshTier` (as the original 2026-04-18 deploy did) silently
+ * overwrote 4 of the 5 schedules and only the last call (`spot`) ever
+ * fired in production.
+ */
+export function tierScheduleName(tier: TierId): string {
+  return `${JOB.refreshTier}-${tier}`;
+}
+
 export interface Payloads {
   [JOB.refreshTier]:         { tier: TierId };
   [JOB.leaderboardBatch]:    { accountIds: number[]; wallets: string[]; tier: number };
