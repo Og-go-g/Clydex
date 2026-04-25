@@ -130,6 +130,19 @@ function maybeCleanup() {
   }
 }
 
+// ─── Upstash failure logging (throttled) ──────────────────────
+
+let lastUpstashLogMs = 0;
+const UPSTASH_LOG_INTERVAL_MS = 60_000;
+
+function logUpstashFailure(err: unknown): void {
+  const now = Date.now();
+  if (now - lastUpstashLogMs < UPSTASH_LOG_INTERVAL_MS) return;
+  lastUpstashLogMs = now;
+  const msg = err instanceof Error ? err.message : String(err);
+  console.warn(`[middleware] Upstash rate-limiter failed, falling back to in-memory: ${msg}`);
+}
+
 // ─── CSRF / Content-Type constants ────────────────────────────
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -150,20 +163,33 @@ export async function middleware(request: NextRequest) {
 
   const tierKey = getTierKey(pathname);
 
+  // Try Upstash first (production-grade, distributed across instances).
+  // If it throws — most commonly quota exhaustion ("max requests limit
+  // exceeded") or transient network errors — fall back to the in-memory
+  // limiter so the entire `/api/*` surface doesn't 500. We log the error
+  // once per minute (cheap throttle via timestamp bucket) to avoid log spam.
+  let upstashFailed = false;
   if (upstashLimiters) {
-    const { success, reset } = await upstashLimiters[tierKey].limit(ip);
+    try {
+      const { success, reset } = await upstashLimiters[tierKey].limit(ip);
 
-    if (!success) {
-      const retryAfter = Math.ceil((reset - Date.now()) / 1000);
-      return NextResponse.json(
-        { error: "Too many requests. Please try again later." },
-        {
-          status: 429,
-          headers: { "Retry-After": String(Math.max(retryAfter, 1)) },
-        }
-      );
+      if (!success) {
+        const retryAfter = Math.ceil((reset - Date.now()) / 1000);
+        return NextResponse.json(
+          { error: "Too many requests. Please try again later." },
+          {
+            status: 429,
+            headers: { "Retry-After": String(Math.max(retryAfter, 1)) },
+          }
+        );
+      }
+    } catch (err) {
+      upstashFailed = true;
+      logUpstashFailure(err);
     }
-  } else {
+  }
+
+  if (!upstashLimiters || upstashFailed) {
     maybeCleanup();
     const { ok, retryAfter } = inMemoryRateLimit(ip, tierKey);
 

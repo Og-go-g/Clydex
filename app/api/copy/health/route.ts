@@ -16,6 +16,13 @@
 import { NextResponse } from "next/server";
 import { query } from "@/lib/db-history";
 
+// Force dynamic execution on every request. Without this, Next.js 16 may
+// try to prerender at build time — and if the history DB is down during
+// `next build` (e.g. Postgres recovery on 2026-04-25), Next.js bakes a
+// static text/plain 500 that is served forever by the runtime, masking
+// any real fix until the next rebuild.
+export const dynamic = "force-dynamic";
+
 const HEALTHY_MAX_AGE_SEC = 90; // 1 min cron + 30s grace
 
 interface TickRow extends Record<string, unknown> {
