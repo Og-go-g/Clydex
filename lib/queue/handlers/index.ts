@@ -28,9 +28,16 @@ export async function registerHandlers(boss: PgBoss): Promise<void> {
   // keyed by queue name, see `tierScheduleName` rationale in job-names.ts).
   // All five queues route to the same `handleRefreshTier`, which reads
   // `data.tier` to do the right thing.
+  //
+  // `createQueue()` is mandatory before `work()` in v12 — neither work()
+  // nor schedule() auto-create the queue, and the FK on
+  // `pgboss.schedule.name → pgboss.queue.name` blows up at startup
+  // otherwise. createQueue is idempotent.
   for (const tier of TIER_IDS) {
+    const queueName = tierScheduleName(tier);
+    await boss.createQueue(queueName);
     await boss.work<Payloads[typeof JOB.refreshTier]>(
-      tierScheduleName(tier),
+      queueName,
       { localConcurrency: 1 },
       async (jobs) => {
         for (const j of jobs) {

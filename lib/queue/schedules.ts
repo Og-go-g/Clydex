@@ -8,7 +8,7 @@
  */
 
 import type { PgBoss } from "pg-boss";
-import { JOB, TIER_IDS, tierScheduleName, type TierId } from "./job-names";
+import { JOB, TIER_IDS, tierScheduleName } from "./job-names";
 
 // Cron per tier. Each tier gets its own pg-boss queue + schedule row
 // (see `tierScheduleName` rationale in job-names.ts). Offsets between
@@ -29,10 +29,16 @@ export async function registerSchedules(boss: PgBoss): Promise<void> {
   }
 
   // Tiered leaderboard refresh — one queue + schedule per tier.
+  // pg-boss v12 enforces a FK from `pgboss.schedule.name` to
+  // `pgboss.queue.name`, and neither `schedule()` nor `work()` create the
+  // queue automatically — so call `createQueue()` first. It's idempotent
+  // (INSERT ... ON CONFLICT DO NOTHING under the hood).
   for (const tier of TIER_IDS) {
     const cron = TIER_CRONS[String(tier)];
     if (!cron) throw new Error(`[schedules] no cron defined for tier=${tier}`);
-    await boss.schedule(tierScheduleName(tier), cron, { tier });
+    const name = tierScheduleName(tier);
+    await boss.createQueue(name);
+    await boss.schedule(name, cron, { tier });
   }
 
   // Cleanup legacy single-row schedule from the pre-fix deploy. The old
