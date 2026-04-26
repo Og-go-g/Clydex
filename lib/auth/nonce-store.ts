@@ -35,15 +35,36 @@ function memCleanup() {
   }
 }
 
+function memSet(nonce: string): void {
+  memCleanup();
+  memStore.set(nonce, Date.now());
+}
+
+function memTake(nonce: string): boolean {
+  const createdAt = memStore.get(nonce);
+  if (createdAt === undefined) return false;
+  memStore.delete(nonce);
+  if (Date.now() - createdAt > NONCE_TTL_S * 1000) return false;
+  return true;
+}
+
 /** Store a nonce. Returns the nonce string. */
 export async function storeNonce(nonce: string): Promise<string> {
   if (redis) {
-    // SET NX EX — only stores if not exists, auto-expires in 5 min
-    await redis.set(`${REDIS_PREFIX}${nonce}`, "1", { nx: true, ex: NONCE_TTL_S });
-  } else {
-    memCleanup();
-    memStore.set(nonce, Date.now());
+    try {
+      await redis.set(`${REDIS_PREFIX}${nonce}`, "1", { nx: true, ex: NONCE_TTL_S });
+      return nonce;
+    } catch (err) {
+      // Upstash unavailable / quota exhausted — fall through to in-memory
+      // so login keeps working. Mirrors the pattern used in middleware
+      // and lib/ratelimit.ts (commit 670b25f).
+      console.warn(
+        "[nonce-store] Upstash storeNonce failed, using in-memory:",
+        err instanceof Error ? err.message : err
+      );
+    }
   }
+  memSet(nonce);
   return nonce;
 }
 
@@ -52,21 +73,23 @@ export async function storeNonce(nonce: string): Promise<string> {
  * After this call, the nonce cannot be used again (single-use guarantee).
  *
  * Redis GETDEL is atomic — even concurrent requests can't both succeed.
+ * Falls through to in-memory if Redis is down so nonces stored during an
+ * outage can still be consumed (otherwise login would 401 even with a
+ * valid signature).
  */
 export async function consumeNonce(nonce: string): Promise<boolean> {
   if (redis) {
-    // GETDEL — read and delete in one atomic operation
-    const val = await redis.getdel(`${REDIS_PREFIX}${nonce}`);
-    return val !== null;
+    try {
+      const val = await redis.getdel(`${REDIS_PREFIX}${nonce}`);
+      if (val !== null) return true;
+      // Not in Redis — could be a nonce stored under the in-memory
+      // fallback during a prior outage. Try memStore before giving up.
+    } catch (err) {
+      console.warn(
+        "[nonce-store] Upstash consumeNonce failed, using in-memory:",
+        err instanceof Error ? err.message : err
+      );
+    }
   }
-
-  // In-memory fallback (dev)
-  const createdAt = memStore.get(nonce);
-  if (createdAt === undefined) return false;
-  if (Date.now() - createdAt > NONCE_TTL_S * 1000) {
-    memStore.delete(nonce);
-    return false;
-  }
-  memStore.delete(nonce);
-  return true;
+  return memTake(nonce);
 }
