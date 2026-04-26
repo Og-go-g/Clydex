@@ -3,7 +3,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { z } from "zod";
 import { getAuthAddress } from "@/lib/auth/session";
-import { memRateLimit, memCleanup, chatLimiter } from "@/lib/ratelimit";
+import { chatLimiter, safeRateLimit } from "@/lib/ratelimit";
 import { getLeaderboard, getTraderProfile, getTopTradersByMarket } from "@/lib/copytrade/leaderboard";
 import { isSessionActive } from "@/lib/copy/session-activator";
 import {
@@ -153,15 +153,9 @@ export async function POST(req: Request) {
     return new Response("Not authenticated — please sign in first", { status: 401 });
   }
 
-  // Rate limit
-  if (chatLimiter) {
-    const { success } = await chatLimiter.limit(walletAddress);
-    if (!success) {
-      return new Response("Too many requests. Please wait a moment.", { status: 429 });
-    }
-  } else {
-    memCleanup();
-    const { success } = memRateLimit("chat:" + walletAddress, 10);
+  // Rate limit (graceful Upstash fallback)
+  {
+    const { success } = await safeRateLimit(chatLimiter, walletAddress, "chat:", 10);
     if (!success) {
       return new Response("Too many requests. Please wait a moment.", { status: 429 });
     }

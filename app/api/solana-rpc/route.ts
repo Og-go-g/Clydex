@@ -4,8 +4,7 @@ import { getAuthAddress } from "@/lib/auth/session";
 import {
   rpcReadLimiter,
   rpcWriteLimiter,
-  memRateLimit,
-  memCleanup,
+  safeRateLimit,
 } from "@/lib/ratelimit";
 
 const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
@@ -60,18 +59,9 @@ async function checkRate(
   isWrite: boolean
 ): Promise<{ success: boolean; remaining: number }> {
   const limiter = isWrite ? rpcWriteLimiter : rpcReadLimiter;
-
-  // Upstash available → use it
-  if (limiter) {
-    const result = await limiter.limit(userKey);
-    return { success: result.success, remaining: result.remaining };
-  }
-
-  // Fallback: in-memory (dev / no Upstash configured)
-  memCleanup();
   const prefix = isWrite ? "rpc:w:" : "rpc:r:";
-  const limit = isWrite ? 10 : 120;
-  return memRateLimit(prefix + userKey, limit);
+  const max = isWrite ? 10 : 120;
+  return safeRateLimit(limiter, userKey, prefix, max);
 }
 
 // ─── Route Handler ──────────────────────────────────────────────

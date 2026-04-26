@@ -5,7 +5,7 @@ import { getAuthAddress } from "@/lib/auth/session";
 import { getUser, getAccount, getMarketStats } from "@/lib/n1/client";
 import { resolveMarket, validateLeverage, ensureMarketCache, TIERS } from "@/lib/n1/constants";
 import { storePreview, consumePreview } from "@/lib/n1/preview-store";
-import { orderLimiter, memRateLimit, memCleanup } from "@/lib/ratelimit";
+import { orderLimiter, safeRateLimit } from "@/lib/ratelimit";
 
 // ─── Idempotency Key Store ──────────────────────────────────────
 // Prevents double-execution of orders from network retries.
@@ -117,15 +117,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
 
-  // Per-user rate limit on order operations
-  if (orderLimiter) {
-    const { success } = await orderLimiter.limit(address);
-    if (!success) {
-      return NextResponse.json({ error: "Too many requests. Please wait." }, { status: 429 });
-    }
-  } else {
-    memCleanup();
-    const { success } = memRateLimit("order:" + address, 30);
+  // Per-user rate limit on order operations (graceful Upstash fallback)
+  {
+    const { success } = await safeRateLimit(orderLimiter, address, "order:", 30);
     if (!success) {
       return NextResponse.json({ error: "Too many requests. Please wait." }, { status: 429 });
     }

@@ -130,3 +130,46 @@ export function memCleanup() {
     if (now > bucket.resetAt) memMap.delete(key);
   }
 }
+
+/**
+ * Throttled-warn wrapper around an Upstash limiter that falls through to
+ * the in-memory token bucket when Upstash throws. Use this instead of
+ * `await limiter.limit(key)` directly — Upstash quota exhaustion (or any
+ * transient error) would otherwise propagate to the route's catch block
+ * and turn into a 500.
+ *
+ * Same pattern as middleware.ts after commit 670b25f, generalised so all
+ * /api/* routes share the protection.
+ *
+ * @param limiter         Upstash Ratelimit instance (or null if unconfigured).
+ * @param userKey         Per-user identity (wallet address, IP, etc).
+ * @param memFallbackKey  Prefix used for the in-memory bucket key (e.g. "rpc:r:" + address).
+ * @param memFallbackMax  Per-window cap for the in-memory bucket.
+ */
+let lastUpstashWarnAt = 0;
+const UPSTASH_WARN_INTERVAL_MS = 60_000;
+
+export async function safeRateLimit(
+  limiter: Ratelimit | null,
+  userKey: string,
+  memFallbackKey: string,
+  memFallbackMax: number
+): Promise<{ success: boolean; remaining: number }> {
+  if (limiter) {
+    try {
+      const r = await limiter.limit(userKey);
+      return { success: r.success, remaining: r.remaining };
+    } catch (err) {
+      const now = Date.now();
+      if (now - lastUpstashWarnAt > UPSTASH_WARN_INTERVAL_MS) {
+        lastUpstashWarnAt = now;
+        console.warn(
+          "[ratelimit] Upstash limit() failed, falling back to in-memory:",
+          err instanceof Error ? err.message : err
+        );
+      }
+    }
+  }
+  memCleanup();
+  return memRateLimit(memFallbackKey + userKey, memFallbackMax);
+}

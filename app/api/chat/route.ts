@@ -4,7 +4,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import * as Sentry from "@sentry/nextjs";
 import { z } from "zod";
 import { getAuthAddress } from "@/lib/auth/session";
-import { chatLimiter, memRateLimit, memCleanup } from "@/lib/ratelimit";
+import { chatLimiter, safeRateLimit } from "@/lib/ratelimit";
 import {
   getMarketStats,
   getOrderbook,
@@ -310,15 +310,9 @@ export async function POST(req: Request) {
     return new Response("Not authenticated — please sign in first", { status: 401 });
   }
 
-  // Per-user rate limit on AI calls (expensive)
-  if (chatLimiter) {
-    const { success } = await chatLimiter.limit(walletAddress);
-    if (!success) {
-      return new Response("Too many requests. Please wait a moment.", { status: 429 });
-    }
-  } else {
-    memCleanup();
-    const { success } = memRateLimit("chat:" + walletAddress, 10);
+  // Per-user rate limit on AI calls (expensive) — graceful Upstash fallback
+  {
+    const { success } = await safeRateLimit(chatLimiter, walletAddress, "chat:", 10);
     if (!success) {
       return new Response("Too many requests. Please wait a moment.", { status: 429 });
     }
