@@ -80,11 +80,15 @@ export class N1WebSocketManager {
     if (this.handlers.onError) {
       this.client.on("error", this.handlers.onError);
     }
+    // NordWebSocketClient emits "connected" / "disconnected" (not "open" /
+    // "close" — the WebSocket-native names). Older code here bound to the
+    // wrong event names and the callbacks never fired. See
+    // node_modules/@n1xyz/nord-ts/dist/index.browser.js → `this.emit("connected")`.
     if (this.handlers.onConnect) {
-      this.client.on("open", this.handlers.onConnect);
+      this.client.on("connected", this.handlers.onConnect);
     }
     if (this.handlers.onDisconnect) {
-      this.client.on("close", this.handlers.onDisconnect);
+      this.client.on("disconnected", this.handlers.onDisconnect);
     }
 
     this.client.connect();
