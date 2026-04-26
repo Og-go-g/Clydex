@@ -19,10 +19,15 @@ import { createSiwsMessage } from "@/lib/auth/siws";
 interface AuthState {
   isAuthenticated: boolean;
   sessionAddress: string | null;
-  /** Sign-in (SIWS) — for manual "Sign In" button when session expired */
+  /** Trigger SIWS sign-in. Resolves when a session is established or aborted. */
   signIn: () => Promise<void>;
   signOut: () => Promise<void>;
   isSigningIn: boolean;
+  /** True until the initial /api/auth/session probe finishes. */
+  sessionChecked: boolean;
+  /** Last sign-in error message (user-rejected, network, server). null when idle/successful. */
+  signInError: string | null;
+  clearSignInError: () => void;
 }
 
 const AuthContext = createContext<AuthState>({
@@ -31,6 +36,9 @@ const AuthContext = createContext<AuthState>({
   signIn: async () => {},
   signOut: async () => {},
   isSigningIn: false,
+  sessionChecked: false,
+  signInError: null,
+  clearSignInError: () => {},
 });
 
 export function useAuth() {
@@ -38,34 +46,43 @@ export function useAuth() {
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const { address, signMessage, isManualConnect } = useWallet();
+  const { address, signMessage } = useWallet();
   const [sessionAddress, setSessionAddress] = useState<string | null>(null);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const isSigningInRef = useRef(false);
   const addressRef = useRef(address);
   addressRef.current = address;
   const [sessionChecked, setSessionChecked] = useState(false);
+  const [signInError, setSignInError] = useState<string | null>(null);
+  // Per-address guard so a single failure (esp. user rejection) doesn't
+  // re-trigger the popup forever. Resets when address changes or user
+  // explicitly clicks Sign In again.
   const rejectedRef = useRef(false);
 
-  // Check existing session on mount (restores session if cookie is valid)
+  const clearSignInError = useCallback(() => setSignInError(null), []);
+
+  // Probe existing session on mount (restores session if cookie is valid).
   useEffect(() => {
     fetch("/api/auth/session")
-      .then((r) => r.json())
-      .then((d) => setSessionAddress(d.address ?? null))
-      .catch(() => {})
+      .then((r) => (r.ok ? r.json() : { address: null }))
+      .then((d: { address?: string | null }) =>
+        setSessionAddress(d.address ?? null)
+      )
+      .catch(() => setSessionAddress(null))
       .finally(() => setSessionChecked(true));
   }, []);
 
-  // Core sign-in logic
   const signIn = useCallback(async () => {
     if (!address || isSigningInRef.current) return;
-    // Reset rejected flag on manual signIn call (button click)
     rejectedRef.current = false;
+    setSignInError(null);
     isSigningInRef.current = true;
     setIsSigningIn(true);
+    const startedForAddress = address;
+
     try {
       const nonceRes = await fetch("/api/auth/nonce");
-      if (!nonceRes.ok) throw new Error("Failed to get nonce");
+      if (!nonceRes.ok) throw new Error(`Failed to get nonce (${nonceRes.status})`);
       const { nonce } = await nonceRes.json();
 
       const message = createSiwsMessage({
@@ -81,26 +98,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const { default: bs58 } = await import("bs58");
       const signature = bs58.encode(signatureBytes);
 
+      // Address changed mid-flight (user swapped wallets) — abort.
+      if (addressRef.current !== startedForAddress) return;
+
       const loginRes = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message, signature }),
       });
 
-      if (loginRes.ok) {
-        const data = await loginRes.json();
-        setSessionAddress(data.address);
-      } else {
-        throw new Error(`Login failed: ${loginRes.status}`);
+      if (!loginRes.ok) {
+        throw new Error(`Login failed (${loginRes.status})`);
       }
+      const data = await loginRes.json();
+      if (addressRef.current !== startedForAddress) return;
+      setSessionAddress(data.address);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const raw = err instanceof Error ? err.message : String(err);
       const isUserReject =
-        /user rejected|user denied|cancelled|canceled|rejected the request|declined/i.test(msg);
-      // Mark as rejected so auto sign-in doesn't retry
+        /user rejected|user denied|cancelled|canceled|rejected the request|declined/i.test(
+          raw
+        );
       rejectedRef.current = true;
-      if (!isUserReject) {
-        console.error("SIWS sign-in failed:", msg);
+      if (isUserReject) {
+        setSignInError("Sign-in cancelled in wallet. Click Sign In to retry.");
+      } else {
+        console.error("SIWS sign-in failed:", raw);
+        setSignInError(`Sign-in failed: ${raw}`);
       }
     } finally {
       isSigningInRef.current = false;
@@ -120,15 +144,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch {
       // Network error — still clear local session
     }
+    rejectedRef.current = false;
+    setSignInError(null);
     setSessionAddress(null);
   }, []);
 
-  // Auto sign-in ONLY when user clicked "Connect Wallet" (manual connect)
-  // Does NOT trigger on page reload auto-reconnect
-  // Does NOT retry after user rejected or sign-in failed
+  // Wallet swap / disconnect → reset SIWS guard + clear stale error so the
+  // next address gets a fresh shot at signing in.
+  useEffect(() => {
+    rejectedRef.current = false;
+    setSignInError(null);
+  }, [address]);
+
+  // Auto sign-in: any time we have a connected wallet but no server session
+  // (and the cookie probe finished) — kick off SIWS. The rejectedRef guard
+  // prevents a popup loop after the user dismissed Phantom; a manual
+  // signIn() call (or a fresh address) clears it.
   useEffect(() => {
     if (
-      isManualConnect &&
       address &&
       !sessionAddress &&
       !isSigningIn &&
@@ -137,10 +170,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     ) {
       signIn();
     }
-  }, [isManualConnect, address, sessionAddress, isSigningIn, sessionChecked, signIn]);
+  }, [address, sessionAddress, isSigningIn, sessionChecked, signIn]);
 
-  // Clear session when wallet disconnects or address changes
-  // Consolidated into single check to prevent duplicate logout requests
+  // Server-side logout when wallet detaches or swaps to a different pubkey.
   const logoutInFlightRef = useRef(false);
   useEffect(() => {
     const shouldLogout =
@@ -169,6 +201,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         signIn,
         signOut,
         isSigningIn,
+        sessionChecked,
+        signInError,
+        clearSignInError,
       }}
     >
       {children}

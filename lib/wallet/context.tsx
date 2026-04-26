@@ -4,7 +4,6 @@ import {
   createContext,
   useContext,
   useState,
-  useEffect,
   useCallback,
   useMemo,
   type ReactNode,
@@ -46,8 +45,6 @@ interface WalletState {
   disconnect: () => Promise<void>;
   /** Sign an arbitrary message (for auth) */
   signMessage: (message: string) => Promise<Uint8Array>;
-  /** True when connection was user-initiated (not auto-reconnect) */
-  isManualConnect: boolean;
 }
 
 const WalletContext = createContext<WalletState>({
@@ -58,7 +55,6 @@ const WalletContext = createContext<WalletState>({
   connect: () => {},
   disconnect: async () => {},
   signMessage: async () => new Uint8Array(),
-  isManualConnect: false,
 });
 
 export function useWallet() {
@@ -83,44 +79,33 @@ function WalletContextInner({ children }: { children: ReactNode }) {
   const { setVisible } = useWalletModal();
 
   const [error, setError] = useState<string | null>(null);
-  const [isManualConnect, setIsManualConnect] = useState(false);
 
   const address = publicKey?.toBase58() ?? null;
 
-  // Track manual connect via sessionStorage
-  // On auto-reconnect (page reload), isManualConnect stays false
-  // Only set to true when user explicitly clicks Connect Wallet
-  useEffect(() => {
-    if (connected && address) {
-      sessionStorage.setItem("clydex-wallet-connected", "1");
-    }
-    if (!connected) {
-      setIsManualConnect(false);
-    }
-  }, [connected, address]);
-
   const connect = useCallback(() => {
     setError(null);
-    setIsManualConnect(true);
-    // If a wallet is already selected, just connect
+    // A wallet is already selected (e.g. from a prior session) but not
+    // connected — drive the adapter directly so the user doesn't have to
+    // pick from the modal again.
     if (wallet) {
-      // The wallet adapter auto-connects when selected
+      void wallet.adapter.connect().catch((err: unknown) => {
+        const walletErr = err as { message?: string };
+        setError(walletErr.message || "Failed to connect");
+      });
       return;
     }
-    // If only one wallet available, select it directly
+    // Only one installed wallet — skip the modal and select it directly.
     if (wallets.length === 1 && wallets[0].readyState === "Installed") {
       select(wallets[0].adapter.name);
       return;
     }
-    // Open the wallet selection modal
+    // Otherwise show the wallet picker.
     setVisible(true);
   }, [wallet, wallets, select, setVisible]);
 
   const disconnect = useCallback(async () => {
     try {
       await solanaDisconnect();
-      sessionStorage.removeItem("clydex-wallet-connected");
-      setIsManualConnect(false);
       setError(null);
     } catch (err: unknown) {
       const walletErr = err as { message?: string };
@@ -156,7 +141,6 @@ function WalletContextInner({ children }: { children: ReactNode }) {
         connect,
         disconnect,
         signMessage,
-        isManualConnect,
       }}
     >
       {children}

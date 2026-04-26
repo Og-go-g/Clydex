@@ -10,7 +10,14 @@ import { useAuth } from "@/lib/auth/context";
 export function Header() {
   const pathname = usePathname();
   const { address, isConnecting, error, connect, disconnect } = useWallet();
-  const { isAuthenticated, signOut, isSigningIn } = useAuth();
+  const {
+    isAuthenticated,
+    signIn,
+    signOut,
+    isSigningIn,
+    signInError,
+    clearSignInError,
+  } = useAuth();
   const [menuOpen, setMenuOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
@@ -109,17 +116,20 @@ export function Header() {
                 <span className="h-2 w-2 animate-pulse rounded-full bg-yellow-400" />
                 Signing...
               </button>
+            ) : !isAuthenticated ? (
+              <button
+                onClick={signIn}
+                className="rounded-xl border border-emerald-500/30 bg-emerald-500/15 px-4 py-2 text-sm font-medium text-emerald-400 transition-colors hover:bg-emerald-500/25"
+              >
+                Sign In
+              </button>
             ) : (
               <button
                 onClick={() => setMenuOpen(!menuOpen)}
                 className="flex items-center gap-2 rounded-xl border border-[#262626] bg-[#141414] px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-[#1a1a1a]"
                 aria-label={`Wallet ${address}`}
               >
-                <span
-                  className={`h-2 w-2 rounded-full ${
-                    isAuthenticated ? "bg-green-400" : "bg-gray-500"
-                  }`}
-                />
+                <span className="h-2 w-2 rounded-full bg-green-400" />
                 {shortAddress}
               </button>
             )}
@@ -167,9 +177,18 @@ export function Header() {
               </div>
             )}
 
-            {error && (
-              <div className="absolute right-0 top-full mt-2 w-64 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-400">
-                {error}
+            {(error || signInError) && (
+              <div className="absolute right-0 top-full mt-2 flex w-72 items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-400">
+                <span className="flex-1">{error || signInError}</span>
+                {signInError && (
+                  <button
+                    onClick={clearSignInError}
+                    className="shrink-0 rounded px-1 text-red-300 transition hover:text-white"
+                    aria-label="Dismiss"
+                  >
+                    ×
+                  </button>
+                )}
               </div>
             )}
           </div>
