@@ -99,6 +99,24 @@ type Listener = TradeListener | DeltaListener | AccountListener | CandleListener
 // Tunables. Exported for tests; do not edit at runtime.
 export const REBUILD_DEBOUNCE_MS = 150;
 
+// SDK 0.4.3 split the candle resolution into two encodings: the URL/
+// subscription parameter still takes "1" / "5" / ... / "1M", but the
+// `res` field on the streamed CandleUpdate now arrives as the enum-cased
+// "OneMinute" / "FiveMinutes" / .... This map lets the dispatcher
+// compare a listener's subscription-form resolution with the payload's
+// enum-form `res`. Keep it in sync if the SDK adds new buckets.
+const RESOLUTION_PAYLOAD_FORM: Record<CandleResolution, string> = {
+  "1": "OneMinute",
+  "5": "FiveMinutes",
+  "15": "FifteenMinutes",
+  "30": "ThirtyMinutes",
+  "60": "SixtyMinutes",
+  "4H": "FourHours",
+  "1D": "OneDay",
+  "1W": "OneWeek",
+  "1M": "OneMonth",
+};
+
 // ─── Manager class ───────────────────────────────────────────────
 
 class NordWsManager {
@@ -413,9 +431,13 @@ class NordWsManager {
       // cache; if we don't know the symbol's marketId yet, fall through to
       // dispatching to all candle listeners with matching resolution
       // (single-candle subscription is the typical case).
+      // `data.res` arrives in enum-form ("OneMinute", "FiveMinutes", ...)
+      // since SDK 0.4.3 — translate the listener's subscription-form
+      // resolution before comparing.
+      const payloadRes = data.res as unknown as string;
       for (const l of this.listeners) {
         if (l.type !== "candle") continue;
-        if (l.resolution !== data.res) continue;
+        if (RESOLUTION_PAYLOAD_FORM[l.resolution] !== payloadRes) continue;
         const cachedId = this.symbolToMarketId.get(l.symbol);
         if (cachedId !== undefined && cachedId !== data.mid) continue;
         this.safeFire(l.fn, data);

@@ -98,9 +98,11 @@ export function useNordCandles(
 
   const handler = useCallback(
     (data: WebSocketCandleUpdate) => {
-      // Resolution filter — manager already filters by resolution, but
-      // double-check in case a future SDK change broadens dispatch.
-      if (data.res !== resolution) return;
+      // Resolution filter is already done by ws-manager (which knows
+      // about the URL-form ↔ enum-form mismatch SDK 0.4.3 introduced).
+      // Skipping it here — the manager won't dispatch a mis-resolution
+      // candle to this listener.
+      void resolution;
       const candle: Candle = {
         t: data.t,
         o: data.o,
