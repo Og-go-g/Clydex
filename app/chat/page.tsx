@@ -3653,42 +3653,52 @@ function ClosePositionCard({ data, isDismissed: propDismissed, realtimePrices, o
 
 function CancelOrderCard({ data }: { data: Record<string, unknown> }) {
   const { addToast } = useToast();
-  const [cancelState, setCancelState] = useState<"idle" | "cancelling" | "confirmed" | "error">("idle");
+  // Use the same cancel pipeline as /portfolio: useOrderActions.cancelOrder()
+  // signs the cancel action with the NordUser session keypair and submits
+  // it to 01.xyz. The previous implementation only POSTed /api/order
+  // (which returns a *prepared* payload, not an executed cancel) and
+  // optimistically rendered "Cancelled" — so the order actually stayed
+  // open on the exchange. cancellingIds drives the spinner state.
+  const { cancelOrder, cancellingIds } = useOrderActions();
+  const [cancelState, setCancelState] = useState<"idle" | "confirmed" | "error">("idle");
   const [cancelError, setCancelError] = useState<string | null>(null);
 
   const market = data.market as string;
-  const orderId = data.orderId as string | number;
+  const orderId = Number(data.orderId);
   const side = data.side as string;
   const size = data.size as number;
   const price = data.price as number;
   const cancelBaseAsset = baseAssetFrom(market);
 
+  const isCancelling = Number.isFinite(orderId) && cancellingIds.has(orderId);
+
   const handleCancel = async () => {
-    if (cancelState === "cancelling") return;
-    setCancelState("cancelling");
+    if (isCancelling) return;
+    if (!Number.isFinite(orderId)) {
+      const msg = "Order id missing or invalid";
+      setCancelState("error");
+      setCancelError(msg);
+      addToast({ type: "error", title: "Cancel Failed", message: msg, duration: 6000 });
+      return;
+    }
     setCancelError(null);
-    try {
-      const res = await fetch("/api/order", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "cancel", orderId: String(orderId) }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || "Failed to cancel order");
-      }
+    const ok = await cancelOrder(orderId);
+    if (ok) {
       setCancelState("confirmed");
       addToast({ type: "success", title: "Order Cancelled", message: `${cancelBaseAsset} ${side} @ ${formatUsd(price)}`, duration: 5000 });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Cancel failed";
+    } else {
+      // useOrderActions catches signing/submit errors and stores them
+      // internally; we surface a generic message — the toast/console
+      // from inside useOrderActions has the specifics for debugging.
+      const msg = "Failed to sign or submit the cancellation. Try again.";
       setCancelState("error");
       setCancelError(msg);
       addToast({ type: "error", title: "Cancel Failed", message: msg, duration: 6000 });
     }
   };
 
-  // Loading
-  if (cancelState === "cancelling") {
+  // Loading — driven by useOrderActions.cancellingIds, not local state.
+  if (isCancelling) {
     return (
       <div className="my-2 rounded-xl border border-orange-500/30 bg-background p-4">
         <div className="flex items-center gap-2">
