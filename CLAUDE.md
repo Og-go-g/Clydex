@@ -43,6 +43,34 @@ No shortcuts, no placeholders, no "TODO" comments. Ship complete features.
 - `resolveMarket()` for flexible market lookup (symbol, base asset, ID)
 - `tierFromImf()` derives tier and max leverage from API's initial margin fraction
 
+## Live Data — WebSocket by Default
+- **One WS connection per browser tab** for all 01 Exchange live data, multiplexed
+  through the singleton `lib/n1/ws-manager.ts`. Never construct
+  `new WebSocket(...)` or call `nord.createWebSocketClient(...)` directly
+  from a component — subscribe through the manager so the app stays at
+  one socket regardless of how many components are mounted.
+- React-side, use the `useNord*` hooks family from `hooks/`:
+  - `useNordAccount(accountId, onUpdate)` — fills/places/cancels/balances
+  - `useNordMarketTicker(symbol)` — last trade price/size/side
+  - `useNordOrderbook(symbol, marketId)` — REST seed + delta apply
+  - `useNordCandles(symbol, resolution, history)` — last-bucket merge
+  - `useNordWsHealth()` — connection state + lastEventAgo
+- The WS event is treated as a **signal**, not a state replacement:
+  on each event, debounce 200ms and refetch the relevant REST aggregate
+  (`/api/account`, etc.). This keeps the server-side aggregate as the
+  single source of truth and avoids fragile client-side delta replay.
+- REST polling is the fallback when `useNordWsHealth().connected` has
+  been false for >30s. Cadences in fallback mode: account 60s, stats
+  60s, margin check on signal only.
+- `NEXT_PUBLIC_USE_NORD_WS` env var controls the global default
+  (`!== "false"` ≡ on); per-browser opt-out via
+  `localStorage.setItem('clydex.nordWs', '0')`.
+- Legacy direct-WS hooks marked `@deprecated`:
+  - `useCandleStream` — used as flag-off fallback only.
+  - `useRealtimePrices` — still used by 4-7 callers (portfolio/chat/
+    markets chunks). Phase 8 work will introduce a multi-symbol
+    `useNordTrades` and migrate.
+
 ## Git
 - Conventional commits: feat:, fix:, refactor:, docs:, test:
 - English only in commits and code comments

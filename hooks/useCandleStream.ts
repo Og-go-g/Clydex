@@ -26,6 +26,14 @@ export interface CandleUpdate {
  * @param symbol   - Market symbol, e.g. "BTCUSD"
  * @param resolution - N1 resolution string, e.g. "60" for 1H
  * @param enabled  - Pass false to disconnect (e.g. when panel is closed)
+ *
+ * @deprecated Phase 6: prefer `useNordCandles` from
+ *   `@/hooks/useNordCandles`. This hook opens its own dedicated
+ *   WebSocket per consuming component; useNordCandles routes through
+ *   the singleton ws-manager so multiple subscribers share one socket
+ *   with the rest of the app's streams. Kept here only as the flag-off
+ *   fallback path for `markets/[id]` and `ChartPanel`. Remove when the
+ *   localStorage opt-out (`clydex.nordWs=0`) is no longer supported.
  */
 export function useCandleStream(
   symbol: string,

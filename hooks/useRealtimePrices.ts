@@ -16,6 +16,24 @@ interface OrderLevel {
  * Maintains a sorted price-level book per symbol, correctly handling
  * level additions, updates, and removals (size=0).
  * Mid price = (best_bid + best_ask) / 2, throttled to ~1 update/sec.
+ *
+ * @deprecated Phase 6: opens a dedicated WebSocket per call. Multiple
+ *   call sites (portfolio chunks, chat chunks, markets chunks,
+ *   ClosePositionModal) currently each get their own socket — at typical
+ *   usage that's 4-7 concurrent N1 sockets per signed-in user, undoing
+ *   most of the multiplexing win the rest of the migration delivers.
+ *
+ *   Migration plan (separate "Phase 8" — not yet started):
+ *     1. Single-symbol callers (markets/[id] live price fallback,
+ *        ClosePositionModal) → swap to `useNordMarketTicker`.
+ *     2. Multi-symbol callers using chunked patterns (portfolio,
+ *        chat, markets list) → introduce a multi-symbol thin wrapper
+ *        (e.g. `useNordTrades(symbols)`) that subscribes through the
+ *        manager. Mind plan risk R8 ("60+ subs in one URL hangs
+ *        server"): chunks of ~30 symbols should still work, but the
+ *        markets-list page should probably stay on REST 60s rather
+ *        than bulk-subscribing to all 60+ markets.
+ *     3. Once no callers remain, delete this file.
  */
 export function useRealtimePrices(symbols: string[]) {
   const [prices, setPrices] = useState<Record<string, number>>({});

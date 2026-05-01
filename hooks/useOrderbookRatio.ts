@@ -1,9 +1,27 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+/**
+ * Real-time bid-ask ratio for a market — live volume distribution between
+ * the two sides of the book + the top-N levels for a compact ladder.
+ *
+ * Phase 6 rewrite: this hook used to open its own dedicated WebSocket to
+ * `wss://.../deltas@<sym>` for every consuming component. With the singleton
+ * `ws-manager` in place we now route the delta stream through it, so multiple
+ * consumers (or the same component remounting) all share one socket with
+ * the rest of the app's subscriptions.
+ *
+ * Algorithm (unchanged from before):
+ *   1. REST snapshot of `/api/markets/<id>/orderbook` to seed full book.
+ *   2. Apply incremental deltas as they arrive (`size === 0` removes a level).
+ *   3. Recompute the bid/ask quote-volume ratio + top levels, throttled to
+ *      1 Hz so React renders stay reasonable on busy markets.
+ */
 
-const WS_URL = "wss://zo-mainnet.n1.xyz/ws";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { getNordWsManager } from "@/lib/n1/ws-manager";
+
 const MAX_LEVELS = 200;
+const TOP_LEVELS = 10;
 
 interface OrderbookLevel {
   price: number;
@@ -18,34 +36,52 @@ interface OrderbookRatio {
   spread: number;
 }
 
-/** Cap a price-level map to MAX_LEVELS by removing the furthest entries */
+/** Cap a price-level map to MAX_LEVELS by removing the furthest entries. */
 function capMap(map: Map<number, number>, side: "bids" | "asks"): void {
   if (map.size <= MAX_LEVELS) return;
-  const sorted = [...map.keys()].sort((a, b) => side === "bids" ? b - a : a - b);
-  const toRemove = sorted.slice(MAX_LEVELS);
-  for (const key of toRemove) map.delete(key);
+  const sorted = [...map.keys()].sort((a, b) =>
+    side === "bids" ? b - a : a - b,
+  );
+  for (const key of sorted.slice(MAX_LEVELS)) map.delete(key);
 }
 
-/**
- * Real-time bid-ask ratio via WS delta subscription.
- * 1. Loads full orderbook snapshot via REST
- * 2. Applies incremental deltas from WS (same source as 01 Exchange)
- * 3. Recalculates quote-volume ratio on each delta (throttled to 1s)
- */
-const TOP_LEVELS = 10;
+// Tolerant entry parser — accepts both wire-tuple [price, size] and the
+// SDK-typed object {price, size} encodings. Same trick as useNordOrderbook.
+function readEntry(raw: unknown): { price: number; size: number } | null {
+  if (Array.isArray(raw)) {
+    const price = Number(raw[0]);
+    const size = Number(raw[1]);
+    if (!Number.isFinite(price) || !Number.isFinite(size)) return null;
+    return { price, size };
+  }
+  if (raw && typeof raw === "object") {
+    const o = raw as { price?: unknown; size?: unknown };
+    const price = Number(o.price);
+    const size = Number(o.size);
+    if (!Number.isFinite(price) || !Number.isFinite(size)) return null;
+    return { price, size };
+  }
+  return null;
+}
 
-export function useOrderbookRatio(marketId: number, symbol: string, enabled: boolean): OrderbookRatio {
-  const [ratio, setRatio] = useState<OrderbookRatio>({ bidPct: 50, askPct: 50, topBids: [], topAsks: [], spread: 0 });
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const reconnectCount = useRef(0);
-  const activeRef = useRef(true);
-  // Full orderbook state: price → size
+export function useOrderbookRatio(
+  marketId: number,
+  symbol: string,
+  enabled: boolean,
+): OrderbookRatio {
+  const [ratio, setRatio] = useState<OrderbookRatio>({
+    bidPct: 50,
+    askPct: 50,
+    topBids: [],
+    topAsks: [],
+    spread: 0,
+  });
+
   const bidsMap = useRef<Map<number, number>>(new Map());
   const asksMap = useRef<Map<number, number>>(new Map());
-  // Throttle: only call setRatio once per second max
   const lastCalcRef = useRef(0);
-  const throttleTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const throttleTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const activeRef = useRef(true);
 
   const calcRatio = useCallback(() => {
     const now = Date.now();
@@ -53,12 +89,12 @@ export function useOrderbookRatio(marketId: number, symbol: string, enabled: boo
 
     const doCalc = () => {
       lastCalcRef.current = Date.now();
-      let bidVol = 0, askVol = 0;
+      let bidVol = 0;
+      let askVol = 0;
       for (const [price, size] of bidsMap.current) bidVol += price * size;
       for (const [price, size] of asksMap.current) askVol += price * size;
       const total = bidVol + askVol;
 
-      // Extract top N levels sorted by price
       const sortedBids = [...bidsMap.current.entries()]
         .sort((a, b) => b[0] - a[0])
         .slice(0, TOP_LEVELS)
@@ -82,7 +118,10 @@ export function useOrderbookRatio(marketId: number, symbol: string, enabled: boo
     };
 
     if (elapsed >= 1000) {
-      clearTimeout(throttleTimer.current);
+      if (throttleTimer.current) {
+        clearTimeout(throttleTimer.current);
+        throttleTimer.current = undefined;
+      }
       doCalc();
     } else if (!throttleTimer.current) {
       throttleTimer.current = setTimeout(() => {
@@ -98,103 +137,60 @@ export function useOrderbookRatio(marketId: number, symbol: string, enabled: boo
     bidsMap.current.clear();
     asksMap.current.clear();
 
-    async function init() {
-      // Step 1: Load full snapshot via REST
-      try {
-        const res = await fetch(`/api/markets/${marketId}/orderbook`);
-        if (!res.ok || !activeRef.current) return;
-        const ob = await res.json();
-        if (!activeRef.current) return;
+    let cancelled = false;
 
-        bidsMap.current.clear();
-        asksMap.current.clear();
-        for (const b of (ob.bids ?? [])) {
-          const price = Number(b[0]);
-          const size = Number(b[1]);
-          if (size > 0) bidsMap.current.set(price, size);
+    // Step 1: REST snapshot.
+    fetch(`/api/markets/${marketId}/orderbook`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((ob: { bids?: unknown[]; asks?: unknown[] } | null) => {
+        if (cancelled || !ob) return;
+        for (const raw of ob.bids ?? []) {
+          const e = readEntry(raw);
+          if (e && e.size > 0) bidsMap.current.set(e.price, e.size);
         }
-        for (const a of (ob.asks ?? [])) {
-          const price = Number(a[0]);
-          const size = Number(a[1]);
-          if (size > 0) asksMap.current.set(price, size);
+        for (const raw of ob.asks ?? []) {
+          const e = readEntry(raw);
+          if (e && e.size > 0) asksMap.current.set(e.price, e.size);
         }
         capMap(bidsMap.current, "bids");
         capMap(asksMap.current, "asks");
         calcRatio();
-      } catch { /* silent */ }
+      })
+      .catch(() => {
+        // REST failed — leave maps empty, deltas will eventually fill in.
+        if (!cancelled) calcRatio();
+      });
 
-      // Step 2: Connect WS for incremental deltas
-      connect();
-    }
-
-    function connect() {
-      if (!activeRef.current) return;
-      if (wsRef.current) {
-        wsRef.current.onclose = null;
-        wsRef.current.onerror = null;
-        wsRef.current.onmessage = null;
-        wsRef.current.close();
+    // Step 2: subscribe through the manager. The N1 WS uses the symbol
+    // without slash (e.g. "BTCUSD"); subscribeDeltas does the same URL
+    // path under the hood.
+    const wsSymbol = symbol.replace("/", "");
+    const off = getNordWsManager().subscribeDeltas(wsSymbol, (data) => {
+      if (cancelled || data.market_symbol !== wsSymbol) return;
+      for (const raw of (data.bids as unknown[]) ?? []) {
+        const e = readEntry(raw);
+        if (!e) continue;
+        if (e.size === 0) bidsMap.current.delete(e.price);
+        else bidsMap.current.set(e.price, e.size);
       }
-
-      // N1 WS uses symbol without slash, e.g. BTCUSD
-      const wsSymbol = symbol.replace("/", "");
-      const ws = new WebSocket(`${WS_URL}/deltas@${wsSymbol}`);
-      wsRef.current = ws;
-
-      ws.onmessage = (ev) => {
-        if (!activeRef.current) return;
-        reconnectCount.current = 0; // Reset backoff on successful message
-        try {
-          const msg = JSON.parse(ev.data);
-          const delta = msg.delta;
-          if (!delta) return;
-
-          const deltaBids: [number, number][] = delta.bids ?? [];
-          const deltaAsks: [number, number][] = delta.asks ?? [];
-
-          // Apply deltas: size=0 means remove level
-          for (const [price, size] of deltaBids) {
-            if (size === 0) bidsMap.current.delete(price);
-            else bidsMap.current.set(price, size);
-          }
-          for (const [price, size] of deltaAsks) {
-            if (size === 0) asksMap.current.delete(price);
-            else asksMap.current.set(price, size);
-          }
-          capMap(bidsMap.current, "bids");
-          capMap(asksMap.current, "asks");
-
-          calcRatio();
-        } catch { /* ignore */ }
-      };
-
-      ws.onerror = () => { /* triggers onclose */ };
-
-      ws.onclose = () => {
-        if (!activeRef.current) return;
-        // Exponential backoff: 3s, 6s, 12s, max 30s
-        const delay = Math.min(3000 * Math.pow(2, reconnectCount.current), 30000);
-        reconnectCount.current++;
-        reconnectTimer.current = setTimeout(() => {
-          bidsMap.current.clear();
-          asksMap.current.clear();
-          init();
-        }, delay);
-      };
-    }
-
-    init();
+      for (const raw of (data.asks as unknown[]) ?? []) {
+        const e = readEntry(raw);
+        if (!e) continue;
+        if (e.size === 0) asksMap.current.delete(e.price);
+        else asksMap.current.set(e.price, e.size);
+      }
+      capMap(bidsMap.current, "bids");
+      capMap(asksMap.current, "asks");
+      calcRatio();
+    });
 
     return () => {
+      cancelled = true;
       activeRef.current = false;
-      clearTimeout(reconnectTimer.current);
-      clearTimeout(throttleTimer.current);
-      if (wsRef.current) {
-        wsRef.current.onmessage = null;
-        wsRef.current.onerror = null;
-        wsRef.current.onclose = null;
-        wsRef.current.close();
-        wsRef.current = null;
+      off();
+      if (throttleTimer.current) {
+        clearTimeout(throttleTimer.current);
+        throttleTimer.current = undefined;
       }
     };
   }, [marketId, symbol, enabled, calcRatio]);

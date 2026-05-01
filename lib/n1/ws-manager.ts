@@ -434,6 +434,13 @@ class NordWsManager {
   private setState(next: WsState): void {
     if (this.state === next) return;
     this.state = next;
+    // Tag the active client transport on Sentry so any errors captured
+    // afterwards are correlated with whether the user is on WS or
+    // (indirectly) on REST polling. We import lazily and via try/catch
+    // because this module is imported on both server and client paths,
+    // and pulling in @sentry/nextjs at the top would balloon the
+    // server bundle for nothing.
+    void this.tagSentryTransport(next);
     const snap = this.getSnapshot();
     for (const fn of this.stateListeners) {
       try {
@@ -441,6 +448,19 @@ class NordWsManager {
       } catch (err) {
         console.error("[ws-manager] state listener threw:", err);
       }
+    }
+  }
+
+  private async tagSentryTransport(state: WsState): Promise<void> {
+    if (typeof window === "undefined") return;
+    try {
+      const Sentry = await import("@sentry/nextjs");
+      // The "transport" tag flips to "ws" only when we have a live
+      // socket; everything else (idle, connecting, disconnected, error)
+      // means events for this user are coming from REST or nothing.
+      Sentry.setTag("transport", state === "connected" ? "ws" : "rest");
+    } catch {
+      // Sentry not available in this environment — tagging is best-effort.
     }
   }
 }
