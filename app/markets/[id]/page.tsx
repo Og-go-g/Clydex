@@ -1,11 +1,15 @@
 "use client";
 
-import { useState, useEffect, use, lazy, Suspense, useMemo } from "react";
+import { useState, useEffect, useCallback, useRef, use, lazy, Suspense, useMemo } from "react";
 import Link from "next/link";
 import { TIERS } from "@/lib/n1/constants";
 import { useAuth } from "@/lib/auth/context";
 import { useRealtimePrices } from "@/hooks/useRealtimePrices";
 import { useCandleStream } from "@/hooks/useCandleStream";
+import { useNordAccount } from "@/hooks/useNordAccount";
+import { useNordMarketTicker } from "@/hooks/useNordMarketTicker";
+import { useNordCandles, type Candle as NordCandle } from "@/hooks/useNordCandles";
+import { isNordWsEnabledForSession } from "@/lib/feature-flags";
 import { INTERVAL_TO_N1, type Interval } from "@/lib/n1/candles";
 import { setPendingChartOpen } from "@/lib/chat/chart-panel-context";
 
@@ -208,7 +212,20 @@ export default function MarketDetailPage({
     return () => { cancelled = true; clearTimeout(retryTimer); };
   }, [marketId]);
 
-  // Fetch stats (no orderbook — not needed without trading UI)
+  // ─── Phase 4: WS feature flag ─────────────────────────────────
+  // Same convention as portfolio/chat — read in a useEffect to keep
+  // SSR/hydration consistent, then drive both market-stats polling
+  // cadence and position-overlay refetch through it.
+  const [wsEnabled, setWsEnabled] = useState(false);
+  useEffect(() => {
+    setWsEnabled(isNordWsEnabledForSession());
+  }, []);
+
+  // Fetch /api/markets/[id] stats. Funding rate, 24h volume, and OI all
+  // change on the order of minutes, not seconds — trade WS events are
+  // useless for them. Polling cadence drops from 30s to 60s when WS is
+  // active (live price overlay below covers the fast-moving data); REST
+  // mode keeps the original 30s cadence for backward compatibility.
   useEffect(() => {
     if (!market) return;
 
@@ -224,11 +241,28 @@ export default function MarketDetailPage({
     }
 
     fetchData();
-    const interval = setInterval(fetchData, 30_000);
+    const cadenceMs = wsEnabled ? 60_000 : 30_000;
+    const interval = setInterval(fetchData, cadenceMs);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [market?.id]);
+  }, [market?.id, wsEnabled]);
 
-  // Fetch user's position for this market (for chart overlays)
+  // Fetch user's position for this market (chart overlay — entry, liq,
+  // TP/SL). Phase 4 turns this into a WS-driven signal: useNordAccount
+  // calls back on every account event, and we 200ms-debounce a single
+  // /api/account refetch (same pattern as portfolio). The 30s
+  // setInterval is only kept when the flag is off.
+  const [accountId, setAccountId] = useState<number | null>(null);
+  const fetchPositionRef = useRef<(() => Promise<void>) | null>(null);
+  const debouncedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleWsAccountUpdate = useCallback(() => {
+    if (debouncedTimerRef.current) clearTimeout(debouncedTimerRef.current);
+    debouncedTimerRef.current = setTimeout(() => {
+      debouncedTimerRef.current = null;
+      void fetchPositionRef.current?.();
+    }, 200);
+  }, []);
+  useNordAccount(accountId, handleWsAccountUpdate, { enabled: wsEnabled });
+
   useEffect(() => {
     if (!isAuthenticated || !market) { setPositionOverlay(null); return; }
     let cancelled = false;
@@ -239,6 +273,10 @@ export default function MarketDetailPage({
         if (!res.ok || cancelled) return;
         const data = await res.json();
         if (!data.exists || cancelled) { setPositionOverlay(null); return; }
+
+        if (typeof data.accountId === "number" && data.accountId > 0) {
+          setAccountId((prev) => (prev === data.accountId ? prev : data.accountId));
+        }
 
         // Find position for this market
         const pos = (data.positions ?? []).find(
@@ -280,24 +318,63 @@ export default function MarketDetailPage({
       }
     }
 
+    fetchPositionRef.current = fetchPosition;
     fetchPosition();
-    const id = setInterval(fetchPosition, 30_000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [isAuthenticated, market]);
+    // Legacy 30s polling only when WS path is disabled. WS mode drives
+    // refetches through useNordAccount above.
+    let id: ReturnType<typeof setInterval> | null = null;
+    if (!wsEnabled) {
+      id = setInterval(fetchPosition, 30_000);
+    }
+    return () => {
+      cancelled = true;
+      fetchPositionRef.current = null;
+      if (id !== null) clearInterval(id);
+      if (debouncedTimerRef.current) {
+        clearTimeout(debouncedTimerRef.current);
+        debouncedTimerRef.current = null;
+      }
+    };
+  }, [isAuthenticated, market, wsEnabled]);
 
-  // Real-time price via WS orderbook deltas
-  const wsSymbol = useMemo(() => market ? [market.symbol] : [], [market?.symbol]);
-  const realtimePrices = useRealtimePrices(wsSymbol);
-  const livePrice = market ? realtimePrices[market.symbol] : undefined;
+  // Real-time price.
+  // - WS mode: useNordMarketTicker through the singleton manager (one
+  //   shared socket with the rest of the app).
+  // - Legacy mode: useRealtimePrices (own direct WS, single per page).
+  // Whichever path produces a number first wins; downstream code only
+  // reads the merged `livePrice`.
+  const wsSymbol = useMemo(() => market && !wsEnabled ? [market.symbol] : [], [market?.symbol, wsEnabled]);
+  const legacyPrices = useRealtimePrices(wsSymbol);
+  const ticker = useNordMarketTicker(market?.symbol ?? null, { enabled: wsEnabled });
+  const livePrice = wsEnabled
+    ? ticker.lastPrice ?? undefined
+    : market ? legacyPrices[market.symbol] : undefined;
 
-  // Chart interval + real-time candle stream from N1 WS
+  // Chart interval + real-time candle stream.
+  // - WS mode: useNordCandles routes events through the singleton
+  //   manager (multiplexed with trades + account on one socket).
+  // - Legacy mode: useCandleStream opens its own dedicated WebSocket.
+  // Whichever path runs, we surface the *latest* candle as a
+  // CandleUpdate-compatible object so PriceChart's existing prop
+  // contract is unchanged.
   const [chartInterval, setChartInterval] = useState<Interval>("1H");
   const n1Resolution = INTERVAL_TO_N1[chartInterval];
-  const candleUpdate = useCandleStream(
+  // Stable empty seed so useNordCandles doesn't re-seed on every render.
+  const emptyCandlesSeed = useMemo<NordCandle[]>(() => [], []);
+  const legacyCandle = useCandleStream(
     market?.symbol ?? "",
     n1Resolution,
-    !!market
+    !!market && !wsEnabled,
   );
+  const { candles: wsCandles } = useNordCandles(
+    market?.symbol ?? null,
+    n1Resolution as import("@n1xyz/nord-ts").CandleResolution,
+    emptyCandlesSeed,
+    { enabled: wsEnabled && !!market },
+  );
+  const candleUpdate = wsEnabled
+    ? wsCandles.length > 0 ? wsCandles[wsCandles.length - 1] : null
+    : legacyCandle;
 
   // Funding countdown
   useEffect(() => {

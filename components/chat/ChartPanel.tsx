@@ -5,6 +5,10 @@ import { useChartPanel } from "@/lib/chat/chart-panel-context";
 import { useRealtimePrices } from "@/hooks/useRealtimePrices";
 import { useOrderbookRatio } from "@/hooks/useOrderbookRatio";
 import { useCandleStream } from "@/hooks/useCandleStream";
+import { useNordAccount } from "@/hooks/useNordAccount";
+import { useNordMarketTicker } from "@/hooks/useNordMarketTicker";
+import { useNordCandles, type Candle as NordCandle } from "@/hooks/useNordCandles";
+import { isNordWsEnabledForSession } from "@/lib/feature-flags";
 import { useAuth } from "@/lib/auth/context";
 import { INTERVAL_TO_N1, type Interval } from "@/lib/n1/candles";
 import type { PriceChartHandle, IndicatorId } from "@/components/charts/PriceChart";
@@ -104,12 +108,23 @@ export function ChartPanel() {
     document.addEventListener("mouseup", onUp);
   }, []);
 
-  // WS prices for the current market
-  const sym = `${baseAsset}USD`;
-  const realtimePrices = useRealtimePrices(isOpen ? [sym] : []);
-  const livePrice = realtimePrices[sym];
+  // ─── Phase 4: WS feature flag ─────────────────────────────────
+  const [wsEnabled, setWsEnabled] = useState(false);
+  useEffect(() => {
+    setWsEnabled(isNordWsEnabledForSession());
+  }, []);
 
-  // WS orderbook ratio — real-time, same data source as 01 Exchange
+  // WS prices for the current market.
+  // - WS mode: useNordMarketTicker (multiplexed through manager).
+  // - Legacy mode: useRealtimePrices (own direct WS).
+  const sym = `${baseAsset}USD`;
+  const legacyPrices = useRealtimePrices(isOpen && !wsEnabled ? [sym] : []);
+  const ticker = useNordMarketTicker(isOpen ? sym : null, { enabled: wsEnabled });
+  const livePrice = wsEnabled ? ticker.lastPrice ?? undefined : legacyPrices[sym];
+
+  // WS orderbook ratio — direct WS, kept for now. Phase 6 cleanup will
+  // route this through the manager (it computes bid/ask quote-volume
+  // ratio that has no drop-in equivalent in useNordOrderbook yet).
   const wsRatio = useOrderbookRatio(marketId, `${baseAsset}USD`, isOpen);
 
   // Chart interval state (lifted so WS candle stream matches displayed interval)
@@ -141,9 +156,23 @@ export function ChartPanel() {
     return () => { clearTimeout(id); document.removeEventListener("click", handleClick); };
   }, [showIndicatorMenu]);
 
-  // WS candle stream — real-time OHLCV updates from N1
+  // WS candle stream.
+  // - WS mode: useNordCandles via the manager.
+  // - Legacy mode: useCandleStream (own direct WS).
+  // PriceChart's `candleUpdate` prop is the latest OHLCV bucket — both
+  // paths produce that shape, just from different sources.
   const n1Resolution = INTERVAL_TO_N1[chartInterval];
-  const candleUpdate = useCandleStream(sym, n1Resolution, isOpen);
+  const emptyCandlesSeed = useMemo<NordCandle[]>(() => [], []);
+  const legacyCandle = useCandleStream(sym, n1Resolution, isOpen && !wsEnabled);
+  const { candles: wsCandles } = useNordCandles(
+    isOpen ? sym : null,
+    n1Resolution as import("@n1xyz/nord-ts").CandleResolution,
+    emptyCandlesSeed,
+    { enabled: wsEnabled && isOpen },
+  );
+  const candleUpdate = wsEnabled
+    ? wsCandles.length > 0 ? wsCandles[wsCandles.length - 1] : null
+    : legacyCandle;
 
   // ─── Position overlay (entry, liq, TP/SL) matched by marketId ──
   const { isAuthenticated } = useAuth();
@@ -163,6 +192,21 @@ export function ChartPanel() {
     setPositionOverlay(overlayCache.current.get(marketId) ?? null);
   }, [marketId]);
 
+  // Position overlay refetch: WS signal (Phase 4) when enabled, else
+  // 30s polling. accountId is plucked off the seed fetch so we never
+  // need a separate /api/auth/session round-trip just to subscribe.
+  const [accountId, setAccountId] = useState<number | null>(null);
+  const fetchOverlayRef = useRef<(() => Promise<void>) | null>(null);
+  const debouncedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleWsAccountUpdate = useCallback(() => {
+    if (debouncedTimerRef.current) clearTimeout(debouncedTimerRef.current);
+    debouncedTimerRef.current = setTimeout(() => {
+      debouncedTimerRef.current = null;
+      void fetchOverlayRef.current?.();
+    }, 200);
+  }, []);
+  useNordAccount(accountId, handleWsAccountUpdate, { enabled: wsEnabled && isOpen });
+
   useEffect(() => {
     if (!isOpen || !isAuthenticated) { setPositionOverlay(null); return; }
     let cancelled = false;
@@ -173,6 +217,10 @@ export function ChartPanel() {
         if (!res.ok || cancelled) return;
         const data = await res.json();
         if (!data.exists || cancelled) { setPositionOverlay(null); return; }
+
+        if (typeof data.accountId === "number" && data.accountId > 0) {
+          setAccountId((prev) => (prev === data.accountId ? prev : data.accountId));
+        }
 
         // Find position for the CURRENT marketId
         const pos = (data.positions ?? []).find(
@@ -218,10 +266,23 @@ export function ChartPanel() {
       } catch { /* silent */ }
     }
 
+    fetchOverlayRef.current = fetchOverlay;
     fetchOverlay();
-    const iv = window.setInterval(fetchOverlay, 30_000);
-    return () => { cancelled = true; clearInterval(iv); };
-  }, [isOpen, isAuthenticated, marketId]);
+    // Legacy 30s polling only when WS path is disabled.
+    let iv: number | null = null;
+    if (!wsEnabled) {
+      iv = window.setInterval(fetchOverlay, 30_000);
+    }
+    return () => {
+      cancelled = true;
+      fetchOverlayRef.current = null;
+      if (iv !== null) clearInterval(iv);
+      if (debouncedTimerRef.current) {
+        clearTimeout(debouncedTimerRef.current);
+        debouncedTimerRef.current = null;
+      }
+    };
+  }, [isOpen, isAuthenticated, marketId, wsEnabled]);
 
   // Fetch all markets for selector
   useEffect(() => {
@@ -307,9 +368,14 @@ export function ChartPanel() {
     }
 
     fetchStats();
-    const statsIv = window.setInterval(fetchStats, 15_000);
+    // Funding rate, OI, and 24h volume change on the order of minutes
+    // (funding flips every 8 hours), so 60s is enough when the WS price
+    // ticker covers the fast-moving "current price" data. Legacy mode
+    // keeps the 15s cadence for parity.
+    const cadenceMs = wsEnabled ? 60_000 : 15_000;
+    const statsIv = window.setInterval(fetchStats, cadenceMs);
     return () => { cancelled = true; clearInterval(statsIv); };
-  }, [isOpen, marketId]);
+  }, [isOpen, marketId, wsEnabled]);
 
   // Funding countdown
   const [fundingCountdown, setFundingCountdown] = useState("");
