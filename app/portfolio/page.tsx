@@ -9,6 +9,9 @@ import { EquityChart, invalidateEquityCache } from "@/components/charts/EquityCh
 import { useRealtimePrices } from "@/hooks/useRealtimePrices";
 import { usePageActive } from "@/hooks/usePageActive";
 import { useOrderActions } from "@/hooks/useOrderActions";
+import { useNordAccount } from "@/hooks/useNordAccount";
+import { useNordWsHealth } from "@/hooks/useNordWsHealth";
+import { isNordWsEnabledForSession } from "@/lib/feature-flags";
 
 // Minimum position size threshold — positions below this are treated as dust/zero
 const MIN_POS_SIZE = 1e-12;
@@ -371,6 +374,58 @@ export default function PortfolioPage() {
     refreshingRef.current = false;
   }, []);
 
+  // ─── Phase 2: WebSocket signal mode (feature-flagged) ─────────
+  //
+  // When NEXT_PUBLIC_USE_NORD_WS=true (or `localStorage.clydex.nordWs=1`),
+  // we replace the 10s REST poll with:
+  //   - useNordAccount(accountId) → 200ms debounced refetch on each WS event
+  //   - 60s fallback poll while WS state !== 'connected' for >30s
+  //   - immediate refetch on WS reconnect transition
+  //   - immediate refetch on visibilitychange:visible (kept from REST mode)
+  //
+  // When the flag is off, behavior is byte-identical to the previous code:
+  // 10s setInterval gated by document.hidden + visibilitychange handler.
+  // Off is the default. The flag is read in a useEffect (not in render) to
+  // avoid an SSR/hydration mismatch when localStorage is involved.
+  const [wsEnabled, setWsEnabled] = useState(false);
+  useEffect(() => {
+    setWsEnabled(isNordWsEnabledForSession());
+  }, []);
+
+  // 200 ms-debounced silent refetch — collapses bursts of WS account
+  // events (e.g. a place + fill arriving milliseconds apart) into one
+  // /api/account call.
+  const debouncedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const debouncedRefresh = useCallback(() => {
+    if (debouncedTimerRef.current) clearTimeout(debouncedTimerRef.current);
+    debouncedTimerRef.current = setTimeout(() => {
+      debouncedTimerRef.current = null;
+      void refreshAccount();
+    }, 200);
+  }, [refreshAccount]);
+
+  // Wire WS subscription. The hook is inert when wsEnabled is false or
+  // accountId is null — no socket is opened in those cases.
+  useNordAccount(data?.accountId ?? null, debouncedRefresh, { enabled: wsEnabled });
+
+  // Health snapshot drives the fallback polling and reconnect-refetch logic.
+  const wsHealth = useNordWsHealth();
+
+  // On a WS reconnect (state transitions back to "connected"), state may
+  // have drifted while we were offline — refetch once.
+  const prevWsConnectedRef = useRef(wsHealth.connected);
+  useEffect(() => {
+    if (!wsEnabled || !isAuthenticated) return;
+    if (wsHealth.connected && !prevWsConnectedRef.current) {
+      void refreshAccount();
+    }
+    prevWsConnectedRef.current = wsHealth.connected;
+  }, [wsEnabled, isAuthenticated, wsHealth.connected, refreshAccount]);
+
+  // Main effect: initial fetch + the polling that runs in the *current*
+  // mode (REST-only when wsEnabled is false; visibility-only when on).
+  // Re-runs when the mode flips so a runtime localStorage override
+  // (`clydex.nordWs=1`) takes effect on the next render without reload.
   useEffect(() => {
     if (!isAuthenticated) {
       setLoading(false);
@@ -378,17 +433,59 @@ export default function PortfolioPage() {
     }
     fetchAccount();
 
-    // REST refresh every 10s — but only when tab is visible (pageVisible from usePageActive)
-    const id = setInterval(() => { if (!document.hidden) refreshAccount(); }, 10_000);
-    // Visibility handler: refetch immediately when user returns to tab
-    const onVis = () => { if (!document.hidden) refreshAccount(); };
-    document.addEventListener("visibilitychange", onVis);
-    return () => {
-      clearInterval(id);
-      document.removeEventListener("visibilitychange", onVis);
-      refreshingRef.current = false; // reset on unmount so remount doesn't think fetch is in-flight
+    const onVis = () => {
+      if (!document.hidden) void refreshAccount();
     };
-  }, [isAuthenticated, fetchAccount, refreshAccount]);
+    document.addEventListener("visibilitychange", onVis);
+
+    // REST-only path: unchanged 10s poll. Identical to pre-Phase-2 code.
+    let id: ReturnType<typeof setInterval> | null = null;
+    if (!wsEnabled) {
+      id = setInterval(() => {
+        if (!document.hidden) void refreshAccount();
+      }, 10_000);
+    }
+
+    return () => {
+      if (id !== null) clearInterval(id);
+      document.removeEventListener("visibilitychange", onVis);
+      refreshingRef.current = false;
+      if (debouncedTimerRef.current) {
+        clearTimeout(debouncedTimerRef.current);
+        debouncedTimerRef.current = null;
+      }
+    };
+  }, [isAuthenticated, fetchAccount, refreshAccount, wsEnabled]);
+
+  // WS-only fallback effect: arm 60s polling if the manager has been
+  // disconnected for 30s+, disarm the moment it recovers. This is the
+  // safety net behind the "WS goes silent on iOS background tabs" and
+  // "01.xyz hiccup" cases — without it, a user with a half-broken
+  // connection would see stale data forever.
+  useEffect(() => {
+    if (!wsEnabled || !isAuthenticated) return;
+
+    let armTimer: ReturnType<typeof setTimeout> | null = null;
+    let interval: ReturnType<typeof setInterval> | null = null;
+
+    if (wsHealth.connected) {
+      // Healthy — nothing to do; the cleanup below clears any prior
+      // timers that this effect run might still own.
+    } else {
+      armTimer = setTimeout(() => {
+        armTimer = null;
+        if (!document.hidden) void refreshAccount();
+        interval = setInterval(() => {
+          if (!document.hidden) void refreshAccount();
+        }, 60_000);
+      }, 30_000);
+    }
+
+    return () => {
+      if (armTimer) clearTimeout(armTimer);
+      if (interval) clearInterval(interval);
+    };
+  }, [wsEnabled, isAuthenticated, wsHealth.connected, refreshAccount]);
 
   // Elapsed time is handled by ElapsedTime sub-component (avoids full page re-render every 1s)
 
