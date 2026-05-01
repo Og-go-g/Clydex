@@ -12,6 +12,8 @@ import { useAuth } from "@/lib/auth/context";
 import { useRealtimePrices } from "@/hooks/useRealtimePrices";
 import { useOrderExecution, isPreviewConsumed, isPreviewFailed, getConfirmedPosition } from "@/hooks/useOrderExecution";
 import { useOrderActions } from "@/hooks/useOrderActions";
+import { useNordAccount } from "@/hooks/useNordAccount";
+import { isNordWsEnabledForSession } from "@/lib/feature-flags";
 import { ClosePositionModal } from "@/components/collateral/ClosePositionModal";
 import { useToast } from "@/components/alerts/ToastProvider";
 import { usePageActive } from "@/hooks/usePageActive";
@@ -1233,6 +1235,27 @@ function PositionsCard({
 
   const [liveData, setLiveData] = useState<Record<string, unknown> | null>(null);
   const [refreshing, setRefreshing] = useState(originalPosKeys.size > 0);
+  // Phase 3: WS-driven refresh. accountId is plucked off the first
+  // /api/account response and used to subscribe to account@<id>; flag-off
+  // keeps the legacy 10s setInterval. ref-bound doFetch lets the WS
+  // handler call back into the latest closure without re-running the
+  // outer effect on every render.
+  const [accountId, setAccountId] = useState<number | null>(null);
+  const [wsEnabled, setWsEnabled] = useState(false);
+  useEffect(() => {
+    setWsEnabled(isNordWsEnabledForSession());
+  }, []);
+  const doFetchRef = useRef<(() => void) | null>(null);
+  const debouncedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleWsAccountUpdate = useCallback(() => {
+    if (debouncedTimerRef.current) clearTimeout(debouncedTimerRef.current);
+    debouncedTimerRef.current = setTimeout(() => {
+      debouncedTimerRef.current = null;
+      doFetchRef.current?.();
+    }, 200);
+  }, []);
+  useNordAccount(accountId, handleWsAccountUpdate, { enabled: wsEnabled });
+
   useEffect(() => {
     if (originalPosKeys.size === 0) return; // No positions in snapshot — nothing to refresh
     let active = true;
@@ -1246,6 +1269,9 @@ function PositionsCard({
       return r.ok ? r.json() : null;
     }).then(d => {
       if (!active || !d) return;
+      if (typeof d.accountId === "number" && d.accountId > 0) {
+        setAccountId((prev) => (prev === d.accountId ? prev : d.accountId));
+      }
       // Rebuild from fresh API data — only positions that were in the original snapshot
       const newPositions = (d.positions ?? []).filter((p: Record<string, unknown>) => {
         const perp = p.perp as Record<string, unknown> | undefined;
@@ -1304,11 +1330,24 @@ function PositionsCard({
       setRefreshing(false);
     }).catch(() => { setRefreshing(false); });
     };
+    doFetchRef.current = doFetch;
     doFetch();
-    // Re-fetch every 10s to keep TP/SL and PnL fresh
-    const interval = window.setInterval(doFetch, 10_000);
-    return () => { active = false; clearInterval(interval); };
-  }, [originalPosKeys]);
+    // Legacy REST poll only when WS path is disabled; otherwise the
+    // useNordAccount subscription above drives refetches.
+    let interval: number | null = null;
+    if (!wsEnabled) {
+      interval = window.setInterval(doFetch, 10_000) as unknown as number;
+    }
+    return () => {
+      active = false;
+      doFetchRef.current = null;
+      if (interval !== null) clearInterval(interval);
+      if (debouncedTimerRef.current) {
+        clearTimeout(debouncedTimerRef.current);
+        debouncedTimerRef.current = null;
+      }
+    };
+  }, [originalPosKeys, wsEnabled]);
 
   // Show loader while first refresh is in-flight (prevents flash of stale snapshot)
   if (refreshing) {
@@ -2029,6 +2068,33 @@ function LivePositionCard({ initialPos, txHash, realtimePrices, onSendMessage }:
     };
   }, [registryKey]);
 
+  // accountId is required for the WS subscription. We pluck it out of the
+  // first /api/account response (no separate /api/auth/session call).
+  const [accountId, setAccountId] = useState<number | null>(null);
+  // Phase 3: WS-driven refetch when the feature flag is on. The legacy
+  // 1s→5s→30s polling cascade stays as a fallback for the flag-off path.
+  const [wsEnabled, setWsEnabled] = useState(false);
+  useEffect(() => {
+    setWsEnabled(isNordWsEnabledForSession());
+  }, []);
+  // Ref bound by the polling effect to the latest `check` closure so
+  // the WS-driven effect can call into it without re-running the
+  // outer effect on every render.
+  const checkRef = useRef<(() => Promise<void>) | null>(null);
+  // Debounce WS-event-triggered refetches by 200ms — fills + balance
+  // + trigger updates can land in the same WS event burst, and a fresh
+  // single /api/account aggregate is more useful than three concurrent
+  // ones. Mirrors the portfolio behaviour from Phase 2.
+  const debouncedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleWsAccountUpdate = useCallback(() => {
+    if (debouncedTimerRef.current) clearTimeout(debouncedTimerRef.current);
+    debouncedTimerRef.current = setTimeout(() => {
+      debouncedTimerRef.current = null;
+      void checkRef.current?.();
+    }, 200);
+  }, []);
+  useNordAccount(accountId, handleWsAccountUpdate, { enabled: wsEnabled });
+
   // Poll /api/account to detect external close + update live data
   // Aggressive first check (1s), then every 5s for 2 min, then every 30s indefinitely
   // Also checks immediately on tab visibility change
@@ -2053,6 +2119,9 @@ function LivePositionCard({ initialPos, txHash, realtimePrices, onSendMessage }:
         const res = await fetch(`/api/account?_t=${Date.now()}`);
         if (!res.ok) return;
         const data = await res.json();
+        if (typeof data.accountId === "number" && data.accountId > 0) {
+          setAccountId((prev) => (prev === data.accountId ? prev : data.accountId));
+        }
         const symUp = sym.toUpperCase();
 
         // Find position by symbol + side (exchange has ONE position per symbol/side)
@@ -2112,14 +2181,28 @@ function LivePositionCard({ initialPos, txHash, realtimePrices, onSendMessage }:
       } catch { /* silent */ }
     };
 
-    // Immediate first check after 1s (not 5s)
+    // Immediate first check after 1s — needed in BOTH modes so we can
+    // pluck accountId off the response and seed the WS subscription
+    // (and to render initial data). After that:
+    //   - WS mode: rely on account@<id> events to drive subsequent
+    //     refetches; close-detection comes for free from the next event.
+    //   - REST mode: cascade 5s × 24 (≈2 min aggressive) → 30s.
     const t = setTimeout(() => {
       if (!active) return;
       check();
-      pollingRef.current = setInterval(check, 5_000);
+      if (!wsEnabled) {
+        pollingRef.current = setInterval(check, 5_000);
+      }
     }, 1000);
 
-    // Re-check instantly when user returns to tab
+    // Expose `check` for the WS-driven debounced refetch effect below
+    // (defined outside this useEffect so it can read `accountId`/`wsEnabled`).
+    checkRef.current = check;
+
+    // Re-check instantly when user returns to tab — useful in both modes
+    // (WS may have been killed in a backgrounded iOS Safari tab; even
+    // when the manager is healthy, an immediate refetch on resume keeps
+    // the "I just opened the tab" UX snappy).
     const onVisibility = () => {
       if (document.visibilityState === "visible" && active && !closedRef.current) check();
     };
@@ -2128,10 +2211,11 @@ function LivePositionCard({ initialPos, txHash, realtimePrices, onSendMessage }:
     return () => {
       active = false;
       clearTimeout(t);
+      checkRef.current = null;
       if (pollingRef.current) clearInterval(pollingRef.current);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [sym, baseAsset, initSide]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sym, baseAsset, initSide, wsEnabled]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Frozen snapshot — captured once at the moment of close, never changes
   const frozenRef = useRef<{ mark: number; pnl: number; pnlPct: number } | null>(null);
