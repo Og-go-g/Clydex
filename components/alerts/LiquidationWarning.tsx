@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useAuth } from "@/lib/auth/context";
+import { useNordAccount } from "@/hooks/useNordAccount";
+import { isNordWsEnabledForSession } from "@/lib/feature-flags";
 import type { AlertLevel } from "@/lib/n1/alerts";
 
 interface LiquidationAlert {
@@ -46,7 +48,40 @@ export function LiquidationWarning() {
   // Fingerprint of current positions for dismiss tracking
   const currentFingerprintRef = useRef<string | null>(null);
 
-  // Poll account margins every 15s when authenticated
+  // Phase 5: WS feature flag. Same convention as the rest of the app —
+  // resolve in a useEffect (not in render) so SSR/hydration stays stable.
+  const [wsEnabled, setWsEnabled] = useState(false);
+  useEffect(() => {
+    setWsEnabled(isNordWsEnabledForSession());
+  }, []);
+
+  // accountId is plucked off the first /api/collateral response (the
+  // endpoint already returns it — no separate session call). Used to
+  // wire the useNordAccount subscription below.
+  const [accountId, setAccountId] = useState<number | null>(null);
+
+  // Stable handle so the WS-driven debounced refetch can call back into
+  // the latest closure of `checkMargins` without forcing the outer
+  // effect to re-run on every render.
+  const checkMarginsRef = useRef<(() => Promise<void>) | null>(null);
+
+  // 1s debounce on WS-event-driven refetches. Margin checks are heavier
+  // than account refetches (full collateral aggregate + ratio compute),
+  // and bursts of fills/cancels rarely change the ratio meaningfully —
+  // a 1s window collapses them into a single check.
+  const debouncedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleWsAccountUpdate = useCallback(() => {
+    if (debouncedTimerRef.current) clearTimeout(debouncedTimerRef.current);
+    debouncedTimerRef.current = setTimeout(() => {
+      debouncedTimerRef.current = null;
+      void checkMarginsRef.current?.();
+    }, 1000);
+  }, []);
+  useNordAccount(accountId, handleWsAccountUpdate, { enabled: wsEnabled });
+
+  // Margin check: WS-driven via useNordAccount when the flag is on,
+  // 15s setInterval when off. Initial fetch runs in both modes so the
+  // banner can show immediately on mount and seed accountId.
   useEffect(() => {
     if (!isAuthenticated) {
       setAlert(null);
@@ -60,6 +95,11 @@ export function LiquidationWarning() {
         const res = await fetch("/api/collateral");
         if (!res.ok) return;
         const data = await res.json();
+
+        if (typeof data.accountId === "number" && data.accountId > 0) {
+          setAccountId((prev) => (prev === data.accountId ? prev : data.accountId));
+        }
+
         if (!data.exists || !data.marginRatio) {
           setAlert(null);
           dismissedForRef.current = null;
@@ -110,10 +150,23 @@ export function LiquidationWarning() {
       }
     }
 
+    checkMarginsRef.current = checkMargins;
     checkMargins();
-    const interval = setInterval(checkMargins, 15_000);
-    return () => clearInterval(interval);
-  }, [isAuthenticated]);
+    // Legacy 15s polling only when WS path is disabled. WS mode drives
+    // refetches through useNordAccount above (1s debounced).
+    let interval: number | null = null;
+    if (!wsEnabled) {
+      interval = window.setInterval(checkMargins, 15_000);
+    }
+    return () => {
+      checkMarginsRef.current = null;
+      if (interval !== null) clearInterval(interval);
+      if (debouncedTimerRef.current) {
+        clearTimeout(debouncedTimerRef.current);
+        debouncedTimerRef.current = null;
+      }
+    };
+  }, [isAuthenticated, wsEnabled]);
 
   const handleDismiss = useCallback(() => {
     setDismissed(true);
