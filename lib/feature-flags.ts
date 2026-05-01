@@ -8,34 +8,43 @@
  */
 
 /**
- * When true, frontend hooks listen to live WebSocket streams from
- * @n1xyz/nord-ts; when false they no-op and existing REST polling stays
- * in charge. Default: false. Flipping requires `NEXT_PUBLIC_USE_NORD_WS=true`
- * in `.env.local` (or in the Hetzner container env) and a rebuild.
+ * When true (the default), frontend hooks listen to live WebSocket streams
+ * from @n1xyz/nord-ts; when false they no-op and existing REST polling
+ * stays in charge.
  *
- * Used by Phase 2-5 hooks as a kill-switch for the migration. UI on the
- * `/dev/ws-spike` debug page IGNORES this flag — that page exists
- * specifically to verify WS plumbing regardless of the rollout state.
+ * Phase 7 rollout flipped the default to ON: Phases 0–2 ran behind an
+ * opt-in flag for ~a week with no regressions reported, so the rollout
+ * decision was to ship WS to all users by default. The env var stays as
+ * an emergency kill-switch — set `NEXT_PUBLIC_USE_NORD_WS=false` and
+ * rebuild to revert globally.
+ *
+ * UI on the `/dev/ws-spike` debug page IGNORES this flag — that page
+ * exists specifically to verify WS plumbing regardless of rollout state.
  */
 export const NORD_WS_ENABLED: boolean =
-  process.env.NEXT_PUBLIC_USE_NORD_WS === "true";
+  process.env.NEXT_PUBLIC_USE_NORD_WS !== "false";
 
 /**
- * For local self-testing without redeploying. If a developer wants to flip
- * WS on for their browser only (without changing the env var), they can run
- * `localStorage.setItem('clydex.nordWs', '1')` in DevTools and reload.
+ * Per-browser override for self-testing or hot-rollback for a single user.
  *
- * Returns whether WS should be active for this browser session. Read this
- * inside hooks once on mount (not per render) — it accesses localStorage,
- * which is sync but still belongs in a useEffect to keep SSR happy.
+ *   localStorage.setItem('clydex.nordWs', '1')  // force WS on  (default anyway)
+ *   localStorage.setItem('clydex.nordWs', '0')  // force WS off (kill switch)
+ *   localStorage.removeItem('clydex.nordWs')    // follow the global default
+ *
+ * Note: the explicit '0' override wins over the global flag, so a user who
+ * hits a regression can drop themselves back to REST polling without
+ * waiting on a redeploy. Read this inside a useEffect (not in render) —
+ * it touches localStorage, which is fine on the client but irrelevant on
+ * the server during SSR/static generation.
  */
 export function isNordWsEnabledForSession(): boolean {
-  if (NORD_WS_ENABLED) return true;
   if (typeof window === "undefined") return false;
   try {
-    return window.localStorage.getItem("clydex.nordWs") === "1";
+    const override = window.localStorage.getItem("clydex.nordWs");
+    if (override === "0") return false;
+    if (override === "1") return true;
   } catch {
     // localStorage can throw in private mode / when storage is full.
-    return false;
   }
+  return NORD_WS_ENABLED;
 }
