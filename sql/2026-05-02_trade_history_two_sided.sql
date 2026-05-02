@@ -26,46 +26,58 @@
 -- TimescaleDB hypertable requires `time` to be present in every UNIQUE
 -- index — the new key honors this.
 --
--- CONCURRENT INDEX BUILD
--- ----------------------
--- 10.15M rows. CREATE INDEX CONCURRENTLY does not block writes but cannot
--- run inside a transaction — each statement is its own implicit txn.
+-- INDEX BUILD STRATEGY
+-- --------------------
+-- 10.15M rows.
+--
+-- TimescaleDB hypertables DO NOT SUPPORT `CREATE INDEX CONCURRENTLY` —
+-- the planner refuses with "hypertables do not support concurrent index
+-- creation". So we accept a write lock on trade_history for ~2-5 min
+-- while the index builds. Reads stay unaffected throughout.
+--
+-- ORDER OF OPERATIONS MATTERS. We must CREATE the new constraint
+-- BEFORE we DROP the old one — if the order is reversed and CREATE
+-- fails (or is interrupted) the table is left without ANY uniqueness
+-- guarantee, and a subsequent cron sync pass will lay down duplicate
+-- (tradeId, time) rows that block CREATE UNIQUE forever after.
 --
 -- ROLLBACK (if needed)
 -- --------------------
 --   DROP INDEX IF EXISTS trade_history_account_trade_time_uniq;
---   CREATE UNIQUE INDEX CONCURRENTLY trade_history_tradeid_time_uniq
+--   CREATE UNIQUE INDEX trade_history_tradeid_time_uniq
 --     ON trade_history ("tradeId", "time");
 --
 -- POST-MIGRATION VERIFICATION
 -- ---------------------------
---   \d trade_history       -- expect new constraint listed
+--   \d trade_history       -- expect new constraint listed, old one gone
 --   SELECT COUNT(*) FROM trade_history;  -- must equal pre-migration count
 -- ============================================================================
 
--- 1. Build the new constraint without blocking writes. IF NOT EXISTS makes
---    re-runs safe; the old constraint is dropped only after this succeeds.
-CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS trade_history_account_trade_time_uniq
+-- 1. Build the new constraint FIRST. Plain CREATE (not CONCURRENTLY) —
+--    hypertables refuse the concurrent variant. This holds an
+--    AccessExclusiveLock on the table for the duration of the build
+--    (~2-5 min on 10M rows). Reads continue, writes block briefly.
+CREATE UNIQUE INDEX IF NOT EXISTS trade_history_account_trade_time_uniq
   ON trade_history ("accountId", "tradeId", "time");
 
--- 2. Drop the old constraint that was discarding the second side of every
---    multi-participant trade. Both DROP statements because the original was
---    created via Prisma's @@unique → starts as a CONSTRAINT (with backing
---    INDEX of the same name). Drop the constraint first; the IF EXISTS
---    on the index handles the case where it's already gone.
+-- 2. ONLY NOW drop the old constraint that was discarding the second
+--    side of every multi-participant trade. Both DROP statements
+--    because the original was created via Prisma's @@unique → starts as
+--    a CONSTRAINT (with backing INDEX of the same name). Drop the
+--    constraint first; the IF EXISTS on the index handles the case
+--    where it's already gone.
 ALTER TABLE trade_history DROP CONSTRAINT IF EXISTS trade_history_tradeid_time_uniq;
 DROP INDEX IF EXISTS trade_history_tradeid_time_uniq;
 
 -- 3. Reaffirm pnl_history + funding_history UNIQUE on (accountId, marketId, time).
 --    These were already migrated by 2026-04-18_unique_by_accountid.sql, but
---    Prisma's history.prisma still declares the old (walletAddr, ...) form.
---    Re-running with IF NOT EXISTS is safe — they already exist on prod.
---    The Prisma schema is updated in this same commit so future
---    `prisma migrate dev` runs don't try to recreate the wrong constraint.
-CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS pnl_history_accountid_marketid_time_uniq
+--    Prisma's history.prisma used to declare the old (walletAddr, ...) form
+--    until this same commit fixed it. CREATE IF NOT EXISTS is safe —
+--    they already exist on prod and this is an idempotent guard.
+CREATE UNIQUE INDEX IF NOT EXISTS pnl_history_accountid_marketid_time_uniq
   ON pnl_history ("accountId", "marketId", "time");
 
-CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS funding_history_accountid_marketid_time_uniq
+CREATE UNIQUE INDEX IF NOT EXISTS funding_history_accountid_marketid_time_uniq
   ON funding_history ("accountId", "marketId", "time");
 
 -- Belt-and-suspenders cleanup of the legacy walletAddr-scoped uniques in
