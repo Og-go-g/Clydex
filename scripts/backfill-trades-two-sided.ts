@@ -93,21 +93,43 @@ interface PerAccountResult {
 
 async function processOne(account: AccountRow): Promise<PerAccountResult> {
   try {
-    // syncHistoryType internally:
-    //   - reads sync_cursors cursor (we IGNORE this — see why below)
-    //   - paginates 01 API since=cursor
-    //   - INSERT ... ON CONFLICT (accountId, tradeId, time) DO NOTHING
+    // syncHistoryType reads `sync_cursors.cursor` and uses it as `since`.
+    // For accounts whose cursor advanced PAST the data-loss window (i.e.
+    // sync ran successfully — just inserted nothing because ON CONFLICT
+    // discarded the second side), since=advanced_cursor returns no
+    // trades and the missing rows stay missing. Same trap that caused
+    // the bug to be invisible.
     //
-    // For backfill we need to ignore the existing cursor and force a
-    // re-fetch from the start of recorded history for this account.
-    // The fastest way is to seed since= MAX(time) from trade_history
-    // ourselves and pass it via a temporary cursor write.
-    //
-    // Simpler: bypass syncHistoryType and call the underlying syncTrades
-    // directly with an explicit since. That keeps the cursor untouched.
-    // But syncTrades isn't exported — so we go through syncHistoryType
-    // and accept that the cursor will be overwritten to NOW after the
-    // sync (which is fine — next mini-sync uses MAX(time) anyway).
+    // Workaround: BEFORE calling syncHistoryType, rewrite the cursor to
+    // MAX(time) of what's already in trade_history for this account.
+    // That's the earliest point we know we already have everything
+    // through, so since=MAX(time) is the safe lower bound that catches
+    // any missing-side rows above it. After syncHistoryType finishes
+    // it overwrites the cursor to NOW() — that's fine, the new
+    // self-healing mini-sync (lib/history/queries.ts) doesn't depend
+    // on this cursor anymore.
+    const { rows: maxRows } = await historyPool.query<{ max_time: Date | null }>(
+      `SELECT MAX("time") AS max_time FROM trade_history WHERE "accountId" = $1`,
+      [account.accountId],
+    );
+    const maxTime = maxRows[0]?.max_time;
+
+    if (maxTime) {
+      await historyPool.query(
+        `INSERT INTO sync_cursors (id, "walletAddr", type, cursor, "lastSyncAt")
+         VALUES (gen_random_uuid(), $1, 'trades', $2, NOW())
+         ON CONFLICT ("walletAddr", type) DO UPDATE SET cursor = $2`,
+        [account.pubkey, maxTime.toISOString()],
+      );
+    } else {
+      // No rows for this account yet — clear any stale cursor so
+      // syncHistoryType pulls full history.
+      await historyPool.query(
+        `DELETE FROM sync_cursors WHERE "walletAddr" = $1 AND type = 'trades'`,
+        [account.pubkey],
+      );
+    }
+
     const result = await syncHistoryType(account.accountId, account.pubkey, "trades");
 
     // Re-build aggregates so portfolio shows correct lifetime PnL.
