@@ -1,11 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import * as Sentry from "@sentry/nextjs";
 import { getAuthAddress } from "@/lib/auth/session";
-import {
-  rpcReadLimiter,
-  rpcWriteLimiter,
-  safeRateLimit,
-} from "@/lib/ratelimit";
+import { RATE_LIMITS, safeRateLimit } from "@/lib/ratelimit";
 
 const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
 
@@ -18,7 +14,7 @@ const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.s
  * Security layers:
  * 1. Authentication — only signed-in users (iron-session cookie)
  * 2. Method whitelist — only safe read methods + sendTransaction
- * 3. Rate limiting — Upstash Redis (production) or in-memory fallback (dev)
+ * 3. Rate limiting — Postgres-backed counters with in-memory last-resort
  * 4. Request validation — strict JSON-RPC format check
  * 5. Response sanitization — strip internal error details
  * 6. No batch requests — prevents whitelist bypass via batched calls
@@ -58,10 +54,9 @@ async function checkRate(
   userKey: string,
   isWrite: boolean
 ): Promise<{ success: boolean; remaining: number }> {
-  const limiter = isWrite ? rpcWriteLimiter : rpcReadLimiter;
   const prefix = isWrite ? "rpc:w:" : "rpc:r:";
-  const max = isWrite ? 10 : 120;
-  return safeRateLimit(limiter, userKey, prefix, max);
+  const max = isWrite ? RATE_LIMITS.rpcWrite : RATE_LIMITS.rpcRead;
+  return safeRateLimit(userKey, prefix, max);
 }
 
 // ─── Route Handler ──────────────────────────────────────────────

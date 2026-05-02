@@ -4,7 +4,7 @@ import { z } from "zod/v4";
 import { getAuthAddress } from "@/lib/auth/session";
 import { getUser, getAccount } from "@/lib/n1/client";
 import { checkLiquidationRisk } from "@/lib/n1/alerts";
-import { collateralLimiter, safeRateLimit } from "@/lib/ratelimit";
+import { RATE_LIMITS, safeRateLimit } from "@/lib/ratelimit";
 
 // ─── Zod Schemas ──────────────────────────────────────────────────
 
@@ -80,7 +80,7 @@ export async function POST(req: Request) {
 
   // Per-user rate limit (graceful Upstash fallback)
   {
-    const { success } = await safeRateLimit(collateralLimiter, address, "collateral:", 20);
+    const { success } = await safeRateLimit(address, "collateral:", RATE_LIMITS.collateral);
     if (!success) {
       return NextResponse.json({ error: "Too many requests" }, { status: 429 });
     }

@@ -118,3 +118,62 @@ model PriceHistory {
   @@index([marketId, time])
   @@map("price_history")
 }
+
+// ---------------------------------------------------------------------------
+//  RateLimitBucket — fixed-window rate-limit counter, used as a Postgres
+//  fallback when Upstash Redis is unreachable or its monthly free-tier
+//  quota is exhausted. Keyed by "<tier-prefix>:<wallet-or-ip>".
+//
+//  Atomic increment + window-rollover via a single INSERT ... ON CONFLICT
+//  ... DO UPDATE with a CASE expression — see lib/ratelimit.ts pgRateLimit.
+// ---------------------------------------------------------------------------
+model RateLimitBucket {
+  key         String   @id
+  count       Int
+  windowStart DateTime @map("window_start") @db.Timestamptz(3)
+
+  @@index([windowStart], map: "idx_rl_bucket_window")
+  @@map("rate_limit_buckets")
+}
+
+// ---------------------------------------------------------------------------
+//  Nonce — one-time SIWS sign-in nonce. Atomic single-use guarantee via
+//  DELETE ... WHERE expires_at > NOW() RETURNING — see lib/auth/nonce-store.ts.
+// ---------------------------------------------------------------------------
+model Nonce {
+  value     String   @id
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+
+  @@index([expiresAt], map: "idx_nonce_expires")
+  @@map("nonces")
+}
+
+// ---------------------------------------------------------------------------
+//  IdempotencyKey — short-lived store of "first response wins" results for
+//  POST /api/order. Prevents network retries from double-executing orders.
+//  TTL 5 minutes, atomic ON CONFLICT DO NOTHING + GET semantics.
+// ---------------------------------------------------------------------------
+model IdempotencyKey {
+  key       String   @id
+  result    Json
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+
+  @@index([expiresAt], map: "idx_idem_expires")
+  @@map("idempotency_keys")
+}
+
+// ---------------------------------------------------------------------------
+//  OrderPreview — AI-generated order preview, single-use, owner-scoped.
+//  TTL 5 minutes, consume = atomic DELETE ... WHERE id+user_id+expires_at>NOW
+//  RETURNING — ownership and TTL enforced in one statement so a different
+//  user can't burn someone else's preview.
+// ---------------------------------------------------------------------------
+model OrderPreview {
+  id        String   @id
+  userId    String   @map("user_id")
+  payload   Json
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+
+  @@index([expiresAt], map: "idx_preview_expires")
+  @@map("order_previews")
+}

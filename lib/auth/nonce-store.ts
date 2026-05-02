@@ -1,33 +1,41 @@
 /**
- * Nonce store backed by Upstash Redis for cross-instance consistency.
- * Falls back to in-memory Map when Redis is unavailable (dev mode).
+ * One-time SIWS sign-in nonce store — Postgres primary, in-memory last-resort.
  *
- * Redis commands used:
- *   storeNonce  → SET nonce:{value} 1 EX 300 NX  (1 command)
- *   consumeNonce → GETDEL nonce:{value}           (1 command)
+ * History:
+ *   v1: Upstash Redis primary (`SET ... NX EX` for store, `GETDEL` for consume)
+ *       with in-memory fallback. Same Upstash quota burn as rate-limit.
+ *   v2: Removed Upstash entirely. Postgres `nonces` table holds the value +
+ *       expires_at, `DELETE ... RETURNING` provides the atomic single-use
+ *       guarantee (row-level lock prevents two concurrent verifies from
+ *       both succeeding). Pattern is the canonical Supabase Auth approach
+ *       for one-time tokens.
  *
- * Total: 2 Redis commands per login flow.
+ * Atomicity of single-use:
+ *   `DELETE FROM nonces WHERE value = $1 AND expires_at > NOW() RETURNING value`
+ *   acquires a row-level lock, applies the time predicate, deletes, and
+ *   returns the deleted row in one statement. Two parallel `verify` requests
+ *   for the same nonce serialise on the lock and only one returns a row.
+ *   No race window between read and delete.
+ *
+ * Fallback chain on Postgres outage:
+ *   pgConsumeNonce returns false on any error → memTake() is checked next.
+ *   The store path mirrors it: pgStoreNonce reports failure → memSet() runs.
+ *   On a single-process deployment that's enough; cross-process consistency
+ *   isn't required because every login flow happens within one Next.js
+ *   server instance handling both the /nonce and /login halves.
  */
 
-import { Redis } from "@upstash/redis";
+import { prisma } from "../db";
 
 const NONCE_TTL_S = 300; // 5 minutes
-const REDIS_PREFIX = "nonce:";
 
-// ── Redis client ──
-const hasRedis = !!(process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN);
+/* ------------------------------------------------------------------ */
+/*  In-memory fallback                                                */
+/* ------------------------------------------------------------------ */
 
-const redis = hasRedis
-  ? new Redis({
-      url: process.env.UPSTASH_REDIS_REST_URL!,
-      token: process.env.UPSTASH_REDIS_REST_TOKEN!,
-    })
-  : null;
-
-// ── In-memory fallback (dev only) ──
 const memStore = new Map<string, number>();
 
-function memCleanup() {
+function memCleanup(): void {
   if (memStore.size < 100) return;
   const now = Date.now();
   for (const [k, createdAt] of memStore) {
@@ -43,53 +51,104 @@ function memSet(nonce: string): void {
 function memTake(nonce: string): boolean {
   const createdAt = memStore.get(nonce);
   if (createdAt === undefined) return false;
+  // Always remove (single-use), but only confirm success if not expired.
   memStore.delete(nonce);
   if (Date.now() - createdAt > NONCE_TTL_S * 1000) return false;
   return true;
 }
 
-/** Store a nonce. Returns the nonce string. */
-export async function storeNonce(nonce: string): Promise<string> {
-  if (redis) {
-    try {
-      await redis.set(`${REDIS_PREFIX}${nonce}`, "1", { nx: true, ex: NONCE_TTL_S });
-      return nonce;
-    } catch (err) {
-      // Upstash unavailable / quota exhausted — fall through to in-memory
-      // so login keeps working. Mirrors the pattern used in middleware
-      // and lib/ratelimit.ts (commit 670b25f).
-      console.warn(
-        "[nonce-store] Upstash storeNonce failed, using in-memory:",
-        err instanceof Error ? err.message : err
-      );
-    }
+/* ------------------------------------------------------------------ */
+/*  Postgres backend                                                  */
+/* ------------------------------------------------------------------ */
+
+let lastPgWarnAt = 0;
+const PG_WARN_INTERVAL_MS = 60_000;
+
+function warn(label: string, err: unknown): void {
+  const now = Date.now();
+  if (now - lastPgWarnAt > PG_WARN_INTERVAL_MS) {
+    lastPgWarnAt = now;
+    console.warn(
+      `[nonce-store] ${label} failed:`,
+      err instanceof Error ? err.message : err,
+    );
   }
-  memSet(nonce);
+}
+
+async function pgStoreNonce(nonce: string): Promise<boolean> {
+  try {
+    // ON CONFLICT DO NOTHING handles the (effectively impossible) collision
+    // when two concurrent /api/auth/nonce requests draw the same 16-byte
+    // random value. The first wins; the second silently no-ops and the
+    // caller gets back its own value, which would just be unusable. Not
+    // a security concern — collisions on 128-bit randomness are negligible.
+    await prisma.$executeRaw`
+      INSERT INTO nonces (value, expires_at)
+      VALUES (${nonce}, NOW() + (${NONCE_TTL_S}::int * INTERVAL '1 second'))
+      ON CONFLICT (value) DO NOTHING;
+    `;
+    return true;
+  } catch (err) {
+    warn("pgStoreNonce", err);
+    return false;
+  }
+}
+
+async function pgConsumeNonce(nonce: string): Promise<boolean> {
+  try {
+    const rows = await prisma.$queryRaw<{ value: string }[]>`
+      DELETE FROM nonces
+      WHERE value = ${nonce}
+        AND expires_at > NOW()
+      RETURNING value;
+    `;
+    return rows.length > 0;
+  } catch (err) {
+    warn("pgConsumeNonce", err);
+    return false;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Background cleanup of expired Postgres rows                       */
+/* ------------------------------------------------------------------ */
+
+const CLEANUP_INTERVAL_MS = 5 * 60_000;
+let cleanupTimer: ReturnType<typeof setInterval> | null = null;
+
+function ensureCleanupTimer(): void {
+  if (cleanupTimer || typeof setInterval === "undefined") return;
+  cleanupTimer = setInterval(() => {
+    void prisma
+      .$executeRaw`DELETE FROM nonces WHERE expires_at < NOW();`
+      .catch((err: unknown) => warn("periodic cleanup", err));
+  }, CLEANUP_INTERVAL_MS);
+  if (typeof cleanupTimer === "object" && cleanupTimer && "unref" in cleanupTimer) {
+    (cleanupTimer as unknown as { unref: () => void }).unref();
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Public API                                                        */
+/* ------------------------------------------------------------------ */
+
+/** Store a freshly generated nonce. Returns the same string for chaining. */
+export async function storeNonce(nonce: string): Promise<string> {
+  ensureCleanupTimer();
+  const ok = await pgStoreNonce(nonce);
+  if (!ok) memSet(nonce);
   return nonce;
 }
 
 /**
- * Atomically consume a nonce. Returns true if valid and consumed.
- * After this call, the nonce cannot be used again (single-use guarantee).
+ * Atomically consume a nonce. Returns true if the nonce was valid and is now
+ * burned (it was deleted from the store; subsequent calls return false).
  *
- * Redis GETDEL is atomic — even concurrent requests can't both succeed.
- * Falls through to in-memory if Redis is down so nonces stored during an
- * outage can still be consumed (otherwise login would 401 even with a
- * valid signature).
+ * Tries Postgres first, falls back to the in-memory map if PG is down or
+ * if the nonce was originally written there during a prior outage.
  */
 export async function consumeNonce(nonce: string): Promise<boolean> {
-  if (redis) {
-    try {
-      const val = await redis.getdel(`${REDIS_PREFIX}${nonce}`);
-      if (val !== null) return true;
-      // Not in Redis — could be a nonce stored under the in-memory
-      // fallback during a prior outage. Try memStore before giving up.
-    } catch (err) {
-      console.warn(
-        "[nonce-store] Upstash consumeNonce failed, using in-memory:",
-        err instanceof Error ? err.message : err
-      );
-    }
-  }
+  ensureCleanupTimer();
+  if (await pgConsumeNonce(nonce)) return true;
   return memTake(nonce);
 }

@@ -1,34 +1,29 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { Ratelimit } from "@upstash/ratelimit";
-import { Redis } from "@upstash/redis";
 
-// ─── Upstash Redis rate limiters (production) ─────────────────
-
-const hasUpstash = !!(
-  process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
-);
-
-const redis = hasUpstash ? Redis.fromEnv() : undefined;
-
-const upstashLimiters = redis
-  ? {
-      auth: new Ratelimit({
-        redis,
-        limiter: Ratelimit.slidingWindow(10, "60 s"),
-        prefix: "rl:auth",
-      }),
-      expensive: new Ratelimit({
-        redis,
-        limiter: Ratelimit.slidingWindow(30, "60 s"),
-        prefix: "rl:expensive",
-      }),
-      default: new Ratelimit({
-        redis,
-        limiter: Ratelimit.slidingWindow(60, "60 s"),
-        prefix: "rl:default",
-      }),
-    }
-  : null;
+/**
+ * Edge-runtime middleware: coarse, IP-keyed rate limit + CSRF/Content-Type
+ * checks for mutating requests.
+ *
+ * Two-layer rate-limiting design:
+ *
+ *   Layer 1 (this file, edge runtime):
+ *     - IP-based, in-memory token bucket per instance
+ *     - Cheap and fast — runs on every /api/* request
+ *     - Does NOT see the authenticated wallet, only the IP
+ *     - Purpose: coarse DDoS / bot-flood protection at the door
+ *
+ *   Layer 2 (lib/ratelimit.ts, Node runtime, called from route handlers):
+ *     - Wallet-keyed (or address) Postgres-backed counters
+ *     - Per-tier limits (rpc-read, rpc-write, order, chat, collateral)
+ *     - Survives a single-process restart, shared with cleanup
+ *
+ * Why no Postgres here: Next.js edge middleware cannot import `pg` /
+ * Prisma. We previously used Upstash Redis (HTTP-based, edge-compatible)
+ * for cross-instance correctness, but on a single-container deployment
+ * the in-memory bucket is just as accurate as a remote Redis call. After
+ * Phase 8a (Postgres rate-limiter) we removed Upstash entirely — see
+ * memory/tier2_phase1_2_done.md for context.
+ */
 
 // ─── Tier routing ─────────────────────────────────────────────
 
@@ -58,14 +53,14 @@ function getTierKey(pathname: string): TierKey {
   return "default";
 }
 
-// ─── In-memory fallback (dev / no Redis) ──────────────────────
+// ─── In-memory token bucket ───────────────────────────────────
 
 interface Tier {
   maxTokens: number;
-  refillRate: number;
+  refillRate: number; // tokens per second
 }
 
-const TIERS: Record<string, Tier> = {
+const TIERS: Record<TierKey, Tier> = {
   auth: { maxTokens: 5, refillRate: 5 / 60 },
   expensive: { maxTokens: 10, refillRate: 10 / 60 },
   default: { maxTokens: 30, refillRate: 30 / 60 },
@@ -78,7 +73,7 @@ const store = new Map<
 
 function inMemoryRateLimit(
   ip: string,
-  tierKey: TierKey
+  tierKey: TierKey,
 ): { ok: boolean; retryAfter: number } {
   const tier = TIERS[tierKey];
   const key = `${tierKey}|${ip}`;
@@ -94,7 +89,7 @@ function inMemoryRateLimit(
   entry.lastRefill = now; // Update FIRST to prevent double-counting window
   entry.tokens = Math.min(
     tier.maxTokens,
-    entry.tokens + elapsed * tier.refillRate
+    entry.tokens + elapsed * tier.refillRate,
   );
 
   if (entry.tokens >= 1) {
@@ -111,7 +106,7 @@ function inMemoryRateLimit(
 let reqCount = 0;
 const MAX_STORE_SIZE = 10_000;
 
-function maybeCleanup() {
+function maybeCleanup(): void {
   reqCount += 1;
   if (store.size < MAX_STORE_SIZE && reqCount % 200 !== 0) return;
 
@@ -130,19 +125,6 @@ function maybeCleanup() {
   }
 }
 
-// ─── Upstash failure logging (throttled) ──────────────────────
-
-let lastUpstashLogMs = 0;
-const UPSTASH_LOG_INTERVAL_MS = 60_000;
-
-function logUpstashFailure(err: unknown): void {
-  const now = Date.now();
-  if (now - lastUpstashLogMs < UPSTASH_LOG_INTERVAL_MS) return;
-  lastUpstashLogMs = now;
-  const msg = err instanceof Error ? err.message : String(err);
-  console.warn(`[middleware] Upstash rate-limiter failed, falling back to in-memory: ${msg}`);
-}
-
 // ─── CSRF / Content-Type constants ────────────────────────────
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -152,8 +134,7 @@ const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
 
-  // ── Rate limit ──
-  // Self-hosted behind nginx: trust X-Real-IP set by nginx proxy,
+  // Self-hosted behind nginx: trust X-Real-IP set by the nginx config,
   // fallback to first entry of X-Forwarded-For (real client IP),
   // last resort: "unknown" (shared bucket — aggressive limiting).
   const realIp = request.headers.get("x-real-ip");
@@ -163,42 +144,13 @@ export async function middleware(request: NextRequest) {
 
   const tierKey = getTierKey(pathname);
 
-  // Try Upstash first (production-grade, distributed across instances).
-  // If it throws — most commonly quota exhaustion ("max requests limit
-  // exceeded") or transient network errors — fall back to the in-memory
-  // limiter so the entire `/api/*` surface doesn't 500. We log the error
-  // once per minute (cheap throttle via timestamp bucket) to avoid log spam.
-  let upstashFailed = false;
-  if (upstashLimiters) {
-    try {
-      const { success, reset } = await upstashLimiters[tierKey].limit(ip);
-
-      if (!success) {
-        const retryAfter = Math.ceil((reset - Date.now()) / 1000);
-        return NextResponse.json(
-          { error: "Too many requests. Please try again later." },
-          {
-            status: 429,
-            headers: { "Retry-After": String(Math.max(retryAfter, 1)) },
-          }
-        );
-      }
-    } catch (err) {
-      upstashFailed = true;
-      logUpstashFailure(err);
-    }
-  }
-
-  if (!upstashLimiters || upstashFailed) {
-    maybeCleanup();
-    const { ok, retryAfter } = inMemoryRateLimit(ip, tierKey);
-
-    if (!ok) {
-      return NextResponse.json(
-        { error: "Too many requests. Please try again later." },
-        { status: 429, headers: { "Retry-After": String(retryAfter) } }
-      );
-    }
+  maybeCleanup();
+  const { ok, retryAfter } = inMemoryRateLimit(ip, tierKey);
+  if (!ok) {
+    return NextResponse.json(
+      { error: "Too many requests. Please try again later." },
+      { status: 429, headers: { "Retry-After": String(retryAfter) } },
+    );
   }
 
   // ── Content-Type + CSRF checks for mutating requests ──
@@ -209,10 +161,7 @@ export async function middleware(request: NextRequest) {
     if (request.method !== "DELETE" || hasBody) {
       const contentType = request.headers.get("content-type");
       if (!contentType || !contentType.includes("application/json")) {
-        return NextResponse.json(
-          { error: "Bad Request" },
-          { status: 415 }
-        );
+        return NextResponse.json({ error: "Bad Request" }, { status: 415 });
       }
     }
 

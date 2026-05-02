@@ -5,76 +5,12 @@ import { getAuthAddress } from "@/lib/auth/session";
 import { getUser, getAccount, getMarketStats } from "@/lib/n1/client";
 import { resolveMarket, validateLeverage, ensureMarketCache, TIERS } from "@/lib/n1/constants";
 import { storePreview, consumePreview } from "@/lib/n1/preview-store";
-import { orderLimiter, safeRateLimit } from "@/lib/ratelimit";
+import { RATE_LIMITS, safeRateLimit } from "@/lib/ratelimit";
+import { checkIdempotency, storeIdempotency } from "@/lib/idempotency";
 
-// ─── Idempotency Key Store ──────────────────────────────────────
-// Prevents double-execution of orders from network retries.
-
-// ─── Idempotency Store (Redis in prod, in-memory fallback) ───────
-const IDEMPOTENCY_TTL_S = 300; // 5 minutes
-const IDEMPOTENCY_PREFIX = "idem:";
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let idempRedis: any = null;
-async function getIdempRedis() {
-  if (idempRedis) return idempRedis;
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-  if (url && token) {
-    const { Redis } = await import("@upstash/redis");
-    idempRedis = new Redis({ url, token });
-    return idempRedis;
-  }
-  // In production, Redis is required for cross-instance idempotency
-  if (process.env.NODE_ENV === "production") {
-    console.error("[SECURITY] Redis not configured — idempotency fallback to in-memory (per-instance only)");
-  }
-  return null;
-}
-
-// In-memory fallback for dev
-const memIdempotency = new Map<string, { result: unknown; createdAt: number }>();
-
-async function checkIdempotency(key: string): Promise<unknown | null> {
-  const r = await getIdempRedis();
-  if (r) {
-    const raw = await r.get(`${IDEMPOTENCY_PREFIX}${key}`);
-    if (!raw) return null;
-    return typeof raw === "string" ? JSON.parse(raw) : raw;
-  }
-  // In-memory fallback
-  const entry = memIdempotency.get(key);
-  if (!entry) return null;
-  if (Date.now() - entry.createdAt > IDEMPOTENCY_TTL_S * 1000) {
-    memIdempotency.delete(key);
-    return null;
-  }
-  return entry.result;
-}
-
-async function storeIdempotency(key: string, result: unknown): Promise<void> {
-  const r = await getIdempRedis();
-  if (r) {
-    await r.set(`${IDEMPOTENCY_PREFIX}${key}`, JSON.stringify(result), { ex: IDEMPOTENCY_TTL_S });
-    return;
-  }
-  // In-memory fallback — evict expired entries first, then oldest if still full
-  const now = Date.now();
-  if (memIdempotency.size >= 500) {
-    for (const [k, v] of memIdempotency) {
-      if (now - (v as { createdAt: number }).createdAt > IDEMPOTENCY_TTL_S * 1000) {
-        memIdempotency.delete(k);
-      }
-    }
-    // If still over limit, evict oldest entries
-    while (memIdempotency.size >= 500) {
-      const oldest = memIdempotency.keys().next().value;
-      if (oldest) memIdempotency.delete(oldest);
-      else break;
-    }
-  }
-  memIdempotency.set(key, { result, createdAt: Date.now() });
-}
+// Idempotency-key store for retry safety lives in lib/idempotency.ts
+// (Postgres primary, in-memory fallback). Prevents double-execution of
+// orders if a client retries the same `Idempotency-Key` header value.
 
 // ─── Zod Schemas ────────────────────────────────────────────────
 
@@ -119,7 +55,7 @@ export async function POST(req: Request) {
 
   // Per-user rate limit on order operations (graceful Upstash fallback)
   {
-    const { success } = await safeRateLimit(orderLimiter, address, "order:", 30);
+    const { success } = await safeRateLimit(address, "order:", RATE_LIMITS.order);
     if (!success) {
       return NextResponse.json({ error: "Too many requests. Please wait." }, { status: 429 });
     }

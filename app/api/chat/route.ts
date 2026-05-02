@@ -4,7 +4,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import * as Sentry from "@sentry/nextjs";
 import { z } from "zod";
 import { getAuthAddress } from "@/lib/auth/session";
-import { chatLimiter, safeRateLimit } from "@/lib/ratelimit";
+import { RATE_LIMITS, safeRateLimit } from "@/lib/ratelimit";
 import {
   getMarketStats,
   getOrderbook,
@@ -312,7 +312,7 @@ export async function POST(req: Request) {
 
   // Per-user rate limit on AI calls (expensive) — graceful Upstash fallback
   {
-    const { success } = await safeRateLimit(chatLimiter, walletAddress, "chat:", 10);
+    const { success } = await safeRateLimit(walletAddress, "chat:", RATE_LIMITS.chat);
     if (!success) {
       return new Response("Too many requests. Please wait a moment.", { status: 429 });
     }
