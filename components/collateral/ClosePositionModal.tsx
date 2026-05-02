@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useRealtimePrices } from "@/hooks/useRealtimePrices";
+import { useNordMarketTicker } from "@/hooks/useNordMarketTicker";
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -61,10 +61,12 @@ export function ClosePositionModal({
   const [step, setStep] = useState<Step>("input");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Real-time price via WebSocket — updates every ~100ms
+  // Real-time price via the Nord WS singleton manager. Subscribes only
+  // while the modal is open; tears down on close so the manager can drop
+  // the trade subscription if no other component needs it.
   const wsSymbol = position.symbol.replace(/\//, "");
-  const realtimePrices = useRealtimePrices(isOpen ? [wsSymbol] : []);
-  const livePrice = realtimePrices[wsSymbol] ?? position.markPrice;
+  const { lastPrice } = useNordMarketTicker(wsSymbol, { enabled: isOpen });
+  const livePrice = lastPrice ?? position.markPrice;
 
   const closeSize = position.absSize * (sizePercent / 100);
   const closeValue = closeSize * livePrice;

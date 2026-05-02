@@ -6,7 +6,7 @@ import { useAuth } from "@/lib/auth/context";
 import { DepositWithdrawModal } from "@/components/collateral/DepositWithdrawModal";
 import { ClosePositionModal } from "@/components/collateral/ClosePositionModal";
 import { EquityChart, invalidateEquityCache } from "@/components/charts/EquityChart";
-import { useRealtimePrices } from "@/hooks/useRealtimePrices";
+import { useNordPrices } from "@/hooks/useNordPrices";
 import { usePageActive } from "@/hooks/usePageActive";
 import { useOrderActions } from "@/hooks/useOrderActions";
 import { useNordAccount } from "@/hooks/useNordAccount";
@@ -207,8 +207,10 @@ export default function PortfolioPage() {
 
   const refreshingRef = useRef(false);
 
-  // Real-time prices via WebSocket — subscribe to positions AND open orders
-  // N1 WS limit: max ~10 streams per connection, so chunk into groups
+  // Real-time prices via the Nord WS singleton manager — one socket
+  // multiplexes every position and open-order symbol. Phase 8b removed
+  // the chunked-by-10 ceremony the legacy hook needed for its per-call
+  // socket pattern.
   const allWsSymbols = useMemo(() => {
     const syms = new Set<string>();
     if (data?.positions) {
@@ -221,16 +223,10 @@ export default function PortfolioPage() {
     }
     return [...syms];
   }, [data?.positions, data?.openOrders]);
-  // Pause WS when tab is hidden (portfolio = visibility only, no idle timeout)
+  // Pause WS when tab is hidden (portfolio = visibility only, no idle
+  // timeout). The hook's own teardown drops the underlying subscriptions.
   const pageVisible = usePageActive(0);
-  const activeSymbols = pageVisible ? allWsSymbols : [];
-  const wsChunk1 = useMemo(() => activeSymbols.slice(0, 10), [activeSymbols]);
-  const wsChunk2 = useMemo(() => activeSymbols.slice(10, 20), [activeSymbols]);
-  const wsChunk3 = useMemo(() => activeSymbols.slice(20), [activeSymbols]);
-  const prices1 = useRealtimePrices(wsChunk1);
-  const prices2 = useRealtimePrices(wsChunk2);
-  const prices3 = useRealtimePrices(wsChunk3);
-  const realtimePrices = useMemo(() => ({ ...prices1, ...prices2, ...prices3 }), [prices1, prices2, prices3]);
+  const realtimePrices = useNordPrices(allWsSymbols, { enabled: pageVisible });
 
   // Order actions: cancel, edit, cancel all
   const { cancelOrder: doCancelOrder, cancelAllOrders, editOrder: doEditOrder, closePosition: doClosePosition, cancellingIds, closingSymbols, cancelAllProgress, lastError: orderActionError, clearError: clearOrderError } = useOrderActions();

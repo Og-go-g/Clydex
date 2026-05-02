@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useMemo } from "react";
 import Link from "next/link";
-import { useRealtimePrices } from "@/hooks/useRealtimePrices";
+import { useNordPrices } from "@/hooks/useNordPrices";
 
 interface MarketRow {
   id: number;
@@ -60,17 +60,14 @@ export default function MarketsPage() {
   const [tierFilter, setTierFilter] = useState<number | null>(null);
   const [sortBy, setSortBy] = useState<"symbol" | "volume" | "change">("volume");
 
-  // Real-time prices via WS — chunked by 10 (N1 WS limit)
+  // Real-time prices via the Nord WS singleton manager — one shared
+  // socket multiplexes every market's trade stream, so chunking by 10
+  // (a relic of the legacy hook's per-call socket pattern) is no longer
+  // needed.
   const allWsSymbols = useMemo(() =>
     markets.map(m => m.symbol.replace("-PERP", "").replace("/", "")),
   [markets]);
-  const wsC1 = useMemo(() => allWsSymbols.slice(0, 10), [allWsSymbols]);
-  const wsC2 = useMemo(() => allWsSymbols.slice(10, 20), [allWsSymbols]);
-  const wsC3 = useMemo(() => allWsSymbols.slice(20), [allWsSymbols]);
-  const p1 = useRealtimePrices(wsC1);
-  const p2 = useRealtimePrices(wsC2);
-  const p3 = useRealtimePrices(wsC3);
-  const livePrices = useMemo(() => ({ ...p1, ...p2, ...p3 }), [p1, p2, p3]);
+  const livePrices = useNordPrices(allWsSymbols);
 
   useEffect(() => {
     let cancelled = false;

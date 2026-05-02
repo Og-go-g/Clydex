@@ -2,7 +2,6 @@
 
 import { useEffect, useState, useRef, useCallback, useMemo, lazy, Suspense } from "react";
 import { useChartPanel } from "@/lib/chat/chart-panel-context";
-import { useRealtimePrices } from "@/hooks/useRealtimePrices";
 import { useOrderbookRatio } from "@/hooks/useOrderbookRatio";
 import { useCandleStream } from "@/hooks/useCandleStream";
 import { useNordAccount } from "@/hooks/useNordAccount";
@@ -114,13 +113,15 @@ export function ChartPanel() {
     setWsEnabled(isNordWsEnabledForSession());
   }, []);
 
-  // WS prices for the current market.
-  // - WS mode: useNordMarketTicker (multiplexed through manager).
-  // - Legacy mode: useRealtimePrices (own direct WS).
+  // Live price for the current market — multiplexed through the Nord WS
+  // singleton manager. Phase 8b removed the legacy direct-WS fallback;
+  // the kill-switch (`clydex.nordWs=0`) still gates account/candles
+  // dispatch, but the price ticker always rides the manager — even with
+  // the flag off this is just one more trade subscription on the
+  // already-open socket.
   const sym = `${baseAsset}USD`;
-  const legacyPrices = useRealtimePrices(isOpen && !wsEnabled ? [sym] : []);
-  const ticker = useNordMarketTicker(isOpen ? sym : null, { enabled: wsEnabled });
-  const livePrice = wsEnabled ? ticker.lastPrice ?? undefined : legacyPrices[sym];
+  const ticker = useNordMarketTicker(isOpen ? sym : null);
+  const livePrice = ticker.lastPrice ?? undefined;
 
   // WS orderbook ratio — direct WS, kept for now. Phase 6 cleanup will
   // route this through the manager (it computes bid/ask quote-volume

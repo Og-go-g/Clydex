@@ -4,7 +4,6 @@ import { useState, useEffect, useCallback, useRef, use, lazy, Suspense, useMemo 
 import Link from "next/link";
 import { TIERS } from "@/lib/n1/constants";
 import { useAuth } from "@/lib/auth/context";
-import { useRealtimePrices } from "@/hooks/useRealtimePrices";
 import { useCandleStream } from "@/hooks/useCandleStream";
 import { useNordAccount } from "@/hooks/useNordAccount";
 import { useNordMarketTicker } from "@/hooks/useNordMarketTicker";
@@ -337,18 +336,11 @@ export default function MarketDetailPage({
     };
   }, [isAuthenticated, market, wsEnabled]);
 
-  // Real-time price.
-  // - WS mode: useNordMarketTicker through the singleton manager (one
-  //   shared socket with the rest of the app).
-  // - Legacy mode: useRealtimePrices (own direct WS, single per page).
-  // Whichever path produces a number first wins; downstream code only
-  // reads the merged `livePrice`.
-  const wsSymbol = useMemo(() => market && !wsEnabled ? [market.symbol] : [], [market?.symbol, wsEnabled]);
-  const legacyPrices = useRealtimePrices(wsSymbol);
-  const ticker = useNordMarketTicker(market?.symbol ?? null, { enabled: wsEnabled });
-  const livePrice = wsEnabled
-    ? ticker.lastPrice ?? undefined
-    : market ? legacyPrices[market.symbol] : undefined;
+  // Real-time price via the Nord WS singleton manager. Phase 8b removed
+  // the per-page direct-WS fallback — every component in the app reads
+  // last-trade prints off the same multiplexed socket.
+  const ticker = useNordMarketTicker(market?.symbol ?? null);
+  const livePrice = ticker.lastPrice ?? undefined;
 
   // Chart interval + real-time candle stream.
   // - WS mode: useNordCandles routes events through the singleton

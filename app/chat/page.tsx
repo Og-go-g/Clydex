@@ -9,7 +9,7 @@ import { useChatSessions } from "@/lib/chat/context";
 import { getMessages, saveMessages } from "@/lib/chat/store";
 import { syncSessionToDb } from "@/lib/chat/sync";
 import { useAuth } from "@/lib/auth/context";
-import { useRealtimePrices } from "@/hooks/useRealtimePrices";
+import { useNordPrices } from "@/hooks/useNordPrices";
 import { useOrderExecution, isPreviewConsumed, isPreviewFailed, getConfirmedPosition } from "@/hooks/useOrderExecution";
 import { useOrderActions } from "@/hooks/useOrderActions";
 import { useNordAccount } from "@/hooks/useNordAccount";
@@ -430,16 +430,18 @@ function ChatContent({ chatId, chatMode, onModeChange }: { chatId: string; chatM
           if (oo) for (const o of oo) { if (o.symbol) syms.add(o.symbol); }
         }
         // Funding rates: NOT added to main priceSymbols — FundingRatesCard
-        // manages its own useRealtimePrices to avoid reconnect storm on the main WS
+        // tracks its own subset via useNordPrices (still routed through
+        // the singleton manager, no extra socket).
       }
     }
     return [...syms];
   }, [messages]);
 
-  // Pause all WS when user is idle >10min or tab hidden
+  // Pause all WS when user is idle >10min or tab hidden. The hook
+  // tears down its trade subscriptions when disabled, so the manager
+  // can drop them from the multiplexed socket entirely.
   const pageActive = usePageActive(10 * 60 * 1000);
-  const activeSymbols = pageActive ? priceSymbols : [];
-  const realtimePrices = useRealtimePrices(activeSymbols);
+  const realtimePrices = useNordPrices(priceSymbols, { enabled: pageActive });
 
   // Collect symbols of positions/orders that have been ACTUALLY closed/cancelled
   // Only mark as closed when the preview has been consumed (user clicked execute)
@@ -1103,21 +1105,16 @@ function FundingRatesCard({ data }: {
       .sort((a, b) => (a.marketId ?? 999) - (b.marketId ?? 999));
   }, [ratesKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Own WS connections for funding symbols — split into chunks of 10
-  // (N1 WS limit: max ~10 streams per connection)
+  // Funding-rate row prices — multiplexed onto the same Nord WS socket
+  // every other live-data hook in the app uses, so this card adds zero
+  // extra connections.
   const allWsSymbols = useMemo(() =>
     sorted.map(r => {
       const cleaned = r.symbol.replace("-PERP", "").replace("/", "");
       return cleaned.endsWith("USD") ? cleaned : cleaned + "USD";
     }),
   [sorted]);
-  const chunk1 = useMemo(() => allWsSymbols.slice(0, 10), [allWsSymbols]);
-  const chunk2 = useMemo(() => allWsSymbols.slice(10, 20), [allWsSymbols]);
-  const chunk3 = useMemo(() => allWsSymbols.slice(20), [allWsSymbols]);
-  const prices1 = useRealtimePrices(chunk1);
-  const prices2 = useRealtimePrices(chunk2);
-  const prices3 = useRealtimePrices(chunk3);
-  const livePrices = useMemo(() => ({ ...prices1, ...prices2, ...prices3 }), [prices1, prices2, prices3]);
+  const livePrices = useNordPrices(allWsSymbols);
 
   if (sorted.length === 0) return null;
 
