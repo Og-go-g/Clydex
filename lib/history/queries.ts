@@ -4,7 +4,6 @@ import {
   fetchRecentPnl,
   fetchRecentFunding,
 } from "./realtime";
-import { getLastSyncTime } from "./sync";
 import type {
   TradeHistoryRow,
   TradeWithPnlRow,
@@ -438,34 +437,68 @@ interface RealtimeParams extends PaginationParams {
 }
 
 /**
- * Realtime trade history: insert fresh API data into DB, then paginate from DB.
- * Efficient for any number of trades (no full-table load into memory).
+ * Realtime trade history: pull whatever's missing from the API, insert,
+ * then paginate from DB.
+ *
+ * Cursor strategy (changed 2026-05-02): we use `MAX(time)` from
+ * trade_history filtered by accountId, NOT the global `lastSyncAt` from
+ * sync_cursors. The latter is a wall-clock timestamp shared across all
+ * sync types — if any other type (pnl, funding) ran recently, the trade
+ * "since" jumps forward and any trades that fell into the gap (e.g. a
+ * race-window miss, or — pre-Phase 8c — silently lost to the
+ * one-sided ON CONFLICT) are NEVER pulled in by mini-sync.
+ *
+ * Reading `MAX(time) WHERE accountId=$1` makes the cursor self-healing:
+ * the next portfolio open always asks the API for everything that
+ * happened after our most recent stored trade, regardless of how
+ * sync_cursors got out of sync. Cost: one indexed MAX() per portfolio
+ * open. The (accountId, time DESC) index already exists, so this is
+ * O(1) bookkeeping.
+ *
+ * For brand-new users (no rows yet), we skip mini-sync — the first
+ * full syncAllHistory pulls everything and seeds MAX(time) for next time.
  */
 export async function getTradeHistoryRealtime(params: RealtimeParams): Promise<PagedResult<TradeWithPnlRow>> {
   const { walletAddr, accountId, marketId } = params;
 
-  // Mini-sync: fill the gap between last full sync and now.
-  // Only runs if user has been synced before (has a cursor).
-  // For new users, syncAllHistory handles the full download — mini-sync would
-  // be incomplete (capped at 500 records) and cause data gaps.
-  const lastSync = await getLastSyncTime(walletAddr);
-  if (lastSync) {
-    const since = lastSync.toISOString();
+  const sinceISO = await getLatestStoredTimeISO(accountId, "trade_history");
+  if (sinceISO !== null) {
     const [freshTrades, freshPnl] = await Promise.all([
-      fetchRecentTrades(accountId, walletAddr, since).catch(() => [] as TradeHistoryRow[]),
-      fetchRecentPnl(accountId, walletAddr, since).catch(() => [] as PnlHistoryRow[]),
+      fetchRecentTrades(accountId, walletAddr, sinceISO).catch((err) => {
+        console.error(`[realtime/trades] fetch failed for accountId=${accountId}:`, err);
+        return [] as TradeHistoryRow[];
+      }),
+      fetchRecentPnl(accountId, walletAddr, sinceISO).catch((err) => {
+        console.error(`[realtime/pnl] fetch failed for accountId=${accountId}:`, err);
+        return [] as PnlHistoryRow[];
+      }),
     ]);
 
-    if (freshTrades.length > 0) {
-      await insertFreshTrades(freshTrades);
-    }
-    if (freshPnl.length > 0) {
-      await insertFreshPnl(freshPnl);
-    }
+    if (freshTrades.length > 0) await insertFreshTrades(freshTrades);
+    if (freshPnl.length > 0) await insertFreshPnl(freshPnl);
   }
 
   // Paginate from DB (includes both old + freshly inserted data)
   return getTradeHistoryWithPnl({ walletAddr, marketId, limit: params.limit, offset: params.offset });
+}
+
+// ─── Internal: data-driven cursor lookup ──────────────────────────
+//
+// Returns the most recent `time` we've stored for this account, or null
+// if we have nothing yet. The result is the right `since` for the next
+// API fetch — guaranteed to be ≤ the actual last trade time, so we never
+// skip records.
+
+async function getLatestStoredTimeISO(
+  accountId: number,
+  table: "trade_history" | "funding_history",
+): Promise<string | null> {
+  const rows = await query<{ max_time: Date | null }>(
+    `SELECT MAX("time") AS max_time FROM ${table} WHERE "accountId" = $1`,
+    [accountId],
+  );
+  const t = rows[0]?.max_time;
+  return t ? t.toISOString() : null;
 }
 
 /**
@@ -484,14 +517,19 @@ export async function getOrderHistoryRealtime(params: RealtimeParams): Promise<P
 
 /**
  * Realtime funding history: mini-sync then paginate from DB.
+ *
+ * Same self-healing cursor approach as getTradeHistoryRealtime — see
+ * that function for the rationale.
  */
 export async function getFundingHistoryRealtime(params: RealtimeParams): Promise<PagedResult<FundingHistoryRow>> {
   const { walletAddr, accountId, marketId } = params;
 
-  const lastSync = await getLastSyncTime(walletAddr);
-  if (lastSync) {
-    const since = lastSync.toISOString();
-    const freshFunding = await fetchRecentFunding(accountId, walletAddr, since).catch(() => [] as FundingHistoryRow[]);
+  const sinceISO = await getLatestStoredTimeISO(accountId, "funding_history");
+  if (sinceISO !== null) {
+    const freshFunding = await fetchRecentFunding(accountId, walletAddr, sinceISO).catch((err) => {
+      console.error(`[realtime/funding] fetch failed for accountId=${accountId}:`, err);
+      return [] as FundingHistoryRow[];
+    });
     if (freshFunding.length > 0) {
       await insertFreshFunding(freshFunding);
     }

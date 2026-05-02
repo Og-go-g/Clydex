@@ -265,7 +265,18 @@ export default function PortfolioPage() {
     setHSyncing(true); setHSyncResults(null);
     try {
       const res = await fetch("/api/history/sync", { method: "POST", headers: { "Content-Type": "application/json" } });
-      if (res.ok) { const b = await res.json(); setHSyncResults(b.results); await checkHSyncStatus(); }
+      if (res.ok) {
+        const b = await res.json();
+        setHSyncResults(b.results);
+        await checkHSyncStatus();
+      } else if (res.status === 429) {
+        // Throttled — silent skip is fine, the previous sync's data is fresh enough.
+      } else {
+        // Surface non-success responses so a broken sync stops failing
+        // invisibly. Pre-Phase 8c, the only path that complained was a
+        // network throw — a 500 from the server slipped past unnoticed.
+        console.error(`[history] sync HTTP ${res.status}`);
+      }
     } catch (err) { console.error("[history] sync failed:", err); }
     finally { setHSyncing(false); }
   }, [checkHSyncStatus]);
@@ -1081,6 +1092,16 @@ export default function PortfolioPage() {
                   <div className="flex items-center gap-2 text-xs text-emerald-400">
                     <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
                     Syncing history from 01 Exchange...
+                  </div>
+                </div>
+              )}
+              {!hSyncing && hSyncResults && hSyncResults.some((r) => r.error) && (
+                <div className="border-b border-red-500/20 bg-red-500/5 px-4 py-2">
+                  <div className="flex items-start gap-2 text-xs text-red-400">
+                    <span className="font-medium">Partial sync:</span>
+                    <span className="opacity-80">
+                      {hSyncResults.filter((r) => r.error).map((r) => r.type).join(", ")} failed — DB shows last successful state. Retry from the Sync button.
+                    </span>
                   </div>
                 </div>
               )}

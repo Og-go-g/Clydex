@@ -181,15 +181,36 @@ async function syncTrades(accountId: number, walletAddr: string, since?: string,
       const orderIds = page.data.map((t) => (t.orderId != null ? String(t.orderId) : null));
 
       const result = await historyPool.query(
-        // ON CONFLICT without target — catches ANY unique violation on the
-        // table. Keeps INSERT working across unique-index refactors
-        // (e.g. TimescaleDB hypertable requires (tradeId, time) on 2026-04-19).
+        // Explicit ON CONFLICT target = (accountId, tradeId, time).
+        //
+        // Pre-2026-05-02 we used target-less ON CONFLICT, which silently
+        // matched the OLD (tradeId, time) UNIQUE — and that constraint
+        // discarded the second participant of every multi-party trade
+        // (taker dropped if maker synced first, or vice versa). Months
+        // of data loss masquerading as "sync ran cleanly". See
+        // sql/2026-05-02_trade_history_two_sided.sql for the full
+        // post-mortem.
+        //
+        // The new key (accountId, tradeId, time) lets each side coexist
+        // because each row has its own accountId. ON CONFLICT therefore
+        // only fires on a true re-sync of the same participant's view
+        // of a trade — which is what we want.
         `INSERT INTO trade_history (id, "tradeId", "accountId", "walletAddr", "marketId", symbol, side, size, price, role, fee, "time", "orderId")
          SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::text[], $5::int[], $6::text[], $7::text[], $8::numeric[], $9::numeric[], $10::text[], $11::numeric[], $12::timestamptz[], $13::text[])
-         ON CONFLICT DO NOTHING`,
+         ON CONFLICT ("accountId", "tradeId", "time") DO NOTHING`,
         [ids, tradeIds, accountIds, wallets, marketIds, symbols, sides, sizes, prices, roles, fees, times, orderIds],
       );
-      totalInserted += result.rowCount ?? 0;
+      const insertedThisPage = result.rowCount ?? 0;
+      totalInserted += insertedThisPage;
+      // Surface fetched/inserted gap so a future B1-class data-loss bug
+      // (silent ON CONFLICT discard) shows up in `docker compose logs`.
+      // We only log when there's a discrepancy or activity worth noting —
+      // a fully-deduplicated re-sync of an inactive account stays silent.
+      if (page.data.length > 0 && (insertedThisPage === 0 || page.data.length !== insertedThisPage)) {
+        console.log(
+          `[history/sync] trades ${role}=${accountId} fetched=${page.data.length} inserted=${insertedThisPage}`,
+        );
+      }
 
       cursor = page.cursor;
       roleHasMore = page.hasMore && !!cursor;
@@ -247,21 +268,41 @@ async function syncPnl(accountId: number, walletAddr: string, since?: string, ct
 }
 
 async function syncFunding(accountId: number, walletAddr: string, since?: string, ctx?: FetchContext): Promise<SyncResult> {
+  // Pagination strategy for /account/{id}/history/funding:
+  //
+  // The 01 API returns a `nextStartInclusive` cursor that LOOKS pagey
+  // ("2026-05-02 9:00:01.717604 +00:00:00_0") but rejects with 400 when
+  // passed back via &startInclusive=. Confirmed empirically 2026-05-02
+  // — the URL form the API returns is not consumable by the same API.
+  //
+  // We sidestep it: the funding endpoint is "ordered from present to
+  // past" and supports `since` (lower bound, inclusive) and `until`
+  // (upper bound, defaults to now). For each subsequent page we set
+  // `until = MIN(time)` of the previous page to walk further into the
+  // past while keeping the same `since`. Events at exactly that
+  // boundary time get re-fetched and are absorbed by ON CONFLICT.
+  //
+  // Loop guards:
+  //   - MAX_PAGES caps runaway pagination (a stuck cursor would otherwise
+  //     spin forever — possible if every event in a page shares the
+  //     same `time`).
+  //   - If a page produces ZERO new inserts AND the boundary time
+  //     hasn't moved, we break — no further progress possible.
+  const MAX_PAGES = 200; // 200 × 50 = 10k events per single sync, plenty
   let totalInserted = 0;
-  let cursor: string | undefined;
-  let hasMore = true;
+  let until: string | undefined;
+  let prevUntil: string | undefined;
 
-  while (hasMore) {
+  for (let page_i = 0; page_i < MAX_PAGES; page_i++) {
     let url = `${API_BASE}/account/${accountId}/history/funding?pageSize=${PAGE_SIZE}`;
     if (since) url += `&since=${encodeURIComponent(since)}`;
-    if (cursor) url += `&startInclusive=${encodeURIComponent(String(cursor))}`;
+    if (until) url += `&until=${encodeURIComponent(until)}`;
 
     const page = await fetchPage<ApiFunding>(url, ctx);
     if (page.data.length === 0) break;
 
     const d = page.data;
     const result = await historyPool.query(
-      // Same constraint swap as pnl_history — see unique-by-accountid migration.
       `INSERT INTO funding_history (id, "accountId", "walletAddr", "marketId", symbol, "fundingPnl", "positionSize", "time")
        SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::int[], $5::text[], $6::numeric[], $7::numeric[], $8::timestamptz[])
        ON CONFLICT ("accountId", "marketId", "time") DO NOTHING`,
@@ -276,10 +317,21 @@ async function syncFunding(accountId: number, walletAddr: string, since?: string
         d.map((f) => new Date(f.time)),
       ],
     );
-    totalInserted += result.rowCount ?? 0;
+    const insertedThisPage = result.rowCount ?? 0;
+    totalInserted += insertedThisPage;
 
-    cursor = page.cursor;
-    hasMore = page.hasMore && !!cursor;
+    // Find the oldest `time` in this page → next page's `until`.
+    let oldest: string | undefined;
+    for (const f of d) {
+      if (oldest === undefined || f.time < oldest) oldest = f.time;
+    }
+
+    // Termination: API returned data older than what we already covered
+    // AND no new rows landed → boundary is stuck, nothing more to do.
+    if (insertedThisPage === 0 && oldest === prevUntil) break;
+
+    prevUntil = until;
+    until = oldest;
   }
 
   return { type: "funding", inserted: totalInserted, hasMore: false };

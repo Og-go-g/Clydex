@@ -11,29 +11,35 @@ datasource db {
 //  TradeHistory — filled trades from 01 Exchange
 // ---------------------------------------------------------------------------
 model TradeHistory {
-  id          String   @id @default(cuid())
-  tradeId     String                         // 01 Exchange trade ID (dedup key — globally unique on-chain)
-  accountId   Int                            // N1 account ID
-  walletAddr  String                         // Solana wallet address (for lookup)
-  marketId    Int
-  symbol      String                         // "BTC-PERP"
-  side        String                         // "Long" | "Short" (user's position direction from this trade)
-  size        Decimal  @db.Decimal(30, 18)   // baseSize
-  price       Decimal  @db.Decimal(30, 18)   // fill price
-  role        String                         // "taker" | "maker"
-  fee         Decimal  @db.Decimal(30, 18)   // fee paid
-  time        DateTime                       // trade timestamp from API
-  orderId     String?                        // Parent order ID. Used to derive "Order History" via GROUP BY — replaces the standalone order_history table as of 2026-04-19.
+  id         String   @id @default(cuid())
+  tradeId    String // 01 Exchange trade ID (dedup key — globally unique on-chain)
+  accountId  Int // N1 account ID
+  walletAddr String // Solana wallet address (for lookup)
+  marketId   Int
+  symbol     String // "BTC-PERP"
+  side       String // "Long" | "Short" (user's position direction from this trade)
+  size       Decimal  @db.Decimal(30, 18) // baseSize
+  price      Decimal  @db.Decimal(30, 18) // fill price
+  role       String // "taker" | "maker"
+  fee        Decimal  @db.Decimal(30, 18) // fee paid
+  time       DateTime // trade timestamp from API
+  orderId    String? // Parent order ID. Used to derive "Order History" via GROUP BY — replaces the standalone order_history table as of 2026-04-19.
 
   // TimescaleDB hypertable requires `time` inside every unique index.
-  // Pre-existing @unique(tradeId) migrated to this composite on 2026-04-19.
-  // tradeId is still effectively globally unique (one tradeId → one time),
-  // so the composite preserves the same invariant.
-  @@unique([tradeId, time])
+  //
+  // Original (Prisma init):  @@unique([tradeId])
+  // 2026-04-19 hypertable:   @@unique([tradeId, time])
+  // 2026-05-02 two-sided:    @@unique([accountId, tradeId, time])
+  //
+  // Why accountId in the key: every trade on 01 has TWO participants
+  // (taker + maker). Storing one row per trade silently dropped the
+  // other side via ON CONFLICT DO NOTHING — see Phase 8c plan and
+  // sql/2026-05-02_trade_history_two_sided.sql for the full incident.
+  @@unique([accountId, tradeId, time])
   @@index([walletAddr, time])
   @@index([walletAddr, marketId])
   @@index([accountId, time])
-  @@index([accountId, orderId])              // supports GROUP BY orderId for /api/history/orders
+  @@index([accountId, orderId]) // supports GROUP BY orderId for /api/history/orders
   @@map("trade_history")
 }
 
@@ -41,17 +47,21 @@ model TradeHistory {
 //  PnlHistory — realized PnL per position close
 // ---------------------------------------------------------------------------
 model PnlHistory {
-  id                 String   @id @default(cuid())
-  accountId          Int
-  walletAddr         String
-  marketId           Int
-  symbol             String
-  tradingPnl         Decimal  @db.Decimal(30, 18)
-  settledFundingPnl  Decimal  @db.Decimal(30, 18)
-  positionSize       Decimal  @db.Decimal(30, 18)
-  time               DateTime
+  id                String   @id @default(cuid())
+  accountId         Int
+  walletAddr        String
+  marketId          Int
+  symbol            String
+  tradingPnl        Decimal  @db.Decimal(30, 18)
+  settledFundingPnl Decimal  @db.Decimal(30, 18)
+  positionSize      Decimal  @db.Decimal(30, 18)
+  time              DateTime
 
-  @@unique([walletAddr, marketId, time])
+  // 2026-04-18 swap from (walletAddr, marketId, time) → (accountId, marketId, time)
+  // to prevent placeholder/real walletAddr duplicate inserts when bulk sync
+  // and per-user sync touch the same row from different keys. See
+  // sql/2026-04-18_unique_by_accountid.sql for the original incident.
+  @@unique([accountId, marketId, time])
   @@index([walletAddr, time])
   @@index([accountId, time])
   @@map("pnl_history")
@@ -61,16 +71,18 @@ model PnlHistory {
 //  FundingHistory — funding payments
 // ---------------------------------------------------------------------------
 model FundingHistory {
-  id            String   @id @default(cuid())
-  accountId     Int
-  walletAddr    String
-  marketId      Int
-  symbol        String
-  fundingPnl    Decimal  @db.Decimal(30, 18)
-  positionSize  Decimal  @db.Decimal(30, 18)
-  time          DateTime
+  id           String   @id @default(cuid())
+  accountId    Int
+  walletAddr   String
+  marketId     Int
+  symbol       String
+  fundingPnl   Decimal  @db.Decimal(30, 18)
+  positionSize Decimal  @db.Decimal(30, 18)
+  time         DateTime
 
-  @@unique([walletAddr, marketId, time])
+  // Same accountId-scoped swap as pnl_history (see comment above and
+  // sql/2026-04-18_unique_by_accountid.sql).
+  @@unique([accountId, marketId, time])
   @@index([walletAddr, time])
   @@index([accountId, time])
   @@map("funding_history")
@@ -84,7 +96,7 @@ model DepositHistory {
   accountId  Int
   walletAddr String
   amount     Decimal  @db.Decimal(30, 18)
-  balance    Decimal  @db.Decimal(30, 18)   // balance after deposit
+  balance    Decimal  @db.Decimal(30, 18) // balance after deposit
   tokenId    Int
   time       DateTime
 
@@ -97,14 +109,14 @@ model DepositHistory {
 //  WithdrawalHistory — USDC withdrawals
 // ---------------------------------------------------------------------------
 model WithdrawalHistory {
-  id          String   @id @default(cuid())
-  accountId   Int
-  walletAddr  String
-  amount      Decimal  @db.Decimal(30, 18)
-  balance     Decimal  @db.Decimal(30, 18)  // balance after withdrawal
-  fee         Decimal  @db.Decimal(30, 18)
-  destPubkey  String                         // destination wallet
-  time        DateTime
+  id         String   @id @default(cuid())
+  accountId  Int
+  walletAddr String
+  amount     Decimal  @db.Decimal(30, 18)
+  balance    Decimal  @db.Decimal(30, 18) // balance after withdrawal
+  fee        Decimal  @db.Decimal(30, 18)
+  destPubkey String // destination wallet
+  time       DateTime
 
   @@unique([walletAddr, time, amount])
   @@index([walletAddr, time])
@@ -119,8 +131,8 @@ model LiquidationHistory {
   accountId       Int
   walletAddr      String
   fee             Decimal  @db.Decimal(30, 18)
-  liquidationKind String                     // "partial" | "full"
-  margins         Json?                      // raw margins snapshot
+  liquidationKind String // "partial" | "full"
+  margins         Json? // raw margins snapshot
   time            DateTime
 
   @@unique([walletAddr, time, fee])
@@ -138,8 +150,8 @@ model LiquidationHistory {
 model SyncCursor {
   id         String   @id @default(cuid())
   walletAddr String
-  type       String                          // "trades" | "orders" | "pnl" | "funding" | "deposits" | "withdrawals" | "liquidations"
-  cursor     String?                         // API cursor or last timestamp
+  type       String // "trades" | "orders" | "pnl" | "funding" | "deposits" | "withdrawals" | "liquidations"
+  cursor     String? // API cursor or last timestamp
   lastSyncAt DateTime @default(now())
 
   @@unique([walletAddr, type])
@@ -153,7 +165,7 @@ model VolumeCalendar {
   id          String  @id @default(cuid())
   accountId   Int
   walletAddr  String
-  date        String                          // "2026-03-29"
+  date        String // "2026-03-29"
   volume      Decimal @db.Decimal(30, 18)
   makerVolume Decimal @db.Decimal(30, 18)
   takerVolume Decimal @db.Decimal(30, 18)
@@ -192,8 +204,8 @@ model PnlTotals {
 // ---------------------------------------------------------------------------
 model AccountPubkey {
   accountId      Int       @id
-  pubkey         String?                        // NULL when notFound or transient failure
-  notFound       Boolean   @default(false)      // 404 from /account/{id}/pubkey
+  pubkey         String? // NULL when notFound or transient failure
+  notFound       Boolean   @default(false) // 404 from /account/{id}/pubkey
   failedAttempts Int       @default(0) @db.SmallInt
   resolvedAt     DateTime?
   lastCheckedAt  DateTime  @default(now())
