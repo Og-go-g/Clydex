@@ -1,3 +1,5 @@
+import * as Sentry from "@sentry/nextjs";
+
 import { query, toCamelRows } from "@/lib/db-history";
 import {
   fetchRecentTrades,
@@ -476,6 +478,14 @@ export async function getTradeHistoryRealtime(params: RealtimeParams): Promise<P
 
     if (freshTrades.length > 0) await insertFreshTrades(freshTrades);
     if (freshPnl.length > 0) await insertFreshPnl(freshPnl);
+    if (freshTrades.length > 0 || freshPnl.length > 0) {
+      Sentry.addBreadcrumb({
+        category: "history-sync",
+        message: "realtime mini-sync pulled fresh rows",
+        level: "info",
+        data: { accountId, freshTrades: freshTrades.length, freshPnl: freshPnl.length, since: sinceISO },
+      });
+    }
   }
 
   // Paginate from DB (includes both old + freshly inserted data)

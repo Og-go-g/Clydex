@@ -1,3 +1,5 @@
+import * as Sentry from "@sentry/nextjs";
+
 import { historyPool, query, execute, uuid } from "@/lib/db-history";
 import { N1_MAINNET_URL } from "@/lib/n1/constants";
 import { ensureMarketCache, getCachedMarkets } from "@/lib/n1/constants";
@@ -5,6 +7,26 @@ import type { FetchContext } from "./fetch-context";
 import { retryableFetch } from "./fetch-context";
 import { recomputePnlTotals, recomputeVolumeCalendar, recomputeAggregates } from "./aggregate";
 import type { HistoryType, SyncResult, SyncProgress } from "./types";
+
+// ─── Sentry observability helper ──────────────────────────────────
+//
+// Soft-import pattern: Sentry SDK exports no-op'd functions when not
+// initialized, so calling addBreadcrumb / setTag in the worker
+// container (where sentry.server.config.ts isn't auto-loaded by
+// Next.js) just costs a function call. No try/catch needed; the SDK
+// handles uninitialized state internally.
+function syncBreadcrumb(
+  type: HistoryType,
+  accountId: number,
+  data: { fetched?: number; inserted?: number; error?: string; durationMs?: number },
+): void {
+  Sentry.addBreadcrumb({
+    category: "history-sync",
+    message: `${type} sync ${data.error ? "failed" : "completed"}`,
+    level: data.error ? "warning" : "info",
+    data: { type, accountId, ...data },
+  });
+}
 
 // ─── 01 Exchange API Types ────────────────────────────────────────
 
@@ -526,15 +548,18 @@ export async function syncAllHistory(
   for (const type of types) {
     const since = await getCursor(walletAddr, type);
     const syncFn = SYNC_FNS[type];
+    const t0 = Date.now();
 
     try {
       const result = await syncFn(accountId, walletAddr, since ?? undefined, ctx);
       results.push(result);
       await setCursor(walletAddr, type, new Date().toISOString());
+      syncBreadcrumb(type, accountId, { inserted: result.inserted, durationMs: Date.now() - t0 });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[history/sync] ${type} sync failed for ${walletAddr}:`, msg);
       results.push({ type, inserted: 0, hasMore: false, error: msg });
+      syncBreadcrumb(type, accountId, { error: msg, durationMs: Date.now() - t0 });
     }
 
     onProgress?.({ total: types.length, completed: results.length, results });
@@ -562,14 +587,17 @@ export async function syncHistoryType(
 
   const since = await getCursor(walletAddr, type);
   const syncFn = SYNC_FNS[type];
+  const t0 = Date.now();
 
   try {
     const result = await syncFn(accountId, walletAddr, since ?? undefined, ctx);
     await setCursor(walletAddr, type, new Date().toISOString());
+    syncBreadcrumb(type, accountId, { inserted: result.inserted, durationMs: Date.now() - t0 });
     return result;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[history/sync] ${type} sync failed for ${walletAddr}:`, msg);
+    syncBreadcrumb(type, accountId, { error: msg, durationMs: Date.now() - t0 });
     return { type, inserted: 0, hasMore: false, error: msg };
   }
 }

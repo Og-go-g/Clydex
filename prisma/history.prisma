@@ -146,15 +146,26 @@ model LiquidationHistory {
 
 // ---------------------------------------------------------------------------
 //  SyncCursor — tracks last synced position per wallet per history type
+//
+//  `accountId` was added 2026-04-18 (sql/2026-04-18_unique_by_accountid.sql)
+//  so cursors survive walletAddr swaps (placeholder → real after the link).
+//  Prod also has a PARTIAL index (`WHERE "accountId" IS NOT NULL`) created by
+//  that same SQL file — Prisma can't express the WHERE clause, so we declare
+//  a plain `@@index` here. The plain index is a no-op on top of the existing
+//  partial one (same key columns), and on fresh deploys via `prisma db push`
+//  the plain index alone is sufficient — the partial one is a perf
+//  optimisation, not a correctness requirement.
 // ---------------------------------------------------------------------------
 model SyncCursor {
   id         String   @id @default(cuid())
   walletAddr String
-  type       String // "trades" | "orders" | "pnl" | "funding" | "deposits" | "withdrawals" | "liquidations"
+  accountId  Int? // nullable — backfilled from raw tables; new syncs populate it directly
+  type       String // "trades" | "pnl" | "funding" | "deposits" | "withdrawals" | "liquidations"
   cursor     String? // API cursor or last timestamp
   lastSyncAt DateTime @default(now())
 
   @@unique([walletAddr, type])
+  @@index([accountId, type], map: "sync_cursors_accountid_type_idx")
   @@map("sync_cursors")
 }
 

@@ -145,10 +145,13 @@ export async function recomputePnlTotals(
  * One row per (walletAddr, date). Uses FILTER () clauses to split maker
  * vs taker. Idempotent — existing days upsert, new days insert.
  *
- * Note: trade_history has UNIQUE(tradeId), so if account A and account B
- * were opposite sides of the same trade we only keep the row for whichever
- * was synced first. In practice retail traders face market makers (not
- * synced), so this is a non-issue. Tracked as follow-up if it ever shows up.
+ * Per-account safety: WHERE "accountId" = $1 means we only ever see this
+ * one account's rows in trade_history. Phase 8c made trade_history
+ * two-sided (UNIQUE accountId, tradeId, time) — but the accountId filter
+ * keeps each call seeing exactly one row per (tradeId, role) for the
+ * account being aggregated, so there's no double-count. The DISTINCT ON
+ * below stays for a different reason: collapsing legacy placeholder
+ * vs real-walletAddr duplicates that pre-date the wallet linker.
  *
  * Returns number of days written (for logging).
  */
