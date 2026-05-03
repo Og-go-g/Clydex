@@ -3,6 +3,7 @@
 import { useEffect, useState, useRef, useCallback, useMemo, lazy, Suspense } from "react";
 import { useChartPanel } from "@/lib/chat/chart-panel-context";
 import { useOrderbookRatio } from "@/hooks/useOrderbookRatio";
+import { TradingSidebar } from "@/components/chat/TradingSidebar";
 import { useCandleStream } from "@/hooks/useCandleStream";
 import { useNordAccount } from "@/hooks/useNordAccount";
 import { useNordMarketTicker } from "@/hooks/useNordMarketTicker";
@@ -588,12 +589,10 @@ export function ChartPanel() {
                   />
                 </div>
                 <div className="flex w-1/2 min-w-0 flex-col border-l border-t border-[#262626]">
-                  {/* Placeholder for the next feature. Kept visually quiet
-                      so the orderbook stays the focal point until we
-                      decide what goes here. */}
-                  <div className="flex flex-1 items-center justify-center text-[10px] text-[#3a3a3a]">
-                    coming next
-                  </div>
+                  {/* Account snapshot + live trade tape — see
+                      components/chat/TradingSidebar.tsx for layout
+                      rationale (40 % equity/margin, 60 % trades). */}
+                  <TradingSidebar symbol={sym} baseAsset={baseAsset} />
                 </div>
               </div>
             )}
