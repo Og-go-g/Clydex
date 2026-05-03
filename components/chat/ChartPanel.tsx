@@ -589,10 +589,11 @@ export function ChartPanel() {
                   />
                 </div>
                 <div className="flex w-1/2 min-w-0 flex-col border-l border-t border-[#262626]">
-                  {/* Account snapshot + live trade tape — see
-                      components/chat/TradingSidebar.tsx for layout
-                      rationale (40 % equity/margin, 60 % trades). */}
-                  <TradingSidebar symbol={sym} baseAsset={baseAsset} />
+                  {/* 50/50 split inside the sidebar — Account on top,
+                      Calculator + Positions below. See
+                      components/chat/TradingSidebar.tsx for the
+                      layout rationale. */}
+                  <TradingSidebar symbol={sym} baseAsset={baseAsset} marketId={marketId} />
                 </div>
               </div>
             )}

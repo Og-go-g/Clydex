@@ -3,54 +3,78 @@
 /**
  * TradingSidebar — the right half of ChartPanel in Trade mode.
  *
- * Two stacked sections that surface the data a trader actually wants
- * in the moment, without leaving the chat:
+ * Mirrors the orderbook's 50/50 split aesthetic: this sidebar itself
+ * splits 50/50 between an Account snapshot (top) and a Trade Tools
+ * column (bottom). The bottom column further hosts a compact position
+ * sizing calculator above a scrollable list of currently-open
+ * positions, so the most-needed real-time bookkeeping is always
+ * visible without leaving the chat.
  *
- *   1. AccountSnapshot (top) — equity, free vs used margin, margin
- *      health bar, open-position count. Answers "how much can I
- *      trade right now?" at a glance.
+ * Three blocks, all driven from data the chat already loads:
  *
- *   2. RecentTrades (bottom) — live tape of the last ~30 fills on
- *      the currently-selected market. Reads as "tape" — direction
- *      and size flow over time, useful for sensing momentum before
- *      placing an order.
+ *   1. Account Snapshot — equity, free vs used margin, margin
+ *      health bar, open-position count. REST /api/account every
+ *      15 s + WS-event-driven debounced refetch.
  *
- * Data sources:
- *   - Account: REST /api/account every 15 s (light), refresh on
- *     account WS event when available.
- *   - Recent trades: pure WS via useRecentTrades — no extra socket
- *     because ws-manager multiplexes.
+ *   2. Position Calculator — fully client-side. Inputs: side,
+ *      leverage slider, USDC notional. Live outputs: required
+ *      margin, est. liquidation price, distance to liq, est. fees.
+ *      Uses the current mark price from the parent + the market's
+ *      IMF/MMF from the markets cache. Pure isolated-position
+ *      approximation for clarity; cross-margin true liq differs
+ *      slightly when other positions are open, but the estimate
+ *      is honest enough for sizing decisions before opening.
  *
- * Designed for a narrow column (50 % of ChartPanel width). Uses the
- * same dark/mono aesthetic as the orderbook for visual consistency.
+ *   3. Open Positions on this market — list of all open positions
+ *      across all markets, scrollable if many. Each row shows
+ *      side, size, entry, mark, unrealised PnL, distance to liq
+ *      and three quick-close buttons (25 / 50 / 100 %).
  */
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth/context";
 import { useNordAccount } from "@/hooks/useNordAccount";
-import { useRecentTrades } from "@/hooks/useRecentTrades";
+import { useNordMarketTicker } from "@/hooks/useNordMarketTicker";
+import { useOrderActions } from "@/hooks/useOrderActions";
+import { getCachedMarkets } from "@/lib/n1/constants";
+
+// ─── Props ────────────────────────────────────────────────────────
 
 interface TradingSidebarProps {
-  /** Bare market symbol, e.g. "ETHUSD". Drives the recent-trades stream. */
+  /** Bare market symbol, e.g. "ETHUSD" — drives calculator + symbol filter. */
   symbol: string;
-  /** Asset for the trades-block label, e.g. "ETH". */
+  /** Asset for short labels, e.g. "ETH". */
   baseAsset: string;
+  /** Numeric market id — used to look up IMF for the calculator. */
+  marketId: number;
+}
+
+// ─── Shared types ─────────────────────────────────────────────────
+
+interface OpenPosition {
+  symbol: string; // "ETH/USD"
+  bareSymbol: string; // "ETHUSD"
+  marketId: number;
+  side: "Long" | "Short";
+  isLong: boolean;
+  absSize: number;
+  entryPrice: number;
+  markPrice: number;
+  unrealisedPnl: number;
+  unrealisedPnlPct: number;
+  liqPrice: number;
+  liqDistancePct: number;
 }
 
 interface AccountSnapshot {
   exists: boolean;
   accountId?: number;
-  /** Net liquidation value — equity. */
   equity: number;
-  /** Total free margin available for new positions. */
   freeMargin: number;
-  /** Margin currently locked in open positions + unfilled orders. */
   usedMargin: number;
-  /** Initial margin fraction in use, 0..1+ (>1 means over-leveraged). */
   marginRatio: number;
-  /** Distance from liquidation, %. 100 = fresh, 0 = liquidating now. */
   marginHealth: number;
-  openPositions: number;
+  positions: OpenPosition[];
 }
 
 const EMPTY_SNAPSHOT: AccountSnapshot = {
@@ -60,8 +84,10 @@ const EMPTY_SNAPSHOT: AccountSnapshot = {
   usedMargin: 0,
   marginRatio: 0,
   marginHealth: 100,
-  openPositions: 0,
+  positions: [],
 };
+
+// ─── Formatters ───────────────────────────────────────────────────
 
 function fmtUsd(n: number, decimals = 2): string {
   if (!isFinite(n)) return "$0.00";
@@ -73,9 +99,15 @@ function fmtUsd(n: number, decimals = 2): string {
 }
 
 function fmtPrice(price: number): string {
+  if (!isFinite(price) || price <= 0) return "—";
   if (price >= 1000) return price.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   if (price >= 1) return price.toFixed(4);
   return price.toFixed(6);
+}
+
+function fmtPct(pct: number, decimals = 2): string {
+  if (!isFinite(pct)) return "—";
+  return `${pct >= 0 ? "+" : ""}${pct.toFixed(decimals)}%`;
 }
 
 function fmtSize(size: number): string {
@@ -84,19 +116,389 @@ function fmtSize(size: number): string {
   return size.toFixed(4);
 }
 
-function fmtTimeShort(ms: number): string {
-  const d = new Date(ms);
-  return d.toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+// ─── Liq math (isolated approximation) ────────────────────────────
+//
+// For a fresh isolated position with notional N, leverage L, IMF, MMF:
+//   margin    = N / L
+//   maintenance buffer = N * MMF
+//   loss to liq = margin - maintenance buffer
+//   liq distance frac = lossToLiq / N = 1/L - MMF
+//
+// So: liqPrice_long  = entry * (1 - (1/L - MMF))
+//     liqPrice_short = entry * (1 + (1/L - MMF))
+//
+// For L > 1/MMF the position is unliquidatable mathematically (over-
+// collateralised in maintenance terms) — we cap to "—" then.
+function calcLiqPrice(
+  entry: number,
+  leverage: number,
+  isLong: boolean,
+  mmf: number,
+): number {
+  if (!isFinite(entry) || entry <= 0 || !isFinite(leverage) || leverage <= 0) return 0;
+  const distFrac = 1 / leverage - mmf;
+  if (distFrac <= 0) return 0;
+  return isLong ? entry * (1 - distFrac) : entry * (1 + distFrac);
 }
 
-// ─── AccountSnapshot block ───────────────────────────────────────
+// ─── AccountSnapshotBlock ─────────────────────────────────────────
 
-function AccountSnapshotBlock() {
+function AccountSnapshotBlock({ snapshot, loading, isAuthenticated }: {
+  snapshot: AccountSnapshot;
+  loading: boolean;
+  isAuthenticated: boolean;
+}) {
+  if (!isAuthenticated) {
+    return (
+      <div className="flex flex-1 items-center justify-center px-3 text-center text-[10px] text-[#444]">
+        Connect a wallet to see account stats
+      </div>
+    );
+  }
+  if (loading) {
+    return (
+      <div className="flex flex-1 items-center justify-center text-[10px] text-[#3a3a3a]">
+        Loading…
+      </div>
+    );
+  }
+  if (!snapshot.exists) {
+    return (
+      <div className="flex flex-1 items-center justify-center px-3 text-center text-[10px] text-[#444]">
+        No 01 account yet
+      </div>
+    );
+  }
+
+  const healthColor =
+    snapshot.marginHealth >= 50 ? "text-green-400"
+    : snapshot.marginHealth >= 20 ? "text-amber-400"
+    : "text-red-400";
+  const healthBarColor =
+    snapshot.marginHealth >= 50 ? "bg-green-500/70"
+    : snapshot.marginHealth >= 20 ? "bg-amber-500/70"
+    : "bg-red-500/70";
+
+  return (
+    <div className="flex flex-col gap-1.5 px-3 py-2">
+      <div className="flex items-baseline justify-between">
+        <span className="text-[10px] uppercase tracking-wider text-[#555]">Equity</span>
+        <span className="font-mono text-sm font-semibold text-foreground">{fmtUsd(snapshot.equity)}</span>
+      </div>
+      <div className="flex items-baseline justify-between">
+        <span className="text-[10px] uppercase tracking-wider text-[#555]">Free</span>
+        <span className="font-mono text-[11px] text-foreground/85">{fmtUsd(snapshot.freeMargin)}</span>
+      </div>
+      <div className="flex items-baseline justify-between">
+        <span className="text-[10px] uppercase tracking-wider text-[#555]">Used</span>
+        <span className="font-mono text-[11px] text-foreground/85">
+          {fmtUsd(snapshot.usedMargin)}
+          <span className="ml-1 text-[#666]">({(snapshot.marginRatio * 100).toFixed(1)}%)</span>
+        </span>
+      </div>
+      <div className="flex flex-col gap-0.5 pt-1">
+        <div className="flex items-baseline justify-between">
+          <span className="text-[10px] uppercase tracking-wider text-[#555]">Health</span>
+          <span className={`font-mono text-[11px] ${healthColor}`}>{snapshot.marginHealth.toFixed(0)}%</span>
+        </div>
+        <div className="h-1 w-full overflow-hidden rounded-full bg-[#1a1a1a]">
+          <div className={`h-full transition-all ${healthBarColor}`} style={{ width: `${Math.max(2, snapshot.marginHealth)}%` }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── PositionCalculator ───────────────────────────────────────────
+
+const LEV_PRESETS = [1, 2, 5, 10, 20, 50] as const;
+
+function PositionCalculator({
+  symbol,
+  baseAsset,
+  markPrice,
+  imf,
+  mmf,
+  freeMargin,
+}: {
+  symbol: string;
+  baseAsset: string;
+  markPrice: number | null;
+  imf: number;
+  mmf: number;
+  freeMargin: number;
+}) {
+  const [side, setSide] = useState<"Long" | "Short">("Long");
+  const [notionalStr, setNotionalStr] = useState<string>("100");
+  const [leverage, setLeverage] = useState<number>(5);
+
+  const notional = Math.max(0, Number(notionalStr) || 0);
+  const maxLeverage = imf > 0 ? Math.floor(1 / imf) : 1;
+
+  const calc = useMemo(() => {
+    if (!markPrice || markPrice <= 0 || notional <= 0) {
+      return { margin: 0, baseSize: 0, liqPrice: 0, liqDistance: 0, takerFee: 0, makerFee: 0 };
+    }
+    const margin = notional / leverage;
+    const baseSize = notional / markPrice;
+    const liqPrice = calcLiqPrice(markPrice, leverage, side === "Long", mmf);
+    const liqDistance = liqPrice > 0 ? Math.abs((liqPrice - markPrice) / markPrice) * 100 : 0;
+    // Standard 01 fee tiers — taker 5 bps, maker 2 bps. Surface as
+    // pure estimate; actual fee depends on user's tier.
+    const takerFee = notional * 0.0005;
+    const makerFee = notional * 0.0002;
+    return { margin, baseSize, liqPrice, liqDistance, takerFee, makerFee };
+  }, [notional, leverage, markPrice, side, mmf]);
+
+  const overMargin = calc.margin > freeMargin && freeMargin > 0;
+  const overLeverage = leverage > maxLeverage;
+
+  return (
+    <div className="flex flex-col gap-1.5 px-3 py-2">
+      {/* Side toggle */}
+      <div className="flex gap-1">
+        <button
+          type="button"
+          onClick={() => setSide("Long")}
+          className={`flex-1 rounded border py-1 text-[10px] font-semibold transition-colors ${
+            side === "Long"
+              ? "border-green-500/40 bg-green-500/15 text-green-400"
+              : "border-[#262626] bg-[#141414] text-[#666] hover:text-foreground"
+          }`}
+        >
+          Long
+        </button>
+        <button
+          type="button"
+          onClick={() => setSide("Short")}
+          className={`flex-1 rounded border py-1 text-[10px] font-semibold transition-colors ${
+            side === "Short"
+              ? "border-red-500/40 bg-red-500/15 text-red-400"
+              : "border-[#262626] bg-[#141414] text-[#666] hover:text-foreground"
+          }`}
+        >
+          Short
+        </button>
+      </div>
+
+      {/* Notional input */}
+      <div className="flex items-center gap-1.5">
+        <span className="text-[10px] uppercase tracking-wider text-[#555] w-10">Size</span>
+        <div className="flex flex-1 items-center rounded border border-[#262626] bg-[#141414] px-2">
+          <input
+            type="number"
+            value={notionalStr}
+            onChange={(e) => setNotionalStr(e.target.value)}
+            className="flex-1 bg-transparent py-1 text-right font-mono text-[11px] text-foreground outline-none"
+            min={0}
+            step={10}
+          />
+          <span className="ml-1 text-[10px] text-[#555]">USDC</span>
+        </div>
+      </div>
+
+      {/* Leverage row — preset chips + current value */}
+      <div className="flex items-center gap-1.5">
+        <span className="text-[10px] uppercase tracking-wider text-[#555] w-10">Lev</span>
+        <div className="flex flex-1 gap-0.5">
+          {LEV_PRESETS.filter((l) => l <= maxLeverage).map((l) => (
+            <button
+              key={l}
+              type="button"
+              onClick={() => setLeverage(l)}
+              className={`flex-1 rounded border py-0.5 text-[10px] font-mono transition-colors ${
+                leverage === l
+                  ? "border-accent/40 bg-accent/15 text-accent"
+                  : "border-[#262626] bg-[#141414] text-[#666] hover:text-foreground"
+              }`}
+            >
+              {l}x
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Outputs */}
+      <div className="flex flex-col gap-0.5 border-t border-[#1a1a1a] pt-1.5">
+        <div className="flex items-baseline justify-between">
+          <span className="text-[10px] text-[#555]">{baseAsset} size</span>
+          <span className="font-mono text-[11px] text-foreground/85">
+            {markPrice ? fmtSize(calc.baseSize) : "—"}
+          </span>
+        </div>
+        <div className="flex items-baseline justify-between">
+          <span className="text-[10px] text-[#555]">Margin</span>
+          <span className={`font-mono text-[11px] ${overMargin ? "text-red-400" : "text-foreground/85"}`}>
+            {fmtUsd(calc.margin)}
+            {overMargin && <span className="ml-1 text-[9px]">over free</span>}
+          </span>
+        </div>
+        <div className="flex items-baseline justify-between">
+          <span className="text-[10px] text-[#555]">Liq price</span>
+          <span className={`font-mono text-[11px] ${
+            calc.liqPrice === 0 ? "text-[#444]"
+            : side === "Long" ? "text-red-400/80" : "text-red-400/80"
+          }`}>
+            {calc.liqPrice > 0 ? fmtPrice(calc.liqPrice) : "—"}
+            {calc.liqDistance > 0 && (
+              <span className="ml-1 text-[9px] text-[#666]">
+                ({side === "Long" ? "-" : "+"}{calc.liqDistance.toFixed(1)}%)
+              </span>
+            )}
+          </span>
+        </div>
+        <div className="flex items-baseline justify-between">
+          <span className="text-[10px] text-[#555]">Fees t/m</span>
+          <span className="font-mono text-[10px] text-[#888]">
+            {fmtUsd(calc.takerFee, 3)} / {fmtUsd(calc.makerFee, 3)}
+          </span>
+        </div>
+        {overLeverage && (
+          <div className="text-[9px] text-amber-400/80">
+            ⚠ Lev {leverage}x exceeds market max {maxLeverage}x
+          </div>
+        )}
+      </div>
+
+      {/* Symbol footer — context tied to the chart above */}
+      <div className="text-right text-[9px] text-[#3a3a3a]">{symbol}</div>
+    </div>
+  );
+}
+
+// ─── OpenPositionsList ────────────────────────────────────────────
+
+function OpenPositionsList({
+  positions,
+  isAuthenticated,
+  loading,
+  onAfterClose,
+}: {
+  positions: OpenPosition[];
+  isAuthenticated: boolean;
+  loading: boolean;
+  onAfterClose: () => void;
+}) {
+  const { closePosition, closingSymbols } = useOrderActions();
+
+  const doClose = useCallback(
+    async (pos: OpenPosition, fraction: number) => {
+      const size = pos.absSize * fraction;
+      try {
+        const ok = await closePosition({ symbol: pos.symbol, side: pos.side, size, slippage: 0.005 });
+        if (ok) onAfterClose();
+      } catch {
+        // useOrderActions surfaces the error in its lastError state;
+        // the popup-less sidebar UI doesn't need to re-toast it here.
+      }
+    },
+    [closePosition, onAfterClose],
+  );
+
+  if (!isAuthenticated) {
+    return (
+      <div className="flex flex-1 items-center justify-center px-3 text-center text-[10px] text-[#444]">
+        Connect a wallet
+      </div>
+    );
+  }
+  if (loading) {
+    return (
+      <div className="flex flex-1 items-center justify-center text-[10px] text-[#3a3a3a]">
+        Loading…
+      </div>
+    );
+  }
+  if (positions.length === 0) {
+    return (
+      <div className="flex flex-1 items-center justify-center px-3 text-center text-[10px] text-[#444]">
+        No open positions
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto">
+      {positions.map((pos) => {
+        const closingKey = `${pos.symbol}:${pos.side}`;
+        const isClosing = closingSymbols.has(closingKey);
+        return (
+          <div
+            key={pos.symbol}
+            className="flex flex-col gap-1 border-b border-[#1a1a1a] px-3 py-1.5"
+          >
+            {/* Top row: symbol + side + size */}
+            <div className="flex items-center justify-between text-[10px]">
+              <span className="font-mono text-foreground">{pos.symbol.replace("/", "/")}</span>
+              <span className={`font-mono ${pos.isLong ? "text-green-400" : "text-red-400"}`}>
+                {pos.side === "Long" ? "L" : "S"} {fmtSize(pos.absSize)}
+              </span>
+            </div>
+
+            {/* PnL + Liq */}
+            <div className="flex items-baseline justify-between text-[10px] font-mono">
+              <span className={pos.unrealisedPnl >= 0 ? "text-green-400" : "text-red-400"}>
+                {pos.unrealisedPnl >= 0 ? "+" : ""}
+                {fmtUsd(pos.unrealisedPnl)} ({fmtPct(pos.unrealisedPnlPct)})
+              </span>
+              <span className="text-[#666]">
+                Liq {fmtPrice(pos.liqPrice)}
+                {pos.liqDistancePct > 0 && (
+                  <span className="ml-0.5 text-[9px] text-[#555]">
+                    ({pos.liqDistancePct.toFixed(1)}%)
+                  </span>
+                )}
+              </span>
+            </div>
+
+            {/* Entry / mark */}
+            <div className="flex items-baseline justify-between text-[9px] text-[#555] font-mono">
+              <span>E {fmtPrice(pos.entryPrice)}</span>
+              <span>M {fmtPrice(pos.markPrice)}</span>
+            </div>
+
+            {/* Quick close buttons */}
+            <div className="flex gap-0.5 pt-0.5">
+              {[0.25, 0.5, 1].map((frac) => (
+                <button
+                  key={frac}
+                  type="button"
+                  onClick={() => doClose(pos, frac)}
+                  disabled={isClosing}
+                  className="flex-1 rounded border border-[#262626] bg-[#141414] py-0.5 text-[9px] font-mono text-[#888] transition-colors hover:border-accent/40 hover:bg-accent/10 hover:text-accent disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {isClosing ? "…" : `${(frac * 100).toFixed(0)}%`}
+                </button>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Top-level export ─────────────────────────────────────────────
+
+export function TradingSidebar({ symbol, baseAsset, marketId }: TradingSidebarProps) {
   const { isAuthenticated } = useAuth();
-  const [snap, setSnap] = useState<AccountSnapshot>(EMPTY_SNAPSHOT);
+  const [snapshot, setSnapshot] = useState<AccountSnapshot>(EMPTY_SNAPSHOT);
   const [loading, setLoading] = useState(true);
   const fetchRef = useRef<(() => Promise<void>) | null>(null);
   const debouncedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Live mark price for the selected market — feeds the calculator
+  // so it stays in sync with the chart.
+  const ticker = useNordMarketTicker(symbol);
+  const markPrice = ticker.lastPrice ?? null;
+
+  // IMF / MMF for the calculator. From cached markets list. MMF on 01
+  // is conventionally IMF/2 — we mirror that. If the market isn't in
+  // cache yet (rare on first paint), fall back to conservative defaults
+  // that match a Tier-3 market.
+  const market = useMemo(() => getCachedMarkets().find((m) => m.id === marketId), [marketId]);
+  const imf = market?.initialMarginFraction ?? 0.05;
+  const mmf = imf / 2;
 
   const fetchSnap = useCallback(async () => {
     try {
@@ -104,27 +506,66 @@ function AccountSnapshotBlock() {
       if (!res.ok) return;
       const data = await res.json();
       if (!data.exists) {
-        setSnap(EMPTY_SNAPSHOT);
+        setSnapshot(EMPTY_SNAPSHOT);
         return;
       }
-      // Field layout matches what /api/account returns; defaults guard
-      // against either side renaming a key without the other noticing.
       const margins = data.margins ?? {};
       const equity = Number(margins.mf ?? margins.omf ?? 0);
       const usedMargin = Number(margins.imf ?? 0);
       const freeMargin = Math.max(0, equity - usedMargin);
-      const mmf = Number(margins.mmf ?? 0);
-      // Margin health — mf vs mmf ratio. 100% when no positions held;
-      // approaches 0% as mf drops to mmf (liquidation threshold).
-      const marginHealth = equity > 0 && mmf > 0
-        ? Math.max(0, Math.min(100, ((equity - mmf) / equity) * 100))
+      const mmfAcct = Number(margins.mmf ?? 0);
+      const marginHealth = equity > 0 && mmfAcct > 0
+        ? Math.max(0, Math.min(100, ((equity - mmfAcct) / equity) * 100))
         : 100;
       const marginRatio = equity > 0 ? usedMargin / equity : 0;
-      const positions = Array.isArray(data.positions) ? data.positions : [];
-      const openPositions = positions.filter(
-        (p: { perp?: { baseSize?: number } }) => Math.abs(p.perp?.baseSize ?? 0) > 1e-12,
-      ).length;
-      setSnap({
+
+      const positions: OpenPosition[] = [];
+      type PerpPos = {
+        symbol?: string;
+        marketId?: number;
+        marketMmf?: number;
+        markPrice?: number;
+        perp?: { baseSize?: number; isLong?: boolean; price?: number };
+      };
+      for (const p of (data.positions ?? []) as PerpPos[]) {
+        if (!p.perp) continue;
+        const baseSize = Number(p.perp.baseSize ?? 0);
+        if (Math.abs(baseSize) < 1e-12) continue;
+        const isLong = p.perp.isLong ?? baseSize > 0;
+        const absSize = Math.abs(baseSize);
+        const entry = Number(p.perp.price ?? 0);
+        const mark = Number(p.markPrice ?? entry);
+        // Cross-margin liq estimate: use account-wide cushion.
+        const pmmf = Number(p.marketMmf ?? mmf);
+        const cushion = equity - mmfAcct;
+        const divisor = absSize * (isLong ? (1 - pmmf) : (1 + pmmf));
+        const liqPrice = Math.abs(divisor) > 1e-12
+          ? (isLong ? mark - cushion / divisor : mark + cushion / divisor)
+          : 0;
+        const liqDistancePct = liqPrice > 0 && mark > 0
+          ? Math.abs((liqPrice - mark) / mark) * 100
+          : 0;
+        const unrealisedPnl = (mark - entry) * baseSize; // baseSize is signed for long/short
+        const positionValue = entry * absSize;
+        const unrealisedPnlPct = positionValue > 0 ? (unrealisedPnl / positionValue) * 100 : 0;
+        const sym = p.symbol ?? "";
+        positions.push({
+          symbol: sym,
+          bareSymbol: sym.replace("/", ""),
+          marketId: Number(p.marketId ?? 0),
+          side: isLong ? "Long" : "Short",
+          isLong,
+          absSize,
+          entryPrice: entry,
+          markPrice: mark,
+          unrealisedPnl,
+          unrealisedPnlPct,
+          liqPrice: liqPrice > 0 && isFinite(liqPrice) ? liqPrice : 0,
+          liqDistancePct,
+        });
+      }
+
+      setSnapshot({
         exists: true,
         accountId: typeof data.accountId === "number" ? data.accountId : undefined,
         equity,
@@ -132,21 +573,17 @@ function AccountSnapshotBlock() {
         usedMargin,
         marginRatio,
         marginHealth,
-        openPositions,
+        positions,
       });
     } catch {
-      // Keep stale snapshot on failure — no UI flicker
+      // Keep stale snapshot on failure
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [mmf]);
 
   fetchRef.current = fetchSnap;
 
-  // WS-signal-driven refresh: any account event → debounce 250 ms →
-  // refetch the aggregate. Pattern matches what ChartPanel uses for
-  // the position overlay — one path of truth via REST, WS just
-  // schedules refetches.
   const onWsEvent = useCallback(() => {
     if (debouncedTimerRef.current) clearTimeout(debouncedTimerRef.current);
     debouncedTimerRef.current = setTimeout(() => {
@@ -154,17 +591,15 @@ function AccountSnapshotBlock() {
       void fetchRef.current?.();
     }, 250);
   }, []);
-  useNordAccount(snap.accountId ?? null, onWsEvent, { enabled: !!snap.accountId });
+  useNordAccount(snapshot.accountId ?? null, onWsEvent, { enabled: !!snapshot.accountId });
 
   useEffect(() => {
     if (!isAuthenticated) {
-      setSnap(EMPTY_SNAPSHOT);
+      setSnapshot(EMPTY_SNAPSHOT);
       setLoading(false);
       return;
     }
     void fetchSnap();
-    // Slow REST poll as a backstop — covers the case where the WS
-    // dropped without our health check noticing yet.
     const iv = window.setInterval(() => void fetchSnap(), 15_000);
     return () => {
       clearInterval(iv);
@@ -175,150 +610,52 @@ function AccountSnapshotBlock() {
     };
   }, [isAuthenticated, fetchSnap]);
 
-  if (!isAuthenticated) {
-    return (
-      <div className="flex flex-1 items-center justify-center px-3 text-center text-[10px] text-[#444]">
-        Connect a wallet to see account stats
-      </div>
-    );
-  }
-
-  if (loading) {
-    return (
-      <div className="flex flex-1 items-center justify-center text-[10px] text-[#3a3a3a]">
-        Loading…
-      </div>
-    );
-  }
-
-  if (!snap.exists) {
-    return (
-      <div className="flex flex-1 items-center justify-center px-3 text-center text-[10px] text-[#444]">
-        No 01 account yet
-      </div>
-    );
-  }
-
-  // Health colour bands — green > 50, amber 20-50, red < 20.
-  const healthColor =
-    snap.marginHealth >= 50 ? "text-green-400"
-    : snap.marginHealth >= 20 ? "text-amber-400"
-    : "text-red-400";
-  const healthBarColor =
-    snap.marginHealth >= 50 ? "bg-green-500/70"
-    : snap.marginHealth >= 20 ? "bg-amber-500/70"
-    : "bg-red-500/70";
-
-  return (
-    <div className="flex flex-col gap-2 px-3 py-2">
-      <div className="flex items-baseline justify-between">
-        <span className="text-[10px] uppercase tracking-wider text-[#555]">Equity</span>
-        <span className="font-mono text-sm font-semibold text-foreground">{fmtUsd(snap.equity)}</span>
-      </div>
-
-      <div className="flex items-baseline justify-between">
-        <span className="text-[10px] uppercase tracking-wider text-[#555]">Free margin</span>
-        <span className="font-mono text-[11px] text-foreground/85">{fmtUsd(snap.freeMargin)}</span>
-      </div>
-
-      <div className="flex items-baseline justify-between">
-        <span className="text-[10px] uppercase tracking-wider text-[#555]">Used margin</span>
-        <span className="font-mono text-[11px] text-foreground/85">
-          {fmtUsd(snap.usedMargin)}
-          <span className="ml-1 text-[#666]">({(snap.marginRatio * 100).toFixed(1)}%)</span>
-        </span>
-      </div>
-
-      <div className="flex flex-col gap-1 pt-1">
-        <div className="flex items-baseline justify-between">
-          <span className="text-[10px] uppercase tracking-wider text-[#555]">Health</span>
-          <span className={`font-mono text-[11px] ${healthColor}`}>
-            {snap.marginHealth.toFixed(0)}%
-          </span>
-        </div>
-        <div className="h-1 w-full overflow-hidden rounded-full bg-[#1a1a1a]">
-          <div className={`h-full transition-all ${healthBarColor}`} style={{ width: `${Math.max(2, snap.marginHealth)}%` }} />
-        </div>
-      </div>
-
-      <div className="flex items-baseline justify-between border-t border-[#262626] pt-2">
-        <span className="text-[10px] uppercase tracking-wider text-[#555]">Open positions</span>
-        <span className="font-mono text-[11px] text-foreground">{snap.openPositions}</span>
-      </div>
-    </div>
-  );
-}
-
-// ─── RecentTrades block ──────────────────────────────────────────
-
-function RecentTradesBlock({ symbol, baseAsset }: { symbol: string; baseAsset: string }) {
-  // Consumer convention: ws-manager multiplexes so this adds zero
-  // sockets. The hook keeps oldest-first; we reverse for newest-on-top.
-  const trades = useRecentTrades(symbol, { max: 30 });
-  const reversed = [...trades].reverse();
-
-  return (
-    <div className="flex flex-1 min-h-0 flex-col">
-      {/* Header */}
-      <div className="flex items-center justify-between border-b border-[#262626] px-3 py-1.5 text-[10px] text-[#555]">
-        <span className="uppercase tracking-wider">Trades</span>
-        <span className="text-[#444]">{baseAsset}/USD</span>
-      </div>
-
-      {/* Column labels */}
-      <div className="flex items-center justify-between px-3 py-1 text-[10px] text-[#555]">
-        <span className="w-[55px] text-left">Time</span>
-        <span className="flex-1 text-right">Price</span>
-        <span className="w-[60px] text-right">Size</span>
-      </div>
-
-      {/* Tape */}
-      <div className="flex-1 min-h-0 overflow-y-auto">
-        {reversed.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-[10px] text-[#3a3a3a]">
-            Waiting for trades…
-          </div>
-        ) : (
-          reversed.map((t, i) => (
-            <div
-              // Key is updateId+offset within batch — handles the multi-fill batch case
-              key={`${t.updateId}-${i}`}
-              className="flex items-center justify-between px-3 py-[2px] text-[10px] font-mono"
-            >
-              <span className="w-[55px] text-left text-[#666]">{fmtTimeShort(t.receivedAt)}</span>
-              <span className={`flex-1 text-right ${t.side === "ask" ? "text-green-400" : "text-red-400"}`}>
-                {fmtPrice(t.price)}
-              </span>
-              <span className="w-[60px] text-right text-[#888]">{fmtSize(t.size)}</span>
-            </div>
-          ))
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ─── Top-level export ────────────────────────────────────────────
-
-export function TradingSidebar({ symbol, baseAsset }: TradingSidebarProps) {
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {/* Account: ~40 % of available height. flex-basis with shrink-0
-          on the divider keeps the heatmap-style proportions without
-          the snapshot collapsing to nothing on tiny screens. */}
-      <div className="flex flex-col" style={{ flexBasis: "40%", minHeight: 0 }}>
-        <div className="flex items-center justify-between border-b border-[#262626] px-3 py-1.5 text-[10px] uppercase tracking-wider text-[#555]">
+      {/* Top half (50%) — Account snapshot */}
+      <div className="flex flex-col" style={{ flexBasis: "50%", minHeight: 0 }}>
+        <div className="flex items-center justify-between border-b border-[#262626] px-3 py-1 text-[10px] uppercase tracking-wider text-[#555]">
           Account
         </div>
         <div className="flex-1 min-h-0 overflow-y-auto">
-          <AccountSnapshotBlock />
+          <AccountSnapshotBlock
+            snapshot={snapshot}
+            loading={loading}
+            isAuthenticated={isAuthenticated}
+          />
         </div>
       </div>
 
-      {/* Trades: remaining ~60 %, with its own border-top from the
-          divider above. */}
-      <div className="flex flex-col border-t border-[#262626]" style={{ flexBasis: "60%", minHeight: 0 }}>
-        <RecentTradesBlock symbol={symbol} baseAsset={baseAsset} />
+      {/* Bottom half (50%) — Calculator (compact) + Positions (scrollable) */}
+      <div className="flex flex-col border-t border-[#262626]" style={{ flexBasis: "50%", minHeight: 0 }}>
+        {/* Calculator — fixed height, compact. Doesn't need to grow. */}
+        <div className="flex flex-col border-b border-[#262626]">
+          <div className="flex items-center justify-between border-b border-[#262626] px-3 py-1 text-[10px] uppercase tracking-wider text-[#555]">
+            Calc
+          </div>
+          <PositionCalculator
+            symbol={`${baseAsset}/USD`}
+            baseAsset={baseAsset}
+            markPrice={markPrice}
+            imf={imf}
+            mmf={mmf}
+            freeMargin={snapshot.freeMargin}
+          />
+        </div>
+
+        {/* Positions — fills remaining space, scrolls if many */}
+        <div className="flex flex-1 min-h-0 flex-col">
+          <div className="flex items-center justify-between border-b border-[#262626] px-3 py-1 text-[10px] uppercase tracking-wider text-[#555]">
+            <span>Positions</span>
+            <span className="text-[#444]">{snapshot.positions.length}</span>
+          </div>
+          <OpenPositionsList
+            positions={snapshot.positions}
+            isAuthenticated={isAuthenticated}
+            loading={loading}
+            onAfterClose={() => void fetchRef.current?.()}
+          />
+        </div>
       </div>
     </div>
   );
