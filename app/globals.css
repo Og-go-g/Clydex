@@ -38,3 +38,13 @@ body {
   from { transform: scaleX(0); transform-origin: left; }
   to { transform: scaleX(1); transform-origin: left; }
 }
+
+/* Orderbook flash — used by CompactOrderbook to mimic 01.xyz's
+ * subtle highlight when a price level's size changes. The overlay
+ * div is keyed on `size`, so React remounts it on every change,
+ * which restarts this animation from the start. Result: a brief
+ * brighter pulse that fades back to the static base bar. */
+@keyframes ob-flash {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}

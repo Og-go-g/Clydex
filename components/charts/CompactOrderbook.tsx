@@ -1,5 +1,29 @@
 "use client";
 
+/**
+ * CompactOrderbook — narrow orderbook used inside ChartPanel.
+ *
+ * Rendering strategy for the bid/ask bars:
+ *
+ *   Each row has TWO overlapping bars:
+ *     1. A static base bar at low opacity (e.g. bg-green-500/8) that
+ *        represents the size proportion at this level.
+ *     2. A "flash" overlay at higher opacity, mounted with
+ *        key={`${price}-${size}`}. React unmounts + remounts this
+ *        element whenever size at a given price changes — and the
+ *        CSS animation `ob-flash` restarts from `opacity: 1` and
+ *        fades to `opacity: 0` over 600 ms. Net effect: the row
+ *        briefly pulses brighter on every update, then settles back
+ *        to the static base. Same UX as 01.xyz.
+ *
+ * Why the static bar exists at all: between flashes, the row should
+ * still show a visible size indicator. Without the static bar,
+ * unchanged levels would look completely black.
+ *
+ * The animation is `forwards` so the overlay stays at opacity 0
+ * after the keyframe finishes — no flickering between renders.
+ */
+
 interface OrderbookLevel {
   price: number;
   size: number;
@@ -25,7 +49,8 @@ function formatSize(size: number): string {
 }
 
 export function CompactOrderbook({ topBids, topAsks, spread, baseAsset }: CompactOrderbookProps) {
-  // Find max size for bar width normalization
+  // Find max size for bar width normalization across both sides — keeps
+  // a 5-ETH bid visually proportional to a 5-ETH ask.
   const allSizes = [...topBids.map((l) => l.size), ...topAsks.map((l) => l.size)];
   const maxSize = Math.max(...allSizes, 0.0001);
 
@@ -43,16 +68,25 @@ export function CompactOrderbook({ topBids, topAsks, spread, baseAsset }: Compac
       <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
         {/* Asks (red) — lowest ask at bottom */}
         <div className="flex-1 flex flex-col justify-end overflow-hidden">
-          {asksReversed.map((level, i) => {
+          {asksReversed.map((level) => {
             const pct = (level.size / maxSize) * 100;
+            const w = `${Math.min(100, pct)}%`;
             return (
-              <div key={`a-${i}`} className="relative flex items-center justify-between px-3 py-[2px] text-[10px] font-mono">
+              <div
+                key={`a-${level.price}`}
+                className="relative flex items-center justify-between px-3 py-[2px] text-[10px] font-mono"
+              >
+                {/* Static base bar — visible at all times. */}
+                <div className="absolute inset-y-0 right-0 bg-red-500/10" style={{ width: w }} />
+                {/* Flash overlay — re-keyed by size so React remounts it
+                    on each change; the keyframe restarts and fades out. */}
                 <div
-                  className="absolute inset-y-0 right-0 bg-red-500/8"
-                  style={{ width: `${Math.min(100, pct)}%` }}
+                  key={`a-flash-${level.size}`}
+                  className="absolute inset-y-0 right-0 bg-red-500/40 pointer-events-none"
+                  style={{ width: w, animation: "ob-flash 600ms ease-out forwards" }}
                 />
                 <span className="relative z-10 text-red-400">{formatPrice(level.price)}</span>
-                <span className="relative z-10 text-[#666]">{formatSize(level.size)}</span>
+                <span className="relative z-10 text-[#888]">{formatSize(level.size)}</span>
               </div>
             );
           })}
@@ -67,16 +101,22 @@ export function CompactOrderbook({ topBids, topAsks, spread, baseAsset }: Compac
 
         {/* Bids (green) — highest bid at top */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          {topBids.map((level, i) => {
+          {topBids.map((level) => {
             const pct = (level.size / maxSize) * 100;
+            const w = `${Math.min(100, pct)}%`;
             return (
-              <div key={`b-${i}`} className="relative flex items-center justify-between px-3 py-[2px] text-[10px] font-mono">
+              <div
+                key={`b-${level.price}`}
+                className="relative flex items-center justify-between px-3 py-[2px] text-[10px] font-mono"
+              >
+                <div className="absolute inset-y-0 left-0 bg-green-500/10" style={{ width: w }} />
                 <div
-                  className="absolute inset-y-0 left-0 bg-green-500/8"
-                  style={{ width: `${Math.min(100, pct)}%` }}
+                  key={`b-flash-${level.size}`}
+                  className="absolute inset-y-0 left-0 bg-green-500/40 pointer-events-none"
+                  style={{ width: w, animation: "ob-flash 600ms ease-out forwards" }}
                 />
                 <span className="relative z-10 text-green-400">{formatPrice(level.price)}</span>
-                <span className="relative z-10 text-[#666]">{formatSize(level.size)}</span>
+                <span className="relative z-10 text-[#888]">{formatSize(level.size)}</span>
               </div>
             );
           })}

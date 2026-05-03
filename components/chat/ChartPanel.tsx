@@ -569,16 +569,33 @@ export function ChartPanel() {
               </Suspense>
             </div>
 
-            {/* Compact Leaderboard */}
+            {/* Bottom panel:
+                - "Analyze" mode (chatMode=copytrade): full-width copy trading section.
+                - "Trade" mode (chatMode=trading): orderbook on the LEFT half,
+                  empty placeholder on the RIGHT half — reserved for the
+                  next feature (TBD). The orderbook itself is half-width
+                  to leave clear breathing room for whatever lands there. */}
             {chatMode === "copytrade" ? (
               <CopyTradeSection />
             ) : (
-              <CompactOrderbook
-                topBids={wsRatio.topBids}
-                topAsks={wsRatio.topAsks}
-                spread={wsRatio.spread}
-                baseAsset={baseAsset}
-              />
+              <div className="flex flex-1 min-h-0">
+                <div className="flex w-1/2 min-w-0 flex-col">
+                  <CompactOrderbook
+                    topBids={wsRatio.topBids}
+                    topAsks={wsRatio.topAsks}
+                    spread={wsRatio.spread}
+                    baseAsset={baseAsset}
+                  />
+                </div>
+                <div className="flex w-1/2 min-w-0 flex-col border-l border-t border-[#262626]">
+                  {/* Placeholder for the next feature. Kept visually quiet
+                      so the orderbook stays the focal point until we
+                      decide what goes here. */}
+                  <div className="flex flex-1 items-center justify-center text-[10px] text-[#3a3a3a]">
+                    coming next
+                  </div>
+                </div>
+              </div>
             )}
           </div>
         </div>
