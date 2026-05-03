@@ -4,49 +4,36 @@
  * TradingSidebar — the right half of ChartPanel in Trade mode.
  *
  * Mirrors the orderbook's 50/50 split aesthetic: this sidebar itself
- * splits 50/50 between an Account snapshot (top) and a Trade Tools
- * column (bottom). The bottom column further hosts a compact position
- * sizing calculator above a scrollable list of currently-open
- * positions, so the most-needed real-time bookkeeping is always
- * visible without leaving the chat.
+ * splits 50/50 between an Account snapshot (top) and a scrollable
+ * list of currently-open positions (bottom).
  *
- * Three blocks, all driven from data the chat already loads:
+ * Two blocks, both driven from data the chat already loads:
  *
  *   1. Account Snapshot — equity, free vs used margin, margin
- *      health bar, open-position count. REST /api/account every
- *      15 s + WS-event-driven debounced refetch.
+ *      health bar. REST /api/account every 15 s + WS-event-driven
+ *      debounced refetch.
  *
- *   2. Position Calculator — fully client-side. Inputs: side,
- *      leverage slider, USDC notional. Live outputs: required
- *      margin, est. liquidation price, distance to liq, est. fees.
- *      Uses the current mark price from the parent + the market's
- *      IMF/MMF from the markets cache. Pure isolated-position
- *      approximation for clarity; cross-margin true liq differs
- *      slightly when other positions are open, but the estimate
- *      is honest enough for sizing decisions before opening.
+ *   2. Open Positions (scrollable) — every open position across
+ *      all markets, not just the currently-charted one. Each row
+ *      shows side, size, entry, mark, unrealised PnL, distance to
+ *      liq, and three quick-close buttons (25 / 50 / 100 %).
  *
- *   3. Open Positions on this market — list of all open positions
- *      across all markets, scrollable if many. Each row shows
- *      side, size, entry, mark, unrealised PnL, distance to liq
- *      and three quick-close buttons (25 / 50 / 100 %).
+ * A position-sizing calculator was prototyped here and removed:
+ * the chat itself already runs that calculation when the user
+ * writes "long eth 100 5x" and produces a richer preview (with
+ * approval flow) than a sidebar widget could.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth/context";
 import { useNordAccount } from "@/hooks/useNordAccount";
-import { useNordMarketTicker } from "@/hooks/useNordMarketTicker";
 import { useOrderActions } from "@/hooks/useOrderActions";
-import { getCachedMarkets } from "@/lib/n1/constants";
 
 // ─── Props ────────────────────────────────────────────────────────
 
 interface TradingSidebarProps {
-  /** Bare market symbol, e.g. "ETHUSD" — drives calculator + symbol filter. */
-  symbol: string;
   /** Asset for short labels, e.g. "ETH". */
   baseAsset: string;
-  /** Numeric market id — used to look up IMF for the calculator. */
-  marketId: number;
 }
 
 // ─── Shared types ─────────────────────────────────────────────────
@@ -116,31 +103,6 @@ function fmtSize(size: number): string {
   return size.toFixed(4);
 }
 
-// ─── Liq math (isolated approximation) ────────────────────────────
-//
-// For a fresh isolated position with notional N, leverage L, IMF, MMF:
-//   margin    = N / L
-//   maintenance buffer = N * MMF
-//   loss to liq = margin - maintenance buffer
-//   liq distance frac = lossToLiq / N = 1/L - MMF
-//
-// So: liqPrice_long  = entry * (1 - (1/L - MMF))
-//     liqPrice_short = entry * (1 + (1/L - MMF))
-//
-// For L > 1/MMF the position is unliquidatable mathematically (over-
-// collateralised in maintenance terms) — we cap to "—" then.
-function calcLiqPrice(
-  entry: number,
-  leverage: number,
-  isLong: boolean,
-  mmf: number,
-): number {
-  if (!isFinite(entry) || entry <= 0 || !isFinite(leverage) || leverage <= 0) return 0;
-  const distFrac = 1 / leverage - mmf;
-  if (distFrac <= 0) return 0;
-  return isLong ? entry * (1 - distFrac) : entry * (1 + distFrac);
-}
-
 // ─── AccountSnapshotBlock ─────────────────────────────────────────
 
 function AccountSnapshotBlock({ snapshot, loading, isAuthenticated }: {
@@ -205,163 +167,6 @@ function AccountSnapshotBlock({ snapshot, loading, isAuthenticated }: {
           <div className={`h-full transition-all ${healthBarColor}`} style={{ width: `${Math.max(2, snapshot.marginHealth)}%` }} />
         </div>
       </div>
-    </div>
-  );
-}
-
-// ─── PositionCalculator ───────────────────────────────────────────
-
-const LEV_PRESETS = [1, 2, 5, 10, 20, 50] as const;
-
-function PositionCalculator({
-  symbol,
-  baseAsset,
-  markPrice,
-  imf,
-  mmf,
-  freeMargin,
-}: {
-  symbol: string;
-  baseAsset: string;
-  markPrice: number | null;
-  imf: number;
-  mmf: number;
-  freeMargin: number;
-}) {
-  const [side, setSide] = useState<"Long" | "Short">("Long");
-  const [notionalStr, setNotionalStr] = useState<string>("100");
-  const [leverage, setLeverage] = useState<number>(5);
-
-  const notional = Math.max(0, Number(notionalStr) || 0);
-  const maxLeverage = imf > 0 ? Math.floor(1 / imf) : 1;
-
-  const calc = useMemo(() => {
-    if (!markPrice || markPrice <= 0 || notional <= 0) {
-      return { margin: 0, baseSize: 0, liqPrice: 0, liqDistance: 0, takerFee: 0, makerFee: 0 };
-    }
-    const margin = notional / leverage;
-    const baseSize = notional / markPrice;
-    const liqPrice = calcLiqPrice(markPrice, leverage, side === "Long", mmf);
-    const liqDistance = liqPrice > 0 ? Math.abs((liqPrice - markPrice) / markPrice) * 100 : 0;
-    // Standard 01 fee tiers — taker 5 bps, maker 2 bps. Surface as
-    // pure estimate; actual fee depends on user's tier.
-    const takerFee = notional * 0.0005;
-    const makerFee = notional * 0.0002;
-    return { margin, baseSize, liqPrice, liqDistance, takerFee, makerFee };
-  }, [notional, leverage, markPrice, side, mmf]);
-
-  const overMargin = calc.margin > freeMargin && freeMargin > 0;
-  const overLeverage = leverage > maxLeverage;
-
-  return (
-    <div className="flex flex-col gap-1.5 px-3 py-2">
-      {/* Side toggle */}
-      <div className="flex gap-1">
-        <button
-          type="button"
-          onClick={() => setSide("Long")}
-          className={`flex-1 rounded border py-1 text-[10px] font-semibold transition-colors ${
-            side === "Long"
-              ? "border-green-500/40 bg-green-500/15 text-green-400"
-              : "border-[#262626] bg-[#141414] text-[#666] hover:text-foreground"
-          }`}
-        >
-          Long
-        </button>
-        <button
-          type="button"
-          onClick={() => setSide("Short")}
-          className={`flex-1 rounded border py-1 text-[10px] font-semibold transition-colors ${
-            side === "Short"
-              ? "border-red-500/40 bg-red-500/15 text-red-400"
-              : "border-[#262626] bg-[#141414] text-[#666] hover:text-foreground"
-          }`}
-        >
-          Short
-        </button>
-      </div>
-
-      {/* Notional input */}
-      <div className="flex items-center gap-1.5">
-        <span className="text-[10px] uppercase tracking-wider text-[#555] w-10">Size</span>
-        <div className="flex flex-1 items-center rounded border border-[#262626] bg-[#141414] px-2">
-          <input
-            type="number"
-            value={notionalStr}
-            onChange={(e) => setNotionalStr(e.target.value)}
-            className="flex-1 bg-transparent py-1 text-right font-mono text-[11px] text-foreground outline-none"
-            min={0}
-            step={10}
-          />
-          <span className="ml-1 text-[10px] text-[#555]">USDC</span>
-        </div>
-      </div>
-
-      {/* Leverage row — preset chips + current value */}
-      <div className="flex items-center gap-1.5">
-        <span className="text-[10px] uppercase tracking-wider text-[#555] w-10">Lev</span>
-        <div className="flex flex-1 gap-0.5">
-          {LEV_PRESETS.filter((l) => l <= maxLeverage).map((l) => (
-            <button
-              key={l}
-              type="button"
-              onClick={() => setLeverage(l)}
-              className={`flex-1 rounded border py-0.5 text-[10px] font-mono transition-colors ${
-                leverage === l
-                  ? "border-accent/40 bg-accent/15 text-accent"
-                  : "border-[#262626] bg-[#141414] text-[#666] hover:text-foreground"
-              }`}
-            >
-              {l}x
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Outputs */}
-      <div className="flex flex-col gap-0.5 border-t border-[#1a1a1a] pt-1.5">
-        <div className="flex items-baseline justify-between">
-          <span className="text-[10px] text-[#555]">{baseAsset} size</span>
-          <span className="font-mono text-[11px] text-foreground/85">
-            {markPrice ? fmtSize(calc.baseSize) : "—"}
-          </span>
-        </div>
-        <div className="flex items-baseline justify-between">
-          <span className="text-[10px] text-[#555]">Margin</span>
-          <span className={`font-mono text-[11px] ${overMargin ? "text-red-400" : "text-foreground/85"}`}>
-            {fmtUsd(calc.margin)}
-            {overMargin && <span className="ml-1 text-[9px]">over free</span>}
-          </span>
-        </div>
-        <div className="flex items-baseline justify-between">
-          <span className="text-[10px] text-[#555]">Liq price</span>
-          <span className={`font-mono text-[11px] ${
-            calc.liqPrice === 0 ? "text-[#444]"
-            : side === "Long" ? "text-red-400/80" : "text-red-400/80"
-          }`}>
-            {calc.liqPrice > 0 ? fmtPrice(calc.liqPrice) : "—"}
-            {calc.liqDistance > 0 && (
-              <span className="ml-1 text-[9px] text-[#666]">
-                ({side === "Long" ? "-" : "+"}{calc.liqDistance.toFixed(1)}%)
-              </span>
-            )}
-          </span>
-        </div>
-        <div className="flex items-baseline justify-between">
-          <span className="text-[10px] text-[#555]">Fees t/m</span>
-          <span className="font-mono text-[10px] text-[#888]">
-            {fmtUsd(calc.takerFee, 3)} / {fmtUsd(calc.makerFee, 3)}
-          </span>
-        </div>
-        {overLeverage && (
-          <div className="text-[9px] text-amber-400/80">
-            ⚠ Lev {leverage}x exceeds market max {maxLeverage}x
-          </div>
-        )}
-      </div>
-
-      {/* Symbol footer — context tied to the chart above */}
-      <div className="text-right text-[9px] text-[#3a3a3a]">{symbol}</div>
     </div>
   );
 }
@@ -480,25 +285,20 @@ function OpenPositionsList({
 
 // ─── Top-level export ─────────────────────────────────────────────
 
-export function TradingSidebar({ symbol, baseAsset, marketId }: TradingSidebarProps) {
+// `baseAsset` is currently unused at the top level (positions list
+// shows symbols natively), but kept on the props so the component's
+// signature stays stable if we later add a "this market only" filter.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function TradingSidebar({ baseAsset: _baseAsset }: TradingSidebarProps) {
   const { isAuthenticated } = useAuth();
   const [snapshot, setSnapshot] = useState<AccountSnapshot>(EMPTY_SNAPSHOT);
   const [loading, setLoading] = useState(true);
   const fetchRef = useRef<(() => Promise<void>) | null>(null);
   const debouncedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Live mark price for the selected market — feeds the calculator
-  // so it stays in sync with the chart.
-  const ticker = useNordMarketTicker(symbol);
-  const markPrice = ticker.lastPrice ?? null;
-
-  // IMF / MMF for the calculator. From cached markets list. MMF on 01
-  // is conventionally IMF/2 — we mirror that. If the market isn't in
-  // cache yet (rare on first paint), fall back to conservative defaults
-  // that match a Tier-3 market.
-  const market = useMemo(() => getCachedMarkets().find((m) => m.id === marketId), [marketId]);
-  const imf = market?.initialMarginFraction ?? 0.05;
-  const mmf = imf / 2;
+  // mmf default for the cross-margin liq estimate when a position's
+  // own marketMmf isn't on the wire (rare, but defensive).
+  const mmf = 0.025;
 
   const fetchSnap = useCallback(async () => {
     try {
@@ -626,24 +426,8 @@ export function TradingSidebar({ symbol, baseAsset, marketId }: TradingSidebarPr
         </div>
       </div>
 
-      {/* Bottom half (50%) — Calculator (compact) + Positions (scrollable) */}
+      {/* Bottom half (50%) — Open positions (scrollable) */}
       <div className="flex flex-col border-t border-[#262626]" style={{ flexBasis: "50%", minHeight: 0 }}>
-        {/* Calculator — fixed height, compact. Doesn't need to grow. */}
-        <div className="flex flex-col border-b border-[#262626]">
-          <div className="flex items-center justify-between border-b border-[#262626] px-3 py-1 text-[10px] uppercase tracking-wider text-[#555]">
-            Calc
-          </div>
-          <PositionCalculator
-            symbol={`${baseAsset}/USD`}
-            baseAsset={baseAsset}
-            markPrice={markPrice}
-            imf={imf}
-            mmf={mmf}
-            freeMargin={snapshot.freeMargin}
-          />
-        </div>
-
-        {/* Positions — fills remaining space, scrolls if many */}
         <div className="flex flex-1 min-h-0 flex-col">
           <div className="flex items-center justify-between border-b border-[#262626] px-3 py-1 text-[10px] uppercase tracking-wider text-[#555]">
             <span>Positions</span>

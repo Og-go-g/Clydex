@@ -590,10 +590,9 @@ export function ChartPanel() {
                 </div>
                 <div className="flex w-1/2 min-w-0 flex-col border-l border-t border-[#262626]">
                   {/* 50/50 split inside the sidebar — Account on top,
-                      Calculator + Positions below. See
-                      components/chat/TradingSidebar.tsx for the
-                      layout rationale. */}
-                  <TradingSidebar symbol={sym} baseAsset={baseAsset} marketId={marketId} />
+                      Open Positions list (scrollable) on bottom.
+                      See components/chat/TradingSidebar.tsx. */}
+                  <TradingSidebar baseAsset={baseAsset} />
                 </div>
               </div>
             )}
