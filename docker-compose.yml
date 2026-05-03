@@ -1,8 +1,34 @@
+# ─────────────────────────────────────────────────────────────────────
+# Clydex production compose.
+#
+# As of 2026-05-03 (commit chore/build-out-of-band) prod NO LONGER
+# compiles images. Both `clydex-app` and `clydex-worker` are pulled
+# from ghcr.io/og-go-g/* — built by .github/workflows/docker-build.yml
+# on every push to main. This eliminates the build-time OOM that
+# crashed Postgres four times in two weeks
+# (memory: postgres_oom_protection.md).
+#
+# Deploy on prod is now:
+#   git pull
+#   docker compose pull
+#   docker compose up -d
+#
+# DO NOT add `--build` on prod. The `build:` blocks below are kept,
+# commented out, only as documentation of which Dockerfile target
+# each image corresponds to. For local dev where you DO want to
+# build, run:
+#   docker build -t clydex-app:dev --target runner .
+#   docker build -t clydex-worker:dev --target worker .
+# and override the image: line via a docker-compose.override.yml.
+# ─────────────────────────────────────────────────────────────────────
+
 services:
   app:
-    build:
-      context: .
-      target: runner
+    image: ghcr.io/og-go-g/clydex-app:latest
+    pull_policy: always # always grab the freshest :latest on `up -d`
+    # build:
+    #   context: .
+    #   target: runner
     container_name: clydex-app
     restart: unless-stopped
     network_mode: host
@@ -34,9 +60,11 @@ services:
       - /etc/letsencrypt:/etc/letsencrypt:ro
 
   worker:
-    build:
-      context: .
-      target: worker
+    image: ghcr.io/og-go-g/clydex-worker:latest
+    pull_policy: always
+    # build:
+    #   context: .
+    #   target: worker
     container_name: clydex-worker
     restart: unless-stopped
     network_mode: host
