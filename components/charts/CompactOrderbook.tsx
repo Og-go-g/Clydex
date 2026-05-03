@@ -49,10 +49,11 @@ function formatSize(size: number): string {
 }
 
 export function CompactOrderbook({ topBids, topAsks, spread, baseAsset }: CompactOrderbookProps) {
-  // Find max size for bar width normalization across both sides — keeps
-  // a 5-ETH bid visually proportional to a 5-ETH ask.
-  const allSizes = [...topBids.map((l) => l.size), ...topAsks.map((l) => l.size)];
-  const maxSize = Math.max(...allSizes, 0.0001);
+  // Per-side normalization: one whale level on the bid side shouldn't
+  // squash all the asks into invisible 2 % bars (and vice versa). Each
+  // side scales against its own max — same convention 01.xyz uses.
+  const maxBidSize = Math.max(...topBids.map((l) => l.size), 0.0001);
+  const maxAskSize = Math.max(...topAsks.map((l) => l.size), 0.0001);
 
   // Asks: lowest at bottom (reversed order)
   const asksReversed = [...topAsks].reverse();
@@ -69,21 +70,23 @@ export function CompactOrderbook({ topBids, topAsks, spread, baseAsset }: Compac
         {/* Asks (red) — lowest ask at bottom */}
         <div className="flex-1 flex flex-col justify-end overflow-hidden">
           {asksReversed.map((level) => {
-            const pct = (level.size / maxSize) * 100;
+            const pct = (level.size / maxAskSize) * 100;
             const w = `${Math.min(100, pct)}%`;
             return (
               <div
                 key={`a-${level.price}`}
                 className="relative flex items-center justify-between px-3 py-[2px] text-[10px] font-mono"
               >
-                {/* Static base bar — visible at all times. */}
-                <div className="absolute inset-y-0 right-0 bg-red-500/10" style={{ width: w }} />
+                {/* Static base bar — kept very subtle so the resting
+                    state doesn't shout colour at the user. */}
+                <div className="absolute inset-y-0 right-0 bg-red-500/[0.06]" style={{ width: w }} />
                 {/* Flash overlay — re-keyed by size so React remounts it
-                    on each change; the keyframe restarts and fades out. */}
+                    on each change; the keyframe restarts and fades out
+                    quickly enough to feel responsive (~300 ms). */}
                 <div
                   key={`a-flash-${level.size}`}
-                  className="absolute inset-y-0 right-0 bg-red-500/40 pointer-events-none"
-                  style={{ width: w, animation: "ob-flash 600ms ease-out forwards" }}
+                  className="absolute inset-y-0 right-0 bg-red-500/[0.18] pointer-events-none"
+                  style={{ width: w, animation: "ob-flash 320ms ease-out forwards" }}
                 />
                 <span className="relative z-10 text-red-400">{formatPrice(level.price)}</span>
                 <span className="relative z-10 text-[#888]">{formatSize(level.size)}</span>
@@ -102,18 +105,18 @@ export function CompactOrderbook({ topBids, topAsks, spread, baseAsset }: Compac
         {/* Bids (green) — highest bid at top */}
         <div className="flex-1 flex flex-col overflow-hidden">
           {topBids.map((level) => {
-            const pct = (level.size / maxSize) * 100;
+            const pct = (level.size / maxBidSize) * 100;
             const w = `${Math.min(100, pct)}%`;
             return (
               <div
                 key={`b-${level.price}`}
                 className="relative flex items-center justify-between px-3 py-[2px] text-[10px] font-mono"
               >
-                <div className="absolute inset-y-0 left-0 bg-green-500/10" style={{ width: w }} />
+                <div className="absolute inset-y-0 left-0 bg-green-500/[0.06]" style={{ width: w }} />
                 <div
                   key={`b-flash-${level.size}`}
-                  className="absolute inset-y-0 left-0 bg-green-500/40 pointer-events-none"
-                  style={{ width: w, animation: "ob-flash 600ms ease-out forwards" }}
+                  className="absolute inset-y-0 left-0 bg-green-500/[0.18] pointer-events-none"
+                  style={{ width: w, animation: "ob-flash 320ms ease-out forwards" }}
                 />
                 <span className="relative z-10 text-green-400">{formatPrice(level.price)}</span>
                 <span className="relative z-10 text-[#888]">{formatSize(level.size)}</span>
