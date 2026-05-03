@@ -42,6 +42,15 @@ function formatPrice(price: number): string {
   return price.toFixed(6);
 }
 
+// Spread is shown next to its label, not as a price level — it's
+// always small relative to price scale, so 6 decimals reads as noise.
+// 2 decimals matches how spread is conventionally quoted (e.g. "$0.10").
+function formatSpread(spread: number): string {
+  if (spread >= 1) return spread.toFixed(2);
+  if (spread >= 0.01) return spread.toFixed(3);
+  return spread.toFixed(4);
+}
+
 function formatSize(size: number): string {
   if (size >= 1000) return size.toFixed(1);
   if (size >= 1) return size.toFixed(3);
@@ -98,7 +107,7 @@ export function CompactOrderbook({ topBids, topAsks, spread, baseAsset }: Compac
         {/* Spread */}
         <div className="flex items-center justify-center px-3 py-1 border-y border-[#1a1a1a] bg-[#0a0a0a]">
           <span className="text-[10px] font-mono text-[#555]">
-            Spread: {spread > 0 ? formatPrice(spread) : "—"}
+            Spread: {spread > 0 ? formatSpread(spread) : "—"}
           </span>
         </div>
 

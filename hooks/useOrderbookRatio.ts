@@ -10,11 +10,14 @@
  * consumers (or the same component remounting) all share one socket with
  * the rest of the app's subscriptions.
  *
- * Algorithm (unchanged from before):
+ * Algorithm:
  *   1. REST snapshot of `/api/markets/<id>/orderbook` to seed full book.
  *   2. Apply incremental deltas as they arrive (`size === 0` removes a level).
  *   3. Recompute the bid/ask quote-volume ratio + top levels, throttled to
- *      1 Hz so React renders stay reasonable on busy markets.
+ *      THROTTLE_MS so React renders stay reasonable on busy markets but the
+ *      orderbook still feels responsive on screen. 250 ms = 4 updates/sec
+ *      — enough that the flash animation on each row in CompactOrderbook
+ *      reads as continuous motion, not stutter.
  */
 
 import { useEffect, useRef, useState, useCallback } from "react";
@@ -22,6 +25,7 @@ import { getNordWsManager } from "@/lib/n1/ws-manager";
 
 const MAX_LEVELS = 200;
 const TOP_LEVELS = 10;
+const THROTTLE_MS = 250;
 
 interface OrderbookLevel {
   price: number;
@@ -117,7 +121,7 @@ export function useOrderbookRatio(
       });
     };
 
-    if (elapsed >= 1000) {
+    if (elapsed >= THROTTLE_MS) {
       if (throttleTimer.current) {
         clearTimeout(throttleTimer.current);
         throttleTimer.current = undefined;
@@ -127,7 +131,7 @@ export function useOrderbookRatio(
       throttleTimer.current = setTimeout(() => {
         throttleTimer.current = undefined;
         doCalc();
-      }, 1000 - elapsed);
+      }, THROTTLE_MS - elapsed);
     }
   }, []);
 
