@@ -11,7 +11,14 @@ services:
     healthcheck:
       # 127.0.0.1 explicitly — Alpine's wget resolves `localhost` to ::1 (IPv6),
       # but Next.js binds only to 0.0.0.0 (IPv4), giving false "unhealthy".
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/"]
+      #
+      # /api/health (NOT /) so Postgres outages actually mark the container
+      # unhealthy. Hitting / would render the marketing page without touching
+      # the DB — exactly the gap that caused the 6-day silent outage on
+      # 2026-04-19. The endpoint pings BOTH pools (main + history) and
+      # returns 503 if either is down; wget --spider exits non-zero on
+      # any HTTP status >= 400, which Docker reads as "unhealthy".
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -37,7 +44,14 @@ services:
       - .env
     stop_grace_period: 60s
     healthcheck:
-      test: ["CMD", "node", "-e", "require('fs').statSync('/tmp/worker.healthy')"]
+      # Worker writes /tmp/worker.healthy ONLY after a successful DB
+      # heartbeat (see worker/index.ts heartbeatLoop). Heartbeat runs every
+      # 15 s; a 60-second mtime ceiling means we mark unhealthy after 4
+      # consecutive missed heartbeats — which only happens if either
+      # the DB is gone or the Node process is wedged. Plain statSync
+      # (the previous check) would let a worker that hasn't heart-beaten
+      # in days look healthy as long as the file existed.
+      test: ["CMD", "node", "-e", "const s=require('fs').statSync('/tmp/worker.healthy'); if (Date.now() - s.mtimeMs > 60000) { console.error('stale heartbeat (' + (Date.now()-s.mtimeMs) + 'ms)'); process.exit(1); }"]
       interval: 30s
       timeout: 5s
       retries: 3

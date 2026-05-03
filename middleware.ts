@@ -134,6 +134,15 @@ const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
 
+  // /api/health is hit every 30s by the Docker healthcheck and possibly
+  // continuously by external uptime monitors. Bypass rate-limiting and
+  // CSRF entirely so it never burns the shared "unknown IP" bucket
+  // (docker's wget has no X-Real-IP) and never accidentally returns 429
+  // — that would let a totally healthy app falsely show as unhealthy.
+  if (pathname === "/api/health") {
+    return NextResponse.next();
+  }
+
   // Self-hosted behind nginx: trust X-Real-IP set by the nginx config,
   // fallback to first entry of X-Forwarded-For (real client IP),
   // last resort: "unknown" (shared bucket — aggressive limiting).
