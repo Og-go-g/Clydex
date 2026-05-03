@@ -143,6 +143,17 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // /api/admin/* endpoints are all CRON_SECRET-bearer protected and called
+  // from non-browser clients (curl, bash scripts in systemd hooks, cron
+  // jobs). Browser-style CSRF protection (Origin/Host match) is the wrong
+  // layer for them — they have no Origin header and would always fail
+  // with 403, which is exactly what bit the systemd alert pipeline on
+  // first deploy 2026-05-03. Bypass middleware entirely and let each
+  // route enforce its own bearer auth (timing-safe compare).
+  if (pathname.startsWith("/api/admin/")) {
+    return NextResponse.next();
+  }
+
   // Self-hosted behind nginx: trust X-Real-IP set by the nginx config,
   // fallback to first entry of X-Forwarded-For (real client IP),
   // last resort: "unknown" (shared bucket — aggressive limiting).
