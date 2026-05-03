@@ -1,0 +1,45 @@
+# Template service that forwards a failed unit's name into our Sentry
+# pipeline via /api/admin/alert. Wired from another unit's OnFailure
+# directive, e.g.:
+#
+#   # /etc/systemd/system/postgresql@16-main.service.d/override.conf
+#   [Service]
+#   OnFailure=clydex-alert@%n.service
+#
+# The %n in the trigger expands to the failing unit's full name
+# ("postgresql@16-main.service"), which systemd substitutes for %i in
+# this template. The script is then invoked with that name as its only
+# argument.
+#
+# Install:
+#   sudo cp /opt/clydex/ops/systemd/clydex-alert@.service /etc/systemd/system/
+#   sudo cp /opt/clydex/ops/bin/clydex-alert.sh /usr/local/bin/
+#   sudo chmod +x /usr/local/bin/clydex-alert.sh
+#   sudo systemctl daemon-reload
+#
+# Verify:
+#   systemctl cat clydex-alert@dummy.service
+#   sudo systemctl start clydex-alert@dummy.service
+#   sudo journalctl -u clydex-alert@dummy.service -n 20
+#   # The alerter will log a payload and POST attempt; with no real
+#   # unit named "dummy" the journalctl/systemctl probes return empty
+#   # but the script still exits 0.
+
+[Unit]
+Description=Forward systemd unit failure (%i) to Clydex /api/admin/alert
+# Don't propagate our own failures — keeps OnFailure from looping.
+StopWhenUnneeded=true
+
+[Service]
+Type=oneshot
+# Cap runtime so a hung curl can't keep the unit Active forever.
+TimeoutStartSec=15s
+ExecStart=/usr/local/bin/clydex-alert.sh %i
+# Run as root so we can read journals of any failed unit (PG runs as
+# postgres user, the alerter needs to journalctl -u its log).
+User=root
+# Don't restart on failure: this is a one-shot notifier. If it failed,
+# the journal entry the script writes via `logger` is the only signal,
+# but the script itself ALWAYS exits 0 so this branch is dead unless
+# the binary itself is missing.
+Restart=no
