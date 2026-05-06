@@ -3027,26 +3027,14 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage, isDismissed: pr
   const isLimit = (orderType ?? "market") === "limit";
   const baseAssetPreview = baseAssetFrom(market);
 
-  // Realtime price for market orders — use WS price if available
+  // Realtime price for market orders — use WS price if available.
+  // Card is fully LIVE: every WS tick re-renders this component with
+  // a fresh `currentPrice`, which cascades into liveNotional / fees /
+  // liveLiqPrice below. No "stale snapshot" risk for market orders;
+  // limit orders use the user-set entryPrice unchanged.
   const livePrice = realtimePrices?.[market] ?? realtimePrices?.[normSym(market)] ?? null;
   const currentPrice = (!isLimit && livePrice) ? livePrice : entryPrice;
   const fmtEntry = currentPrice ? fmtPrice(currentPrice) : "—";
-
-  // Price-drift auto-dismiss: if a MARKET preview is left sitting and
-  // the live price has moved >1.5 % from what we quoted, retire it.
-  // The user would otherwise click Execute and fill at a price they
-  // didn't expect. Only applies to market orders — limits stay valid
-  // as long as the limit price stays sensible.
-  useEffect(() => {
-    if (status !== "idle" || isExecuted || propDismissed || manualDismiss) return;
-    if (isLimit) return;
-    if (!livePrice || !entryPrice || entryPrice <= 0) return;
-    const drift = Math.abs(livePrice - entryPrice) / entryPrice;
-    if (drift > 0.015) {
-      setTimedOut(true);
-      if (previewId) dismissPreview(previewId);
-    }
-  }, [livePrice, entryPrice, status, isExecuted, propDismissed, manualDismiss, isLimit, previewId]);
 
   // Recalculate derived values with live price
   const liveNotional = size * currentPrice;
@@ -3469,11 +3457,36 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage, isDismissed: pr
         </div>
         <div>
           <span className="text-muted">{isLimit ? "Limit Price" : "Entry Price"}</span>
-          <div className="font-mono text-foreground">{fmtEntry}</div>
+          <div className="font-mono text-foreground">
+            {/* key={fmtEntry} remounts the span on every change so the
+                CSS animation restarts. Limit price never changes (user
+                set it), so its key stays static — no pulse. Market
+                price ticks every WS update → brief white-tint pulse. */}
+            <span
+              key={fmtEntry}
+              className="inline-block rounded px-1 -mx-1"
+              style={!isLimit ? { animation: "price-pulse 500ms ease-out" } : undefined}
+            >
+              {fmtEntry}
+            </span>
+          </div>
         </div>
         <div>
           <span className="text-muted">Est. Liquidation Price</span>
-          <div className="font-mono text-red-400">{liveLiqPrice > 0 ? fmtPrice(liveLiqPrice) : "—"}</div>
+          <div className="font-mono text-red-400">
+            {/* Liq price is a pure function of currentPrice + leverage,
+                so it co-pulses with entry. Limit orders also have a
+                stable liq because limit price drives it. */}
+            {liveLiqPrice > 0 ? (
+              <span
+                key={liveLiqPrice}
+                className="inline-block rounded px-1 -mx-1"
+                style={!isLimit ? { animation: "price-pulse 500ms ease-out" } : undefined}
+              >
+                {fmtPrice(liveLiqPrice)}
+              </span>
+            ) : "—"}
+          </div>
         </div>
         <div>
           <span className="text-muted">Fees</span>
@@ -3566,8 +3579,9 @@ function ClosePositionCard({ data, isDismissed: propDismissed, realtimePrices, o
   const [manualDismiss, setManualDismiss] = useState(() => previewId ? isPreviewDismissed(previewId) : false);
   const [timedOut, setTimedOut] = useState(false);
 
-  // Close is always a market order — same logic as OrderPreviewCard
-  // market case. 90 s before the quoted "close at $X" gets stale.
+  // Close is always a market order — quoted price is updated live
+  // every WS tick (currentPrice / pnl below), but the card itself
+  // shouldn't sit forever if the user wandered off. 90 s timeout.
   useEffect(() => {
     if (status !== "idle" || isExecuted || propDismissed || manualDismiss) return;
     const timer = setTimeout(() => {
@@ -3576,19 +3590,6 @@ function ClosePositionCard({ data, isDismissed: propDismissed, realtimePrices, o
     }, 90_000);
     return () => clearTimeout(timer);
   }, [status, isExecuted, propDismissed, manualDismiss, previewId]);
-
-  // Price-drift auto-dismiss for the close: if the live price moved
-  // >1.5 % from the quote we showed, retire the card so the user
-  // doesn't accidentally close at a noticeably different price.
-  useEffect(() => {
-    if (status !== "idle" || isExecuted || propDismissed || manualDismiss) return;
-    if (!livePrice || !staticPrice || staticPrice <= 0) return;
-    const drift = Math.abs(livePrice - staticPrice) / staticPrice;
-    if (drift > 0.015) {
-      setTimedOut(true);
-      if (previewId) dismissPreview(previewId);
-    }
-  }, [livePrice, staticPrice, status, isExecuted, propDismissed, manualDismiss, previewId]);
 
   const handleDismissClose = () => {
     setManualDismiss(true);
@@ -3780,7 +3781,19 @@ function ClosePositionCard({ data, isDismissed: propDismissed, realtimePrices, o
         </div>
         <div>
           <span className="text-muted">Current Price</span>
-          <div className="font-mono text-foreground">{fmtPrice(currentPrice)}</div>
+          {/* Pulse on every WS price tick — same pattern as
+              OrderPreviewCard. Entry stays static (snapshot at
+              position open), so no pulse there. PnL co-pulses
+              because it's a function of currentPrice. */}
+          <div className="font-mono text-foreground">
+            <span
+              key={fmtPrice(currentPrice)}
+              className="inline-block rounded px-1 -mx-1"
+              style={{ animation: "price-pulse 500ms ease-out" }}
+            >
+              {fmtPrice(currentPrice)}
+            </span>
+          </div>
         </div>
         <div>
           <span className="text-muted">Entry Price</span>
@@ -3788,7 +3801,15 @@ function ClosePositionCard({ data, isDismissed: propDismissed, realtimePrices, o
         </div>
         <div>
           <span className="text-muted">Est. PnL</span>
-          <div className={`font-mono ${pnlColor}`}>{formatUsd(pnl)}</div>
+          <div className={`font-mono ${pnlColor}`}>
+            <span
+              key={formatUsd(pnl)}
+              className="inline-block rounded px-1 -mx-1"
+              style={{ animation: "price-pulse 500ms ease-out" }}
+            >
+              {formatUsd(pnl)}
+            </span>
+          </div>
         </div>
       </div>
 

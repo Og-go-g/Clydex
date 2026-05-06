@@ -48,3 +48,15 @@ body {
   from { opacity: 1; }
   to   { opacity: 0; }
 }
+
+/* Live price tick pulse — used on chat preview cards (OrderPreview,
+ * ClosePosition) to mimic 01.xyz's brief highlight on every WS price
+ * update. Wrap the price node in a span keyed by the price value:
+ *   <span key={price} className="animate-[price-pulse_500ms_ease-out]">
+ * React remounts on every change, the keyframe restarts. The
+ * background tint (white/10) fades to transparent — visible enough
+ * to register as motion, subtle enough not to distract while reading. */
+@keyframes price-pulse {
+  from { background-color: rgba(255, 255, 255, 0.18); }
+  to   { background-color: transparent; }
+}
