@@ -13,6 +13,11 @@ import { useNordPrices } from "@/hooks/useNordPrices";
 import { useOrderExecution, isPreviewConsumed, isPreviewFailed, getConfirmedPosition } from "@/hooks/useOrderExecution";
 import { useOrderActions } from "@/hooks/useOrderActions";
 import { useNordAccount } from "@/hooks/useNordAccount";
+import {
+  useLiveOrderState,
+  useLivePositionState,
+  refreshLiveAccountState,
+} from "@/hooks/useLiveAccountState";
 import { isNordWsEnabledForSession } from "@/lib/feature-flags";
 import { ClosePositionModal } from "@/components/collateral/ClosePositionModal";
 import { useToast } from "@/components/alerts/ToastProvider";
@@ -3515,6 +3520,14 @@ function ClosePositionCard({ data, isDismissed: propDismissed, realtimePrices, o
   const closeBaseAsset = baseAssetFrom(market);
   const isLong = side === "Long";
 
+  // Live check: is the position this card is offering to close still
+  // open (and on the same side)? If not, the matching engine already
+  // closed it (manual close from /portfolio, opposing-side trade,
+  // liquidation, etc.) and the close button would error. We treat
+  // wrong-side as "closed too" — flipping a long into a short means
+  // the original long this card targeted is gone.
+  const livePos = useLivePositionState(market, side);
+
   // Realtime price
   const livePrice = realtimePrices?.[market] ?? realtimePrices?.[normSym(market)] ?? null;
   const currentPrice = livePrice ?? staticPrice;
@@ -3561,6 +3574,15 @@ function ClosePositionCard({ data, isDismissed: propDismissed, realtimePrices, o
   const handleClose = () => {
     executeClose({ market, side, size: closeSize, previewId, slippage: closeSlippage });
   };
+
+  // Refresh the live account cache the moment a close confirms — keeps
+  // every other card in the chat in sync without waiting for the
+  // backstop poll. (executeClose's WS account event will also trigger
+  // a refresh, but doing it locally on confirmation avoids the
+  // 250 ms WS debounce window.)
+  useEffect(() => {
+    if (status === "confirmed") refreshLiveAccountState();
+  }, [status]);
 
   // ── PRIORITY 1: Loading states always win ──
   if (status === "signing" || status === "submitting" || status === "verifying") {
@@ -3652,6 +3674,28 @@ function ClosePositionCard({ data, isDismissed: propDismissed, realtimePrices, o
           <span className="text-sm font-medium text-green-400">Position Closed</span>
         </div>
         <div className="mt-1 text-xs text-muted">{market} {side} — {fmtSize(closeSize)}</div>
+      </div>
+    );
+  }
+
+  // ── PRIORITY 4.5: Position no longer open on the exchange ──
+  // The local "isExecuted" check above only knows about closes done
+  // through THIS card (writes to localStorage). It misses closes done
+  // from /portfolio's modal, AI commands in another tab, automatic
+  // closes (TP/SL fired), and liquidations. The live state hook hits
+  // /api/account so it sees all of them. Only show this state when
+  // the card is otherwise "idle" — don't override loading or error.
+  if (status === "idle" && livePos.status === "closed") {
+    return (
+      <div className="my-2 rounded-xl border border-border bg-card/30 p-4 opacity-50 pointer-events-none">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-bold text-muted">CLOSE</span>
+          <span className="text-sm font-semibold text-muted">{market}</span>
+          <span className="text-xs text-muted">{side}</span>
+        </div>
+        <div className="mt-1 text-xs text-muted">
+          Position is no longer open — already closed via another channel.
+        </div>
       </div>
     );
   }
@@ -3753,6 +3797,12 @@ function CancelOrderCard({ data }: { data: Record<string, unknown> }) {
 
   const isCancelling = Number.isFinite(orderId) && cancellingIds.has(orderId);
 
+  // Live check against /api/account: is this order still on the book?
+  // Without this, a card from four days ago for an already-filled or
+  // already-cancelled order shows the orange "Cancel Order" button as
+  // if it were actionable — which was the bug that prompted the audit.
+  const liveOrder = useLiveOrderState(Number.isFinite(orderId) ? orderId : null);
+
   const handleCancel = async () => {
     if (isCancelling) return;
     if (!Number.isFinite(orderId)) {
@@ -3766,6 +3816,10 @@ function CancelOrderCard({ data }: { data: Record<string, unknown> }) {
     const ok = await cancelOrder(orderId);
     if (ok) {
       setCancelState("confirmed");
+      // Tell the live cache to refetch immediately so other cards in
+      // the chat reflect the new state without waiting for the
+      // backstop poll.
+      refreshLiveAccountState();
       addToast({ type: "success", title: "Order Cancelled", message: `${cancelBaseAsset} ${side} @ ${formatUsd(price)}`, duration: 5000 });
     } else {
       // useOrderActions catches signing/submit errors and stores them
@@ -3802,6 +3856,26 @@ function CancelOrderCard({ data }: { data: Record<string, unknown> }) {
           <span className="text-sm font-medium text-green-400">Order Cancelled</span>
         </div>
         <div className="mt-1 text-xs text-muted">{market} {side} {(size ?? 0).toFixed(4)} @ {formatUsd(price)}</div>
+      </div>
+    );
+  }
+
+  // Order is no longer on the book (filled, cancelled elsewhere, or
+  // expired). Show a quiet "no longer active" state so the user can
+  // see the historical context without thinking the cancel button
+  // would do anything. Only trip this when liveOrder is fully
+  // resolved — `loading` shows the active card to avoid a flash.
+  if (cancelState === "idle" && liveOrder.status === "closed") {
+    return (
+      <div className="my-2 rounded-xl border border-border bg-card/30 p-4 opacity-50">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-bold text-muted">CANCEL</span>
+          <span className="text-sm font-semibold text-muted">{market}</span>
+          <span className="text-xs text-muted">{side}</span>
+        </div>
+        <div className="mt-1 text-xs text-muted">
+          Order no longer active — already filled, cancelled, or expired.
+        </div>
       </div>
     );
   }
