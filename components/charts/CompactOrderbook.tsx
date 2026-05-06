@@ -70,7 +70,7 @@ export function CompactOrderbook({ topBids, topAsks, spread, baseAsset }: Compac
   return (
     <div className="border-t border-[#262626] flex flex-col flex-1 min-h-0">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-1.5 text-[10px] text-[#555] border-b border-[#262626]">
+      <div className="flex items-center justify-between px-3 py-1 text-[10px] text-[#555] border-b border-[#262626]">
         <span>Price (USD)</span>
         <span>Size ({baseAsset})</span>
       </div>
