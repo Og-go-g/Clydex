@@ -412,22 +412,23 @@ export function TradingSidebar({ baseAsset: _baseAsset }: TradingSidebarProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {/* Top half (50%) — Account snapshot */}
-      <div className="flex flex-col" style={{ flexBasis: "50%", minHeight: 0 }}>
+      {/* Top — Account snapshot. shrink-0 so the section is always
+          tall enough to fit its content (header + 4 metric rows +
+          health bar) without scrolling, but never larger than that.
+          The Positions list below claims all remaining space. */}
+      <div className="flex flex-col shrink-0">
         <div className="flex items-center justify-between border-b border-[#262626] px-3 py-1 text-[10px] uppercase tracking-wider text-[#555]">
           Account
         </div>
-        <div className="flex-1 min-h-0 overflow-y-auto">
-          <AccountSnapshotBlock
-            snapshot={snapshot}
-            loading={loading}
-            isAuthenticated={isAuthenticated}
-          />
-        </div>
+        <AccountSnapshotBlock
+          snapshot={snapshot}
+          loading={loading}
+          isAuthenticated={isAuthenticated}
+        />
       </div>
 
-      {/* Bottom half (50%) — Open positions (scrollable) */}
-      <div className="flex flex-col border-t border-[#262626]" style={{ flexBasis: "50%", minHeight: 0 }}>
+      {/* Bottom — Open positions, fills remaining space, scrolls if many */}
+      <div className="flex flex-1 min-h-0 flex-col border-t border-[#262626]">
         <div className="flex flex-1 min-h-0 flex-col">
           <div className="flex items-center justify-between border-b border-[#262626] px-3 py-1 text-[10px] uppercase tracking-wider text-[#555]">
             <span>Positions</span>
