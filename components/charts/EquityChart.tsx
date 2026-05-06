@@ -100,6 +100,10 @@ export function EquityChart({ liveEquity }: { liveEquity?: number }) {
         fontFamily: "'Inter', system-ui, sans-serif",
         fontSize: 10,
       },
+      // English locale for month/day labels — see PriceChart for rationale.
+      localization: {
+        locale: "en-US",
+      },
       grid: {
         vertLines: { color: "rgba(255,255,255,0.03)" },
         horzLines: { color: "rgba(255,255,255,0.03)" },

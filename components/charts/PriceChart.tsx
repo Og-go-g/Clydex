@@ -212,6 +212,12 @@ export const PriceChart = forwardRef<PriceChartHandle, PriceChartProps>(function
         fontFamily: "'Inter', system-ui, sans-serif",
         fontSize: compact ? 10 : 11,
       },
+      // Pin month/day labels to English regardless of the user's
+      // browser locale — otherwise Chrome with ru-RU shows "май"
+      // and friends, which clashes with the otherwise English UI.
+      localization: {
+        locale: "en-US",
+      },
       grid: {
         vertLines: { color: compact ? "transparent" : COLORS.grid },
         horzLines: { color: compact ? "#0f0f0f" : COLORS.grid },
