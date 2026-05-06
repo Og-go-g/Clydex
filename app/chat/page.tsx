@@ -2,7 +2,7 @@
 
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
-import { useRef, useEffect, useState, useMemo, useCallback, lazy, Suspense } from "react";
+import { useRef, useEffect, useState, useMemo, useCallback, useSyncExternalStore, lazy, Suspense } from "react";
 import Link from "next/link";
 import { useWallet } from "@/lib/wallet/context";
 import { useChatSessions } from "@/lib/chat/context";
@@ -155,14 +155,36 @@ function saveDismissed(s: Set<string>) {
   } catch { /* quota exceeded */ }
 }
 const dismissedPreviews = loadDismissed();
+const dismissedListeners = new Set<() => void>();
 
 function dismissPreview(previewId: string) {
+  if (dismissedPreviews.has(previewId)) return;
   dismissedPreviews.add(previewId);
   saveDismissed(dismissedPreviews);
+  for (const l of dismissedListeners) l();
 }
 
 function isPreviewDismissed(previewId: string): boolean {
   return dismissedPreviews.has(previewId);
+}
+
+// Reactive read of dismissedPreviews for components that render outside
+// the inner card (e.g. CollapsibleCard wrapper, ToolResult). When the
+// inner X button calls dismissPreview() the listeners fire and any
+// subscribed component re-renders with the new flag. Without this, the
+// wrapper's collapse-chevron and trailing description text stayed live
+// after the inner card had already shrunk to its dismissed pill — so
+// the chevron overlapped the pill and the AI's "Here's your preview"
+// text dangled below a dead card.
+function useIsPreviewDismissed(previewId: string | undefined): boolean {
+  return useSyncExternalStore(
+    (cb) => {
+      dismissedListeners.add(cb);
+      return () => { dismissedListeners.delete(cb); };
+    },
+    () => (previewId ? dismissedPreviews.has(previewId) : false),
+    () => false,
+  );
 }
 
 // ─── Collapsible card wrapper ────────────────────────────────────
@@ -179,6 +201,7 @@ function CollapsibleCard({
   children,
   descriptionText,
   beforeText,
+  dismissed,
 }: {
   cardKey: string; // unique key for localStorage persistence
   label: string;   // shown when collapsed, e.g. "Position — SUI/USD Short"
@@ -187,6 +210,7 @@ function CollapsibleCard({
   children: React.ReactNode;
   descriptionText?: string; // AI description text after card — hidden when collapsed
   beforeText?: string; // AI description text before card — hidden when collapsed
+  dismissed?: boolean; // user dismissed the inner action (X button, auto-timeout, AI cancel)
 }) {
   const storageKey = COLLAPSE_PREFIX + cardKey;
   const [collapsed, setCollapsed] = useState(() => {
@@ -200,6 +224,15 @@ function CollapsibleCard({
       return next;
     });
   }, [storageKey]);
+
+  // When the inner action is dismissed, the inner card already shrinks
+  // to its own compact pill. Strip everything else: no collapse chevron
+  // (overlapped the pill), no beforeText/descriptionText (the AI's
+  // "here's your preview" sentence makes no sense once the action is
+  // dead). The pill itself is the only content the user needs.
+  if (dismissed) {
+    return <div>{children}</div>;
+  }
 
   if (collapsed) {
     return (
@@ -241,6 +274,45 @@ function CollapsibleCard({
         </div>
       )}
     </div>
+  );
+}
+
+// Wraps CollapsibleCard with a reactive read of dismissedPreviews so
+// that clicking the inner X (which writes to localStorage) propagates
+// up to the wrapper and forces it into compact mode. `chatDismissed`
+// covers the orthogonal case where the AI/user dismissed via chat
+// text (e.g. "no thanks") — that one already arrives via props.
+function DismissAwareCard({
+  previewId,
+  cardKey,
+  label,
+  chatDismissed,
+  beforeText,
+  descriptionText,
+  render,
+}: {
+  previewId: string | undefined;
+  cardKey: string;
+  label: string;
+  chatDismissed: boolean;
+  beforeText?: string;
+  descriptionText?: string;
+  render: (dismissed: boolean) => React.ReactNode;
+}) {
+  const manualDismissed = useIsPreviewDismissed(previewId);
+  const dismissed = chatDismissed || manualDismissed;
+  return (
+    <CollapsibleCard
+      cardKey={cardKey}
+      label={label}
+      badge={dismissed ? "Dismissed" : undefined}
+      badgeColor="text-muted"
+      beforeText={beforeText}
+      descriptionText={descriptionText}
+      dismissed={dismissed}
+    >
+      {render(dismissed)}
+    </CollapsibleCard>
   );
 }
 
@@ -934,17 +1006,33 @@ function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, onOpen
     const sym = (result.market as string) ?? "";
     const sd = (result.side as string) ?? "";
     return (
-      <CollapsibleCard cardKey={cKey} label={`Order — ${sym} ${sd}`} badge={isDismissed ? "Dismissed" : undefined} badgeColor="text-muted" beforeText={beforeText} descriptionText={descriptionText}>
-        <OrderPreviewCard data={result} realtimePrices={realtimePrices} onSendMessage={onSendMessage} isDismissed={isDismissed} />
-      </CollapsibleCard>
+      <DismissAwareCard
+        previewId={result.previewId as string | undefined}
+        cardKey={cKey}
+        label={`Order — ${sym} ${sd}`}
+        chatDismissed={!!isDismissed}
+        beforeText={beforeText}
+        descriptionText={descriptionText}
+        render={(dismissedFinal) => (
+          <OrderPreviewCard data={result} realtimePrices={realtimePrices} onSendMessage={onSendMessage} isDismissed={dismissedFinal} />
+        )}
+      />
     );
   }
   if (toolName === "closePosition") {
     const sym = (result.market as string) ?? "";
     return (
-      <CollapsibleCard cardKey={cKey} label={`Close — ${sym}`} badge={isDismissed ? "Dismissed" : undefined} badgeColor="text-muted" beforeText={beforeText} descriptionText={descriptionText}>
-        <ClosePositionCard data={result} isDismissed={isDismissed} realtimePrices={realtimePrices} onOpenCloseModal={onOpenCloseModal} />
-      </CollapsibleCard>
+      <DismissAwareCard
+        previewId={result.previewId as string | undefined}
+        cardKey={cKey}
+        label={`Close — ${sym}`}
+        chatDismissed={!!isDismissed}
+        beforeText={beforeText}
+        descriptionText={descriptionText}
+        render={(dismissedFinal) => (
+          <ClosePositionCard data={result} isDismissed={dismissedFinal} realtimePrices={realtimePrices} onOpenCloseModal={onOpenCloseModal} />
+        )}
+      />
     );
   }
   if (toolName === "setTrigger") {
@@ -1979,8 +2067,9 @@ function MarketPriceCard({ data, livePrice }: { data: Record<string, unknown>; l
 
   return (
     <div className="my-2 w-full max-w-3xl overflow-hidden rounded-xl border border-border bg-background">
-      {/* Header + Price */}
-      <div className="flex items-center justify-between px-4 pt-3 pb-1">
+      {/* Header + Price — pr-10 keeps the right-side price clear of the
+          CollapsibleCard wrapper's collapse chevron (top-2 right-2). */}
+      <div className="flex items-center justify-between px-4 pr-10 pt-3 pb-1">
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold text-foreground">{baseAsset}/USD</span>
           {maxLeverage && (
@@ -2357,7 +2446,7 @@ function LivePositionCard({ initialPos, txHash, realtimePrices, onSendMessage }:
 
   return (
     <div className="my-2 w-full max-w-lg overflow-hidden rounded-xl border border-green-500/30 bg-background">
-      <div className="border-b border-border px-4 py-2 flex items-center gap-2">
+      <div className="border-b border-border px-4 pr-10 py-2 flex items-center gap-2">
         <span className="text-green-400">✓</span>
         <span className="text-sm font-semibold text-green-400">Position Opened</span>
         {txHash && <span className="ml-auto text-[10px] text-muted">Tx: {formatTxHash(txHash)}</span>}
@@ -3765,7 +3854,7 @@ function ClosePositionCard({ data, isDismissed: propDismissed, realtimePrices, o
         </div>
         <button
           onClick={(e) => { e.stopPropagation(); handleDismissClose(); }}
-          className="rounded-md p-1 text-muted/50 hover:text-muted hover:bg-white/5 transition-colors"
+          className="mr-5 rounded-md p-1 text-muted/50 hover:text-muted hover:bg-white/5 transition-colors"
           aria-label="Dismiss"
         >
           <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
