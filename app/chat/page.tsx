@@ -2993,15 +2993,26 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage, isDismissed: pr
   const [manualDismiss, setManualDismiss] = useState(() => previewId ? isPreviewDismissed(previewId) : false);
   const [timedOut, setTimedOut] = useState(false);
 
-  // Auto-dismiss after 3 minutes of inactivity (only in idle state)
+  // Auto-dismiss strategy depends on order type:
+  //   - market orders: 90 s. The "preview entry price" drifts every
+  //     second; after a couple of minutes the quote shown to the user
+  //     is meaningless and clicking Execute would fill at a wildly
+  //     different price than what they read.
+  //   - limit orders: 5 min. Limit price is fixed by the user, so the
+  //     preview stays meaningful as long as the level is still
+  //     sensible relative to the market. Server-side preview store
+  //     TTL is ~30 min so 5 min stays well within it.
+  // (isLimit / isMarketOrder are computed below — match by orderType.)
+  const dismissAfterMs = (orderType ?? "market") === "limit" ? 5 * 60_000 : 90_000;
+
   useEffect(() => {
     if (status !== "idle" || isExecuted || propDismissed || manualDismiss) return;
     const timer = setTimeout(() => {
       setTimedOut(true);
       if (previewId) dismissPreview(previewId);
-    }, 3 * 60 * 1000);
+    }, dismissAfterMs);
     return () => clearTimeout(timer);
-  }, [status, isExecuted, propDismissed, manualDismiss, previewId]);
+  }, [status, isExecuted, propDismissed, manualDismiss, previewId, dismissAfterMs]);
 
   const handleDismissOrder = () => {
     setManualDismiss(true);
@@ -3020,6 +3031,22 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage, isDismissed: pr
   const livePrice = realtimePrices?.[market] ?? realtimePrices?.[normSym(market)] ?? null;
   const currentPrice = (!isLimit && livePrice) ? livePrice : entryPrice;
   const fmtEntry = currentPrice ? fmtPrice(currentPrice) : "—";
+
+  // Price-drift auto-dismiss: if a MARKET preview is left sitting and
+  // the live price has moved >1.5 % from what we quoted, retire it.
+  // The user would otherwise click Execute and fill at a price they
+  // didn't expect. Only applies to market orders — limits stay valid
+  // as long as the limit price stays sensible.
+  useEffect(() => {
+    if (status !== "idle" || isExecuted || propDismissed || manualDismiss) return;
+    if (isLimit) return;
+    if (!livePrice || !entryPrice || entryPrice <= 0) return;
+    const drift = Math.abs(livePrice - entryPrice) / entryPrice;
+    if (drift > 0.015) {
+      setTimedOut(true);
+      if (previewId) dismissPreview(previewId);
+    }
+  }, [livePrice, entryPrice, status, isExecuted, propDismissed, manualDismiss, isLimit, previewId]);
 
   // Recalculate derived values with live price
   const liveNotional = size * currentPrice;
@@ -3539,15 +3566,29 @@ function ClosePositionCard({ data, isDismissed: propDismissed, realtimePrices, o
   const [manualDismiss, setManualDismiss] = useState(() => previewId ? isPreviewDismissed(previewId) : false);
   const [timedOut, setTimedOut] = useState(false);
 
-  // Auto-dismiss after 3 minutes of inactivity (only in idle state)
+  // Close is always a market order — same logic as OrderPreviewCard
+  // market case. 90 s before the quoted "close at $X" gets stale.
   useEffect(() => {
     if (status !== "idle" || isExecuted || propDismissed || manualDismiss) return;
     const timer = setTimeout(() => {
       setTimedOut(true);
       if (previewId) dismissPreview(previewId);
-    }, 3 * 60 * 1000);
+    }, 90_000);
     return () => clearTimeout(timer);
   }, [status, isExecuted, propDismissed, manualDismiss, previewId]);
+
+  // Price-drift auto-dismiss for the close: if the live price moved
+  // >1.5 % from the quote we showed, retire the card so the user
+  // doesn't accidentally close at a noticeably different price.
+  useEffect(() => {
+    if (status !== "idle" || isExecuted || propDismissed || manualDismiss) return;
+    if (!livePrice || !staticPrice || staticPrice <= 0) return;
+    const drift = Math.abs(livePrice - staticPrice) / staticPrice;
+    if (drift > 0.015) {
+      setTimedOut(true);
+      if (previewId) dismissPreview(previewId);
+    }
+  }, [livePrice, staticPrice, status, isExecuted, propDismissed, manualDismiss, previewId]);
 
   const handleDismissClose = () => {
     setManualDismiss(true);
