@@ -310,34 +310,33 @@ export function TradingSidebar({ baseAsset: _baseAsset }: TradingSidebarProps) {
         return;
       }
       // 01 margin fields — see node_modules/@n1xyz/nord-ts AccountMarginsView:
-      //   omf — "open margin" — somewhat proportional to USD weighted value
-      //         of the account (equity-equivalent). Primary for liq math.
-      //   mf  — similar to omf but different denominator (pn vs pon).
-      //         Falls back to omf if missing.
-      //   imf — initial margin requirement (the "used" amount; if free
-      //         drops below this, new orders can't be opened).
-      //   mmf — maintenance margin requirement. When omf <= mmf, positions
-      //         start getting reduced/liquidated.
-      //   pon — sum of open position notional. Equals 0 with no positions
-      //         → liquidation risk is undefined → health = 100 %.
+      //   omf — somewhat proportional to USD-weighted value of the
+      //         account (equity-equivalent). Used here ONLY for liq
+      //         math (mirrors lib/n1/alerts.ts).
+      //   imf — initial margin requirement (locked by current
+      //         positions/orders).
+      //   mmf — maintenance margin requirement.
+      //   pon — sum of open position notional. pon = 0 ⇒ no liq risk.
       //
-      // lib/n1/alerts.ts uses `omf / pon` as the canonical liq ratio for
-      // alerts; we mirror that source-of-truth here for consistency. The
-      // health formula `(omf - mmf) / omf * 100` is the algebraic equivalent
-      // of `1 - (mmf/pon)/(omf/pon)` — the % of margin headroom remaining
-      // before maintenance kicks in.
+      // Why we DON'T use omf for the displayed Equity number:
+      // omf is discounted by token weight and runs ~$0.10–$0.30 lower
+      // than the user's real USD net worth on the account. The
+      // portfolio page (app/portfolio/page.tsx:656) computes
+      //   totalValue = usdcBalance + sum(unrealizedPnl)
+      // and calls THAT the user-facing equity — matches what 01.xyz
+      // shows as "Total Value". We mirror the same formula here so
+      // the chat sidebar and portfolio agree to the cent.
+      //
+      // Health formula `(omf - mmf) / omf * 100` is the algebraic
+      // equivalent of `1 - (mmf/pon)/(omf/pon)` — % of headroom above
+      // maintenance threshold. Health uses omf because that's what
+      // the matching engine uses for liquidation decisions; equity
+      // displayed to the user uses the portfolio-style number.
       const margins = data.margins ?? {};
-      const equity = Number(margins.omf ?? margins.mf ?? 0);
+      const omf = Number(margins.omf ?? margins.mf ?? 0);
       const usedMargin = Number(margins.imf ?? 0);
-      const freeMargin = Math.max(0, equity - usedMargin);
       const mmfAcct = Number(margins.mmf ?? 0);
       const pon = Number(margins.pon ?? 0);
-      // No-position case: pon = 0 ⇒ no liquidation risk by definition
-      // (mirrors alerts.ts:32). Show 100 % health regardless of mmf.
-      const marginHealth = equity > 0 && pon > 0
-        ? Math.max(0, Math.min(100, ((equity - mmfAcct) / equity) * 100))
-        : 100;
-      const marginRatio = equity > 0 ? usedMargin / equity : 0;
 
       const positions: OpenPosition[] = [];
       type PerpPos = {
@@ -347,6 +346,7 @@ export function TradingSidebar({ baseAsset: _baseAsset }: TradingSidebarProps) {
         markPrice?: number;
         perp?: { baseSize?: number; isLong?: boolean; price?: number };
       };
+      type Balance = { token?: string; amount?: number };
       for (const p of (data.positions ?? []) as PerpPos[]) {
         if (!p.perp) continue;
         const baseSize = Number(p.perp.baseSize ?? 0);
@@ -355,9 +355,9 @@ export function TradingSidebar({ baseAsset: _baseAsset }: TradingSidebarProps) {
         const absSize = Math.abs(baseSize);
         const entry = Number(p.perp.price ?? 0);
         const mark = Number(p.markPrice ?? entry);
-        // Cross-margin liq estimate: use account-wide cushion.
+        // Cross-margin liq estimate: use account-wide cushion (omf - mmf).
         const pmmf = Number(p.marketMmf ?? mmf);
-        const cushion = equity - mmfAcct;
+        const cushion = omf - mmfAcct;
         const divisor = absSize * (isLong ? (1 - pmmf) : (1 + pmmf));
         const liqPrice = Math.abs(divisor) > 1e-12
           ? (isLong ? mark - cushion / divisor : mark + cushion / divisor)
@@ -384,6 +384,30 @@ export function TradingSidebar({ baseAsset: _baseAsset }: TradingSidebarProps) {
           liqDistancePct,
         });
       }
+
+      // Equity displayed to the user — matches portfolio's "Total Value":
+      // USDC token balance + sum(unrealizedPnl). NOT omf, which is
+      // discounted by token weight and reads ~$0.10–$0.30 lower than
+      // the user's real USD net worth.
+      const balances = (data.balances ?? []) as Balance[];
+      const usdcBalance = Number(
+        balances.find((b) => (b.token ?? "").toUpperCase() === "USDC")?.amount ?? 0,
+      );
+      const totalUnrealizedPnl = positions.reduce((s, p) => s + p.unrealisedPnl, 0);
+      const equity = usdcBalance + totalUnrealizedPnl;
+
+      // Free margin = displayed equity - locked initial margin.
+      // Used the displayed equity here too so "Equity − Used = Free"
+      // arithmetic shown in the UI is internally consistent.
+      const freeMargin = Math.max(0, equity - usedMargin);
+      const marginRatio = equity > 0 ? usedMargin / equity : 0;
+
+      // Health uses omf (matching engine's reference for liq), NOT
+      // the displayed equity — this is the % headroom above the
+      // maintenance threshold as the engine sees it.
+      const marginHealth = omf > 0 && pon > 0
+        ? Math.max(0, Math.min(100, ((omf - mmfAcct) / omf) * 100))
+        : 100;
 
       setSnapshot({
         exists: true,
