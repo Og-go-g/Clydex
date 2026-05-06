@@ -309,12 +309,32 @@ export function TradingSidebar({ baseAsset: _baseAsset }: TradingSidebarProps) {
         setSnapshot(EMPTY_SNAPSHOT);
         return;
       }
+      // 01 margin fields — see node_modules/@n1xyz/nord-ts AccountMarginsView:
+      //   omf — "open margin" — somewhat proportional to USD weighted value
+      //         of the account (equity-equivalent). Primary for liq math.
+      //   mf  — similar to omf but different denominator (pn vs pon).
+      //         Falls back to omf if missing.
+      //   imf — initial margin requirement (the "used" amount; if free
+      //         drops below this, new orders can't be opened).
+      //   mmf — maintenance margin requirement. When omf <= mmf, positions
+      //         start getting reduced/liquidated.
+      //   pon — sum of open position notional. Equals 0 with no positions
+      //         → liquidation risk is undefined → health = 100 %.
+      //
+      // lib/n1/alerts.ts uses `omf / pon` as the canonical liq ratio for
+      // alerts; we mirror that source-of-truth here for consistency. The
+      // health formula `(omf - mmf) / omf * 100` is the algebraic equivalent
+      // of `1 - (mmf/pon)/(omf/pon)` — the % of margin headroom remaining
+      // before maintenance kicks in.
       const margins = data.margins ?? {};
-      const equity = Number(margins.mf ?? margins.omf ?? 0);
+      const equity = Number(margins.omf ?? margins.mf ?? 0);
       const usedMargin = Number(margins.imf ?? 0);
       const freeMargin = Math.max(0, equity - usedMargin);
       const mmfAcct = Number(margins.mmf ?? 0);
-      const marginHealth = equity > 0 && mmfAcct > 0
+      const pon = Number(margins.pon ?? 0);
+      // No-position case: pon = 0 ⇒ no liquidation risk by definition
+      // (mirrors alerts.ts:32). Show 100 % health regardless of mmf.
+      const marginHealth = equity > 0 && pon > 0
         ? Math.max(0, Math.min(100, ((equity - mmfAcct) / equity) * 100))
         : 100;
       const marginRatio = equity > 0 ? usedMargin / equity : 0;
