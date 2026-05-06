@@ -3935,6 +3935,12 @@ function TriggerCard({ data }: { data: Record<string, unknown> }) {
   const textColor = isStopLoss ? "text-red-400" : "text-green-400";
   const triggerBaseAsset = baseAssetFrom(market);
 
+  // A trigger only makes sense while the position it protects is open.
+  // If the user closed the position (or it got auto-closed / liquidated)
+  // before approving the trigger, we should stop offering to set it
+  // — the matching engine would reject it anyway.
+  const livePos = useLivePositionState(market, side);
+
   // Check if this trigger was already set — two sources:
   // 1. sessionStorage (survives reload even if trigger was later removed by position close)
   // 2. Live API check (trigger still exists on account)
@@ -4003,6 +4009,20 @@ function TriggerCard({ data }: { data: Record<string, unknown> }) {
         <span className="text-green-400 text-xs">✓</span>
         <span className="text-xs font-medium text-green-400">{kindLabel} Set</span>
         <span className="text-xs text-muted ml-auto">{market} @ {fmtPrice(triggerPrice)}</span>
+      </div>
+    );
+  }
+
+  // ── Position no longer open — trigger would be rejected ──
+  // Idle-only: don't override a loading or already-set state.
+  if (status === "idle" && livePos.status === "closed") {
+    return (
+      <div className="my-1 rounded-lg border border-border bg-card/30 px-3 py-2 opacity-50 pointer-events-none">
+        <div className="flex items-center gap-2">
+          <span className={`text-[11px] font-bold ${textColor}`}>{kindLabel}</span>
+          <span className="text-xs text-muted">{market} {side}</span>
+          <span className="text-xs text-muted ml-auto">position closed</span>
+        </div>
       </div>
     );
   }
