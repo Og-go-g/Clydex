@@ -96,6 +96,34 @@ async function resolveAccountId(addr: string): Promise<number | null> {
 
 const nordUserCache = new Map<string, NordUser>();
 
+// ─── Mark Price Cache (per engine cycle) ─────────────────────────
+//
+// Mark price moves at most a few bps within seconds. Within a single
+// engine cycle (~few seconds wall-clock), it's effectively constant.
+// Cache by marketId to collapse N×M `getMarketStats` calls (one per
+// (follower, diff) pair) down to one call per (cycle, market).
+//
+// Cleared at the top of runCopyEngine, same lifecycle as nordUserCache.
+
+const markPriceCache = new Map<number, number>();
+
+async function getCachedMarkPrice(marketId: number): Promise<number> {
+  const cached = markPriceCache.get(marketId);
+  if (cached !== undefined) return cached;
+  try {
+    const stats = await getMarketStats(marketId);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const price = (stats as any).perpStats?.mark_price ?? (stats as any).indexPrice ?? 0;
+    if (typeof price === "number" && isFinite(price) && price > 0) {
+      markPriceCache.set(marketId, price);
+      return price;
+    }
+  } catch {
+    // fall through — caller treats 0 as "couldn't fetch"
+  }
+  return 0;
+}
+
 async function getOrRestoreNordUser(session: CopySession): Promise<NordUser> {
   const cached = nordUserCache.get(session.walletAddr);
   if (cached) return cached;
@@ -352,15 +380,9 @@ async function executeCopyForFollower(
   }
   followerDelta = Math.min(followerDelta, MAX_ORDER_SIZE_BASE);
 
-  // Get mark price
-  let markPrice = 0;
-  try {
-    const stats = await getMarketStats(diff.marketId);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    markPrice = (stats as any).perpStats?.mark_price ?? (stats as any).indexPrice ?? 0;
-  } catch {
-    return { success: false, error: "Failed to get mark price" };
-  }
+  // Get mark price (cycle-cached — collapses N×M fetches across
+  // followers and diffs to one fetch per (cycle, market))
+  const markPrice = await getCachedMarkPrice(diff.marketId);
   if (!isFinite(markPrice) || markPrice <= 0) {
     return { success: false, error: "Invalid mark price" };
   }
@@ -462,6 +484,7 @@ async function executeCopyForFollower(
           side: diff.side, // closePosition internally flips to opposite
           size: roundedSize,
           slippage: DEFAULT_SLIPPAGE,
+          markPrice, // skip closePosition's internal getMarketStats
         }),
         ORDER_RETRY_COUNT,
         ORDER_RETRY_DELAY_MS,
@@ -479,6 +502,7 @@ async function executeCopyForFollower(
               side: oldSide,
               size: oldProportionalSize,
               slippage: DEFAULT_SLIPPAGE,
+              markPrice, // skip closePosition's internal getMarketStats
             }),
             ORDER_RETRY_COUNT,
             ORDER_RETRY_DELAY_MS,
@@ -563,18 +587,25 @@ async function executeCopyForFollower(
         diff.action !== "close" && diff.action !== "decrease") {
       try {
         const followerAccountId = await getFollowerAccountId();
-        const stopPrice = diff.side === "Long"
-          ? markPrice * (1 - stopLossPct / 100)
-          : markPrice * (1 + stopLossPct / 100);
+        if (followerAccountId === null) {
+          // Without an accountId, the SDK can't disambiguate which
+          // sub-account to attach the trigger to. Skip rather than
+          // pass undefined and risk attaching it to the wrong place.
+          console.warn(`[copy-engine] stop-loss skipped (no accountId) for ${follower.followerAddr} ${diff.symbol}`);
+        } else {
+          const stopPrice = diff.side === "Long"
+            ? markPrice * (1 - stopLossPct / 100)
+            : markPrice * (1 + stopLossPct / 100);
 
-        if (stopPrice > 0 && isFinite(stopPrice)) {
-          await setTrigger(nordUser, {
-            symbol: diff.symbol,
-            side: diff.side as "Long" | "Short",
-            kind: "StopLoss",
-            triggerPrice: Math.round(stopPrice * 1e6) / 1e6,
-            accountId: followerAccountId ?? undefined,
-          });
+          if (stopPrice > 0 && isFinite(stopPrice)) {
+            await setTrigger(nordUser, {
+              symbol: diff.symbol,
+              side: diff.side as "Long" | "Short",
+              kind: "StopLoss",
+              triggerPrice: Math.round(stopPrice * 1e6) / 1e6,
+              accountId: followerAccountId,
+            });
+          }
         }
       } catch (err) {
         // Stop-loss is best-effort — don't fail the trade if trigger fails
@@ -635,8 +666,10 @@ export async function runCopyEngine(): Promise<EngineResult> {
   };
 
   try {
-    // Clear NordUser cache each cycle (forces fresh refreshSession)
+    // Clear caches each cycle — NordUser forces fresh refreshSession,
+    // markPrice keeps each cycle's prices fresh-ish (within seconds).
     nordUserCache.clear();
+    markPriceCache.clear();
 
     await ensureMarketCache();
     const markets = getCachedMarkets();
@@ -791,6 +824,7 @@ export async function runCopyEngine(): Promise<EngineResult> {
   } finally {
     engineRunning = false;
     nordUserCache.clear(); // clean up restored sessions
+    markPriceCache.clear();
     result.durationMs = Date.now() - start;
   }
 

@@ -336,7 +336,20 @@ export async function withdrawUsdc(user: NordUser, amount: number) {
  */
 export async function closePosition(
   user: NordUser,
-  params: { symbol: string; side: OrderSide; size: number; slippage?: number; accountId?: number }
+  params: {
+    symbol: string;
+    side: OrderSide;
+    size: number;
+    slippage?: number;
+    accountId?: number;
+    /**
+     * Optional pre-fetched mark price. When supplied, skips the
+     * internal getMarketStats fetch — useful for callers (like the
+     * copy engine) that already have the price in hand. Pass 0 or
+     * omit to let the function fetch.
+     */
+    markPrice?: number;
+  }
 ) {
   const { ensureMarketCache } = await import("./constants");
   await ensureMarketCache();
@@ -354,9 +367,12 @@ export async function closePosition(
   // Slippage protection for close orders
   let closePrice: number | undefined;
   if (params.slippage) {
-    const { getMarketStats } = await import("./client");
-    const stats = await getMarketStats(market.id);
-    const markPrice = stats.perpStats?.mark_price ?? stats.indexPrice ?? 0;
+    let markPrice = params.markPrice ?? 0;
+    if (markPrice <= 0) {
+      const { getMarketStats } = await import("./client");
+      const stats = await getMarketStats(market.id);
+      markPrice = stats.perpStats?.mark_price ?? stats.indexPrice ?? 0;
+    }
     if (markPrice > 0) {
       // Close long = sell (ask) → min acceptable price
       // Close short = buy (bid) → max acceptable price
