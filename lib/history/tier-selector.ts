@@ -136,19 +136,22 @@ export async function upsertTierMembership(
  * skewing `staleCount` metrics.
  *
  * After deletion, the account is no longer in `leaderboard_tiers` at
- * all. Tier 4's nightly cycle (`SELECT ... WHERE NOT IN (... tier<4)`)
- * will re-pick it on its next run if it still has a `pnl_totals` row,
- * landing it at tier=4 with daily refresh — the right cadence for an
- * inactive account.
+ * all. If it's still active (in `pnl_totals` with a real wallet), the
+ * next tier cycle that matches its activity profile will re-land it.
  *
- * **Only call for restrictive tiers** (1, 2, 3) where the selector
- * filters by current activity. Do NOT call for tier 4 (catch-all) or
- * "spot" (random sample of tier 4) — both treat the table itself as
- * input, so every row outside their current sample looks like an
- * orphan and gets nuked. Returns the number of rows deleted.
+ * **Safe for every numeric tier (1–4).** All four selectors read from
+ * source-of-truth tables (pnl_totals / trade_history /
+ * account_interactions) and only consult `leaderboard_tiers` in
+ * anti-conditions, so an orphan there can never be a legitimate row.
+ *
+ * **Do NOT call for "spot"**: its selector samples 500 random rows
+ * directly FROM `leaderboard_tiers WHERE tier=4`, so every row outside
+ * the random sample would look orphan and get nuked.
+ *
+ * Returns the number of rows deleted.
  */
 export async function deleteTierOrphans(
-  tier: 1 | 2 | 3,
+  tier: 1 | 2 | 3 | 4,
   currentAccountIds: number[],
 ): Promise<number> {
   // Empty selection means we have no signal to identify orphans.

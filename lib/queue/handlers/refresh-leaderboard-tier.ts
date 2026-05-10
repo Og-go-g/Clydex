@@ -43,15 +43,21 @@ export async function handleRefreshTier(
 
   // Demote rolloff orphans — accounts that were tier=N from a previous
   // cycle but no longer meet the tier's criteria today. We delete them
-  // outright; tier 4's nightly cycle (`selectTier4` = NOT IN tier<4)
-  // re-picks them up at the right cadence if they still trade. Without
-  // this step `upsertTierMembership` never demotes (`LEAST(old,new)`)
-  // and stale rows accumulate forever — confirmed in 2026-05-10 prod
-  // diagnostic: 3329 dead rows in tier 3, 5 in tier 1, all rolled off.
-  // Skip for tier 4 / spot — their selectors are inclusive and treat
-  // the table as input, so every row outside the current sample looks
-  // orphan and would be nuked.
-  if (tier === 1 || tier === 2 || tier === 3) {
+  // outright; if they're still active they re-land in the right tier on
+  // the next cycle. Without this step `upsertTierMembership` never
+  // demotes (`LEAST(old,new)`) and stale rows accumulate forever.
+  //
+  // Apply for every numeric tier (1–4) — `selectTier4` reads from
+  // `pnl_totals`, not from `leaderboard_tiers`, so deleting orphans
+  // from tier 4 only removes accounts that no longer exist in
+  // pnl_totals (e.g. ghost rows left behind by a wallet-resolver run
+  // that didn't propagate to pnl_totals — 2026-05-10 found 133 such
+  // rows in tier 4 with `lastRefresh` stuck on deploy day).
+  //
+  // Skip ONLY for "spot": its selector samples 500 random rows FROM
+  // `leaderboard_tiers WHERE tier=4`, so every row outside the random
+  // sample would look orphan and get nuked.
+  if (typeof tier === "number") {
     const orphans = await deleteTierOrphans(
       tier,
       accounts.map((a) => a.accountId),
