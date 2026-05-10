@@ -31,6 +31,7 @@ export interface CopySubscription extends Record<string, unknown> {
 
 export interface CopySnapshot extends Record<string, unknown> {
   id: string;
+  followerAddr: string;
   leaderAddr: string;
   marketId: number;
   size: string;
@@ -225,6 +226,11 @@ export async function toggleSubscription(id: string, active: boolean): Promise<v
 }
 
 export async function deleteSubscription(followerAddr: string, leaderAddr: string): Promise<number> {
+  // Wipe per-follower snapshots so a re-subscribe gets fresh first-run
+  // bootstrap (otherwise stale snapshots from before unfollow would
+  // make the engine think the follower already mirrored to those
+  // positions and skip the actual sync).
+  await deleteFollowerSnapshots(followerAddr, leaderAddr);
   return execute(
     `DELETE FROM copy_subscriptions WHERE follower_addr = $1 AND leader_addr = $2`,
     [followerAddr, leaderAddr],
@@ -233,35 +239,70 @@ export async function deleteSubscription(followerAddr: string, leaderAddr: strin
 
 // ─── Snapshots ───────────────────────────────────────────────────
 
+/**
+ * Upsert one (follower, leader, market) snapshot row.
+ *
+ * Per-follower so a failed copy_trade for one follower doesn't poison
+ * the others' diff detection. Engine writes ONLY after a successful
+ * order fill, so failed trades naturally re-appear as diffs in the next
+ * cycle (this row simply doesn't advance for that follower).
+ */
 export async function upsertSnapshot(
+  followerAddr: string,
   leaderAddr: string,
   marketId: number,
   size: string,
   side: string,
 ): Promise<void> {
   await execute(
-    `INSERT INTO copy_snapshots (id, leader_addr, market_id, size, side)
-     VALUES ($1, $2, $3, $4, $5)
-     ON CONFLICT (leader_addr, market_id) DO UPDATE SET
+    `INSERT INTO copy_snapshots (id, follower_addr, leader_addr, market_id, size, side)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (follower_addr, leader_addr, market_id) DO UPDATE SET
        size = EXCLUDED.size,
        side = EXCLUDED.side,
        captured_at = NOW()`,
-    [uuid(), leaderAddr, marketId, size, side],
+    [uuid(), followerAddr, leaderAddr, marketId, size, side],
   );
 }
 
-export async function getSnapshots(leaderAddr: string): Promise<CopySnapshot[]> {
+export async function getSnapshots(
+  followerAddr: string,
+  leaderAddr: string,
+): Promise<CopySnapshot[]> {
   return query<CopySnapshot>(
-    `SELECT id, leader_addr AS "leaderAddr", market_id AS "marketId",
-            size, side, captured_at AS "capturedAt"
+    `SELECT id, follower_addr AS "followerAddr", leader_addr AS "leaderAddr",
+            market_id AS "marketId", size, side, captured_at AS "capturedAt"
      FROM copy_snapshots
-     WHERE leader_addr = $1`,
-    [leaderAddr],
+     WHERE follower_addr = $1 AND leader_addr = $2`,
+    [followerAddr, leaderAddr],
   );
 }
 
-export async function deleteSnapshots(leaderAddr: string): Promise<void> {
-  await execute(`DELETE FROM copy_snapshots WHERE leader_addr = $1`, [leaderAddr]);
+/** Delete a single (follower, leader, market) snapshot — used on close fills. */
+export async function deleteSnapshot(
+  followerAddr: string,
+  leaderAddr: string,
+  marketId: number,
+): Promise<void> {
+  await execute(
+    `DELETE FROM copy_snapshots
+     WHERE follower_addr = $1 AND leader_addr = $2 AND market_id = $3`,
+    [followerAddr, leaderAddr, marketId],
+  );
+}
+
+/**
+ * Delete all snapshots for a (follower, leader) pair — used on unfollow
+ * to clean up so a re-subscribe gets a fresh first-run.
+ */
+export async function deleteFollowerSnapshots(
+  followerAddr: string,
+  leaderAddr: string,
+): Promise<void> {
+  await execute(
+    `DELETE FROM copy_snapshots WHERE follower_addr = $1 AND leader_addr = $2`,
+    [followerAddr, leaderAddr],
+  );
 }
 
 // ─── Copy Trades ─────────────────────────────────────────────────

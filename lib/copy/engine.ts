@@ -10,7 +10,7 @@ import {
   getFollowersForLeader,
   getSnapshots,
   upsertSnapshot,
-  deleteSnapshots,
+  deleteSnapshot,
   getSession,
   insertCopyTrade,
   updateCopyTradeStatus,
@@ -492,9 +492,11 @@ export async function runCopyEngine(): Promise<EngineResult> {
           continue;
         }
 
-        // Load previous snapshots, compute diffs, THEN update snapshots
-        // Advisory lock per leader — prevents concurrent engine cycles from racing on snapshots
-        const lockKey = Buffer.from(leaderAddr).reduce((h, b) => ((h << 5) - h + b) | 0, 0);
+        // Per-leader advisory lock — prevents two engine cycles from
+        // racing on the SAME leader's snapshot/order processing. Uses
+        // the leader's accountId (already an int) instead of a 32-bit
+        // string-hash to eliminate collision risk.
+        const lockKey = accountId;
         const lockResult = await dbQuery<{ locked: boolean }>(
           `SELECT pg_try_advisory_lock($1) AS locked`, [lockKey],
         );
@@ -503,60 +505,87 @@ export async function runCopyEngine(): Promise<EngineResult> {
           continue;
         }
 
-        let diffs: PositionDiff[];
         try {
-          const snapshots = await getSnapshots(leaderAddr);
-          const isFirstRun = snapshots.length === 0;
-
-          // Compute diffs BEFORE updating snapshots
-          diffs = isFirstRun ? [] : computePositionDiffs(snapshots, positions, marketSymbols);
           result.leadersProcessed++;
 
-          // Now update snapshots to current state (for next cycle)
-          await deleteSnapshots(leaderAddr);
-          for (const p of positions) {
-            const baseSize = p.perp?.baseSize ?? 0;
-            if (baseSize === 0) continue;
-            await upsertSnapshot(
-              leaderAddr, p.marketId,
-              Math.abs(baseSize).toString(),
-              baseSize > 0 ? "Long" : "Short",
-            );
+          const followers = await getFollowersForLeader(leaderAddr);
+          if (followers.length === 0) continue;
+
+          // Pre-load all sessions in one pass — failed restores cascade
+          // into per-cycle errors otherwise.
+          const followerSessions = new Map<string, CopySession>();
+          for (const f of followers) {
+            const session = await getSession(f.followerAddr);
+            if (session) {
+              followerSessions.set(f.followerAddr, session);
+            } else {
+              result.skipped++;
+              addError(result, `${f.followerAddr}: no active session`);
+            }
           }
-        } finally {
-          await dbQuery(`SELECT pg_advisory_unlock($1)`, [lockKey]);
-        }
 
-        if (diffs.length === 0) continue;
-        result.diffsDetected += diffs.length;
-
-        const followers = await getFollowersForLeader(leaderAddr);
-
-        // Pre-validate follower sessions to avoid repeated restore failures
-        const followerSessions = new Map<string, CopySession>();
-        for (const f of followers) {
-          const session = await getSession(f.followerAddr);
-          if (session) {
-            followerSessions.set(f.followerAddr, session);
-          } else {
-            result.skipped++;
-            addError(result, `${f.followerAddr}: no active session`);
-          }
-        }
-
-        for (const diff of diffs) {
+          // Per-follower processing: each follower has their own snapshot
+          // of where they last successfully copied this leader. Compute
+          // diffs against THAT follower's snapshot, not a shared one.
+          // This means a failed order leaves that follower's snapshot
+          // unchanged → diff re-appears next cycle → automatic retry.
           for (const follower of followers) {
             const session = followerSessions.get(follower.followerAddr);
             if (!session) continue;
 
-            const res = await executeCopyForFollower(diff, follower, leaderEquity, session);
-            if (res.success) {
-              result.ordersPlaced++;
-            } else {
-              result.ordersFailed++;
-              if (res.error) addError(result, `${follower.followerAddr}→${diff.symbol}: ${res.error}`);
+            const snapshots = await getSnapshots(follower.followerAddr, leaderAddr);
+            const isFirstRun = snapshots.length === 0;
+
+            // First run = no diffs (don't bootstrap to current leader
+            // state); just populate the baseline and let the next cycle
+            // pick up new trades. Documented behavior — see
+            // copytrade_engine_audit_2026_05_10 memory issue #2.
+            if (isFirstRun) {
+              for (const p of positions) {
+                const baseSize = p.perp?.baseSize ?? 0;
+                if (baseSize === 0) continue;
+                await upsertSnapshot(
+                  follower.followerAddr,
+                  leaderAddr,
+                  p.marketId,
+                  Math.abs(baseSize).toString(),
+                  baseSize > 0 ? "Long" : "Short",
+                );
+              }
+              continue;
+            }
+
+            const diffs = computePositionDiffs(snapshots, positions, marketSymbols);
+            if (diffs.length === 0) continue;
+            result.diffsDetected += diffs.length;
+
+            for (const diff of diffs) {
+              const res = await executeCopyForFollower(diff, follower, leaderEquity, session);
+              if (res.success) {
+                result.ordersPlaced++;
+                // Advance THIS follower's snapshot for THIS market —
+                // only on success. Other markets and other followers'
+                // snapshots untouched. Failed diffs naturally re-appear
+                // next cycle for retry.
+                if (diff.action === "close") {
+                  await deleteSnapshot(follower.followerAddr, leaderAddr, diff.marketId);
+                } else {
+                  await upsertSnapshot(
+                    follower.followerAddr,
+                    leaderAddr,
+                    diff.marketId,
+                    diff.newSize.toString(),
+                    diff.side,
+                  );
+                }
+              } else {
+                result.ordersFailed++;
+                if (res.error) addError(result, `${follower.followerAddr}→${diff.symbol}: ${res.error}`);
+              }
             }
           }
+        } finally {
+          await dbQuery(`SELECT pg_advisory_unlock($1)`, [lockKey]);
         }
       } catch (err) {
         addError(result, `${leaderAddr}: ${err instanceof Error ? err.message : "Unknown"}`);
