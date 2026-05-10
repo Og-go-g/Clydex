@@ -42,6 +42,24 @@ CREATE INDEX IF NOT EXISTS idx_ownership_subscription
   ON copy_position_ownership(subscription_id)
   WHERE subscription_id IS NOT NULL;
 
+-- Force ownership to the application role.
+--
+-- Rationale: this migration is typically run with `sudo -u postgres
+-- psql clydex_history -f ...` per the project's deploy runbook. When
+-- run that way, CREATE TABLE assigns ownership to `postgres`, and the
+-- app — which connects as `clydex` — gets `permission denied for
+-- table copy_position_ownership` on every read. The exception fires
+-- inside engine.executeCopyForFollower BEFORE any counter increments,
+-- so the bug presents as: `diffs=N placed=0 failed=0` in the logs but
+-- nothing happens. snapshot doesn't advance, no trades placed.
+--
+-- Same gotcha bit Phase 8a (rate-limit/nonces/idempotency tables) on
+-- 2026-05-02. See memory/phase8a_postgres_ratelimit_done.md.
+--
+-- The ALTER is idempotent: re-running on an already-owned table is a
+-- no-op. Safe to run on any environment that has a `clydex` role.
+ALTER TABLE copy_position_ownership OWNER TO clydex;
+
 -- Backfill is best-effort. We don't have access to the exchange from
 -- a SQL migration, so we can't tell which (follower, market) pairs
 -- ACTUALLY have an open position right now vs were closed weeks ago.
