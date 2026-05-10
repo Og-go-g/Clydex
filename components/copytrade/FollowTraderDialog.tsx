@@ -105,6 +105,12 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
   const [error, setError] = useState<string | null>(null);
   const [sessionActive, setSessionActive] = useState<boolean | null>(null);
 
+  // "One leader per market" overlap — markets the candidate leader
+  // currently trades that are already owned by another leader for this
+  // user. Engine will skip these at trade-time; we surface here so the
+  // user understands what they're getting.
+  const [overlap, setOverlap] = useState<Array<{ marketId: number; symbol: string; owningLeaderAddr: string }> | null>(null);
+
   // Check if copy trading session is active on open
   useEffect(() => {
     if (!isOpen || !isAuthenticated) return;
@@ -114,6 +120,21 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
       .then((d) => setSessionActive(d.active ?? false))
       .catch(() => setSessionActive(false));
   }, [isOpen, isAuthenticated]);
+
+  // Fetch market-overlap warning. Fire-and-forget; failure leaves
+  // `overlap=null` and the warning block isn't rendered.
+  useEffect(() => {
+    if (!isOpen || !isAuthenticated) return;
+    setOverlap(null);
+    const ctrl = new AbortController();
+    fetch(`/api/copy/markets-overlap?leaderAddr=${encodeURIComponent(trader.walletAddr)}`, { signal: ctrl.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d && Array.isArray(d.overlap)) setOverlap(d.overlap);
+      })
+      .catch(() => { /* abort or network — silent */ });
+    return () => ctrl.abort();
+  }, [isOpen, isAuthenticated, trader.walletAddr]);
 
   const handleClose = useCallback(() => {
     if (step === "submitting") return; // don't close while submitting
@@ -317,6 +338,21 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
                   <span>Vol {fmtVol(trader.totalVolume)}</span>
                 </div>
               </div>
+
+              {/* Market overlap warning — "one leader per market" rule */}
+              {overlap && overlap.length > 0 && (step === "input" || step === "error") && (
+                <div className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[10px] leading-snug text-amber-200">
+                  <div className="flex items-center gap-1 font-medium">
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+                    </svg>
+                    {overlap.length === 1 ? "1 market already copied" : `${overlap.length} markets already copied`}
+                  </div>
+                  <div className="mt-0.5 text-amber-200/70">
+                    {overlap.map((o) => o.symbol).join(", ")} won&apos;t be mirrored from this leader (one leader per market).
+                  </div>
+                </div>
+              )}
 
               {/* Step: Input */}
               {(step === "input" || step === "error") && (

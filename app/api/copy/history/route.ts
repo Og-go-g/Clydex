@@ -18,7 +18,7 @@ export async function GET(req: NextRequest) {
   const leaderAddr = sp.get("leader") || undefined;
   const status = sp.get("status") || undefined;
 
-  if (status && !["filled", "failed", "pending", "cancelled"].includes(status)) {
+  if (status && !["filled", "failed", "pending", "cancelled", "skipped"].includes(status)) {
     return NextResponse.json({ error: "Invalid status filter" }, { status: 400 });
   }
 

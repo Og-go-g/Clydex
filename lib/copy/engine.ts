@@ -202,8 +202,8 @@ async function executeCopyForFollower(
       side: diff.side,
       size: "0",
     });
-    await updateCopyTradeStatus(tradeId, "failed", {
-      error: `skipped_collision: market ${diff.symbol} owned by leader ${existing.owningLeaderAddr.slice(0, 8)}…`,
+    await updateCopyTradeStatus(tradeId, "skipped", {
+      error: `collision: market ${diff.symbol} owned by leader ${existing.owningLeaderAddr.slice(0, 8)}…`,
     });
     return { success: false, error: `Market ${diff.symbol} owned by another leader` };
   }
@@ -231,8 +231,8 @@ async function executeCopyForFollower(
             side: diff.side,
             size: "0",
           });
-          await updateCopyTradeStatus(tradeId, "failed", {
-            error: `skipped_manual: ${diff.symbol} has a non-copy position`,
+          await updateCopyTradeStatus(tradeId, "skipped", {
+            error: `manual: ${diff.symbol} has a non-copy position`,
           });
           return { success: false, error: `Manual position in ${diff.symbol}` };
         }

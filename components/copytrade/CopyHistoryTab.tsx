@@ -90,6 +90,7 @@ export function CopyHistoryTab() {
           <option value="">All</option>
           <option value="filled">Filled</option>
           <option value="failed">Failed</option>
+          <option value="skipped">Skipped</option>
           <option value="pending">Pending</option>
         </select>
       </div>
@@ -125,11 +126,14 @@ export function CopyHistoryTab() {
           {trades.map((t) => (
             <div
               key={t.id}
+              title={t.error ?? undefined}
               className={`grid grid-cols-[1fr_50px_60px_70px_50px_50px_54px] gap-1 items-center rounded border px-2 py-1.5 text-[9px] font-mono ${
                 t.status === "filled"
                   ? "border-emerald-500/10 bg-emerald-500/5"
                   : t.status === "failed"
                   ? "border-red-500/10 bg-red-500/5"
+                  : t.status === "skipped"
+                  ? "border-[#262626] bg-[#0d0d0d] opacity-70"
                   : "border-[#262626] bg-[#0a0a0a]"
               }`}
             >
@@ -142,7 +146,13 @@ export function CopyHistoryTab() {
                 {t.price ? "$" + parseFloat(t.price).toLocaleString(undefined, { maximumFractionDigits: 2 }) : "—"}
               </span>
               <span className={`${
-                t.status === "filled" ? "text-emerald-400" : t.status === "failed" ? "text-red-400" : "text-yellow-400"
+                t.status === "filled"
+                  ? "text-emerald-400"
+                  : t.status === "failed"
+                  ? "text-red-400"
+                  : t.status === "skipped"
+                  ? "text-[#888]"
+                  : "text-yellow-400"
               }`}>
                 {t.status}
               </span>

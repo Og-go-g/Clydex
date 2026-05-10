@@ -328,7 +328,7 @@ export async function insertCopyTrade(params: {
 
 export async function updateCopyTradeStatus(
   id: string,
-  status: "filled" | "failed" | "cancelled",
+  status: "filled" | "failed" | "cancelled" | "skipped",
   extra?: { orderId?: string; price?: string; error?: string },
 ): Promise<void> {
   await execute(
