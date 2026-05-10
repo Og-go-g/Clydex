@@ -432,6 +432,102 @@ export async function getCopiedMarketIds(
   return rows.map((r) => r.marketId);
 }
 
+// ─── Position ownership ("one leader per market") ───────────────
+
+export interface PositionOwnership extends Record<string, unknown> {
+  followerAddr: string;
+  marketId: number;
+  owningLeaderAddr: string;
+  subscriptionId: string | null;
+  openedAt: Date;
+}
+
+/** Look up current owner of (follower, market). Returns null if free. */
+export async function getOwnership(
+  followerAddr: string,
+  marketId: number,
+): Promise<PositionOwnership | null> {
+  const rows = await query<PositionOwnership>(
+    `SELECT follower_addr AS "followerAddr", market_id AS "marketId",
+            owning_leader_addr AS "owningLeaderAddr",
+            subscription_id AS "subscriptionId",
+            opened_at AS "openedAt"
+     FROM copy_position_ownership
+     WHERE follower_addr = $1 AND market_id = $2`,
+    [followerAddr, marketId],
+  );
+  return rows[0] ?? null;
+}
+
+/**
+ * Atomically claim ownership for (follower, market). Returns true if
+ * acquired (or already owned by the same leader), false if owned by
+ * another leader. Used as the engine's gate before placeOrder.
+ */
+export async function acquireOwnership(
+  followerAddr: string,
+  marketId: number,
+  leaderAddr: string,
+  subscriptionId: string,
+): Promise<boolean> {
+  const rows = await query<{ owningLeaderAddr: string }>(
+    `INSERT INTO copy_position_ownership
+       (follower_addr, market_id, owning_leader_addr, subscription_id)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (follower_addr, market_id) DO UPDATE SET
+       owning_leader_addr = copy_position_ownership.owning_leader_addr
+     RETURNING owning_leader_addr AS "owningLeaderAddr"`,
+    [followerAddr, marketId, leaderAddr, subscriptionId],
+  );
+  return rows[0]?.owningLeaderAddr === leaderAddr;
+}
+
+/** Release ownership of (follower, market) — used on full close. */
+export async function releaseOwnership(
+  followerAddr: string,
+  marketId: number,
+): Promise<void> {
+  await execute(
+    `DELETE FROM copy_position_ownership
+     WHERE follower_addr = $1 AND market_id = $2`,
+    [followerAddr, marketId],
+  );
+}
+
+/**
+ * Release all ownership rows for (follower, leader) — used on
+ * unfollow-with-close-positions. After this the markets are free for
+ * other leaders.
+ */
+export async function releaseAllOwnership(
+  followerAddr: string,
+  leaderAddr: string,
+): Promise<void> {
+  await execute(
+    `DELETE FROM copy_position_ownership
+     WHERE follower_addr = $1 AND owning_leader_addr = $2`,
+    [followerAddr, leaderAddr],
+  );
+}
+
+/**
+ * Get markets owned by OTHER leaders (i.e. forbidden) for this
+ * follower if they were to subscribe to a new candidate leader.
+ * Used by the FollowTraderDialog overlap-warning UX — shows the user
+ * which markets the candidate leader trades that are already locked.
+ */
+export async function getMarketsBlockedForFollower(
+  followerAddr: string,
+  excludeLeaderAddr: string,
+): Promise<Array<{ marketId: number; owningLeaderAddr: string }>> {
+  return query<{ marketId: number; owningLeaderAddr: string }>(
+    `SELECT market_id AS "marketId", owning_leader_addr AS "owningLeaderAddr"
+     FROM copy_position_ownership
+     WHERE follower_addr = $1 AND owning_leader_addr <> $2`,
+    [followerAddr, excludeLeaderAddr],
+  );
+}
+
 // ─── Stats ───────────────────────────────────────────────────────
 
 // ─── Paginated History ──────────────────────────────────────────

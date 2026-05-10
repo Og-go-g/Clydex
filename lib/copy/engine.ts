@@ -17,6 +17,9 @@ import {
   updateCopyTradeStatus,
   getConsecutiveFailures,
   toggleSubscription,
+  getOwnership,
+  acquireOwnership,
+  releaseOwnership,
 } from "./queries";
 import type { CopySubscription, CopySnapshot, CopySession } from "./queries";
 import type { NordUser } from "@n1xyz/nord-ts";
@@ -182,6 +185,64 @@ async function executeCopyForFollower(
   leaderEquity: number,
   session: CopySession,
 ): Promise<{ success: boolean; error?: string }> {
+  // ─── Ownership gate ("one leader per market") ───────────────────
+  //
+  // Before doing ANY work for a diff, check whether this market is
+  // already owned by a different leader (or locked by a manual
+  // position). Skip is logged as a copy_trade with a "skipped_*"
+  // status so it surfaces in the History tab.
+  const existing = await getOwnership(follower.followerAddr, diff.marketId);
+  if (existing && existing.owningLeaderAddr !== follower.leaderAddr) {
+    const tradeId = await insertCopyTrade({
+      subscriptionId: follower.id,
+      followerAddr: follower.followerAddr,
+      leaderAddr: follower.leaderAddr,
+      marketId: diff.marketId,
+      symbol: diff.symbol,
+      side: diff.side,
+      size: "0",
+    });
+    await updateCopyTradeStatus(tradeId, "failed", {
+      error: `skipped_collision: market ${diff.symbol} owned by leader ${existing.owningLeaderAddr.slice(0, 8)}…`,
+    });
+    return { success: false, error: `Market ${diff.symbol} owned by another leader` };
+  }
+  // If no ownership row but this is a NEW position diff, also check
+  // for a manual position in the market — user may have opened that
+  // market themselves and we shouldn't pile on top.
+  if (!existing && (diff.action === "open" || diff.action === "increase" || diff.action === "flip")) {
+    try {
+      const followerAccountId = await resolveAccountId(follower.followerAddr);
+      if (followerAccountId !== null) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const followerAccount = await getAccount(followerAccountId) as any;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const positions = (followerAccount?.positions ?? []) as Array<{ marketId: number; perp?: { baseSize?: number } }>;
+        const existingInMarket = positions.find(
+          (p) => p.marketId === diff.marketId && Math.abs(p.perp?.baseSize ?? 0) > 0,
+        );
+        if (existingInMarket) {
+          const tradeId = await insertCopyTrade({
+            subscriptionId: follower.id,
+            followerAddr: follower.followerAddr,
+            leaderAddr: follower.leaderAddr,
+            marketId: diff.marketId,
+            symbol: diff.symbol,
+            side: diff.side,
+            size: "0",
+          });
+          await updateCopyTradeStatus(tradeId, "failed", {
+            error: `skipped_manual: ${diff.symbol} has a non-copy position`,
+          });
+          return { success: false, error: `Manual position in ${diff.symbol}` };
+        }
+      }
+    } catch {
+      // Manual-position check is best-effort. If it fails, fall through
+      // — exchange will reject if there's a real conflict.
+    }
+  }
+
   // Circuit breaker — check before any work
   const failures = await getConsecutiveFailures(follower.id);
   if (failures >= MAX_CONSECUTIVE_FAILURES) {
@@ -422,6 +483,40 @@ async function executeCopyForFollower(
     }
 
     await updateCopyTradeStatus(tradeId, "filled", { price: markPrice.toString() });
+
+    // Update ownership: claim on open/increase/flip, release on full
+    // close. For decrease the position is still open from this leader,
+    // so ownership stays.
+    if (diff.action === "close") {
+      await releaseOwnership(follower.followerAddr, diff.marketId);
+    } else if (diff.action !== "decrease") {
+      const acquired = await acquireOwnership(
+        follower.followerAddr,
+        diff.marketId,
+        follower.leaderAddr,
+        follower.id,
+      );
+      if (!acquired) {
+        // Another concurrent cycle claimed this market for a different
+        // leader between our pre-check and now. Order already filled
+        // on the exchange — log a warning. This race is bounded by the
+        // per-leader advisory lock; only happens if two engine workers
+        // race on different leaders for the same follower simultaneously.
+        Sentry.captureMessage(
+          "[copy-engine] ownership lost-race after order filled",
+          {
+            level: "warning",
+            tags: { component: "copy-engine", event: "ownership-race" },
+            extra: {
+              tradeId,
+              followerAddr: follower.followerAddr,
+              leaderAddr: follower.leaderAddr,
+              marketId: diff.marketId,
+            },
+          },
+        );
+      }
+    }
 
     // Set stop-loss trigger on exchange if configured (only for open/increase/flip-open)
     const stopLossPct = follower.stopLossPct ? parseFloat(follower.stopLossPct) : null;

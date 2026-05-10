@@ -2,7 +2,7 @@ import { getAccount, getUser } from "../n1/client";
 import { closePosition } from "../n1/user-client";
 import { restoreNordUserByWallet } from "./norduser-restore";
 import { ensureMarketCache, getCachedMarkets } from "../n1/constants";
-import { getCopiedMarketIds } from "./queries";
+import { getCopiedMarketIds, releaseAllOwnership } from "./queries";
 
 const DEFAULT_SLIPPAGE = 0.005;
 
@@ -90,6 +90,12 @@ export async function closeFollowerPositions(
       result.failed++;
     }
   }
+
+  // Release ownership for ALL markets that were tied to this leader.
+  // Safe even if some closes failed — those positions are user's
+  // problem to clean up; ownership cleanup unblocks the markets so
+  // other leaders aren't permanently locked out.
+  await releaseAllOwnership(followerAddr, leaderAddr);
 
   return result;
 }
