@@ -125,6 +125,46 @@ export async function upsertTierMembership(
 }
 
 /**
+ * Delete leaderboard_tiers rows where tier=$1 but accountId is NOT in
+ * the current selection set. These are rolloff orphans — they once met
+ * the tier's criteria, no longer do, but stuck around because
+ * `upsertTierMembership` ON CONFLICT only promotes (`LEAST(existing,
+ * new)`) and never demotes. Without this, e.g. an account that was
+ * top-500 PnL on day-1 but slipped to rank 600 on day-2 stays tier=1
+ * forever with `nextDueAt` from day-1 — `selectTier1` doesn't return
+ * it, `markTierRefreshed` never fires, the row sits as dead weight
+ * skewing `staleCount` metrics.
+ *
+ * After deletion, the account is no longer in `leaderboard_tiers` at
+ * all. Tier 4's nightly cycle (`SELECT ... WHERE NOT IN (... tier<4)`)
+ * will re-pick it on its next run if it still has a `pnl_totals` row,
+ * landing it at tier=4 with daily refresh — the right cadence for an
+ * inactive account.
+ *
+ * **Only call for restrictive tiers** (1, 2, 3) where the selector
+ * filters by current activity. Do NOT call for tier 4 (catch-all) or
+ * "spot" (random sample of tier 4) — both treat the table itself as
+ * input, so every row outside their current sample looks like an
+ * orphan and gets nuked. Returns the number of rows deleted.
+ */
+export async function deleteTierOrphans(
+  tier: 1 | 2 | 3,
+  currentAccountIds: number[],
+): Promise<number> {
+  // Empty selection means we have no signal to identify orphans.
+  // The orchestrator returns early before calling this in that case,
+  // but defend against a future caller passing an empty array.
+  if (currentAccountIds.length === 0) return 0;
+
+  return execute(
+    `DELETE FROM leaderboard_tiers
+     WHERE tier = $1
+       AND "accountId" <> ALL($2::int[])`,
+    [tier, currentAccountIds],
+  );
+}
+
+/**
  * Mark tier entry as freshly refreshed. Sets lastRefresh = NOW().
  * nextDueAt is calculated based on tier frequency.
  */
