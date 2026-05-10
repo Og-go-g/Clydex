@@ -14,6 +14,56 @@ interface FollowTraderDialogProps {
   trader: LeaderboardEntry;
 }
 
+// ─── InfoHint — small (?) icon with tooltip ──────────────────────
+//
+// Hover on desktop, tap on mobile. Tooltip positioned above by default;
+// pass align="end" for right-edge fields (Stop Loss in 3-col row) so the
+// popover doesn't clip past the dialog edge.
+
+function InfoHint({
+  children,
+  align = "center",
+}: {
+  children: React.ReactNode;
+  align?: "start" | "center" | "end";
+}) {
+  const [open, setOpen] = useState(false);
+  const alignClass =
+    align === "start"
+      ? "left-0"
+      : align === "end"
+        ? "right-0"
+        : "left-1/2 -translate-x-1/2";
+
+  return (
+    <span className="relative inline-flex items-center">
+      <button
+        type="button"
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setOpen((o) => !o);
+        }}
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+        onBlur={() => setOpen(false)}
+        className="ml-1 inline-flex h-3 w-3 items-center justify-center rounded-full border border-gray-600 text-[8px] font-medium text-gray-500 transition-colors hover:border-gray-400 hover:text-gray-300"
+        aria-label="More info"
+      >
+        ?
+      </button>
+      {open && (
+        <span
+          role="tooltip"
+          className={`pointer-events-none absolute bottom-full z-20 mb-1.5 w-48 rounded-md border border-[#404040] bg-[#262626] px-2.5 py-1.5 text-[10px] leading-snug text-gray-200 shadow-2xl ring-1 ring-black/40 ${alignClass}`}
+        >
+          {children}
+        </span>
+      )}
+    </span>
+  );
+}
+
 // ─── Formatters ─────────────────────────────────────────────────
 
 function fmtAddr(addr: string): string {
@@ -273,7 +323,14 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
                 <>
                   {/* Allocation */}
                   <div className="mb-3">
-                    <label className="mb-1 block text-[11px] font-medium text-gray-400">Allocation (USDC)</label>
+                    <label className="mb-1 flex items-center text-[11px] font-medium text-gray-400">
+                      Allocation (USDC)
+                      <InfoHint align="start">
+                        Sizing reference, not a deposit. Engine mirrors the leader at ratio
+                        <strong className="text-gray-200"> allocation / leader equity</strong>.
+                        Real margin comes from your USDC balance.
+                      </InfoHint>
+                    </label>
                     <div className="flex gap-1.5">
                       <div className="relative flex-1">
                         <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-gray-500">$</span>
@@ -304,7 +361,13 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
 
                   {/* Leverage */}
                   <div className="mb-3">
-                    <label className="mb-1 block text-[11px] font-medium text-gray-400">Leverage</label>
+                    <label className="mb-1 flex items-center text-[11px] font-medium text-gray-400">
+                      Leverage
+                      <InfoHint align="start">
+                        Multiplier on the mirror ratio. <strong className="text-gray-200">2×</strong>
+                        {" "}doubles your proportional exposure relative to the leader.
+                      </InfoHint>
+                    </label>
                     <div className="flex gap-1.5">
                       {[1, 2, 3, 5].map((v) => (
                         <button
@@ -325,7 +388,13 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
                   {/* Caps + Stop Loss — single 3-col row */}
                   <div className="mb-3 grid grid-cols-3 gap-2">
                     <div>
-                      <label className="mb-1 block text-[10px] font-medium text-gray-400">Max / Market</label>
+                      <label className="mb-1 flex items-center text-[10px] font-medium text-gray-400">
+                        Max / Market
+                        <InfoHint align="start">
+                          Hard cap on a single position in one market. Protects against the
+                          leader going all-in on one asset.
+                        </InfoHint>
+                      </label>
                       <div className="relative">
                         <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[11px] text-gray-500">$</span>
                         <input
@@ -339,7 +408,14 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
                       </div>
                     </div>
                     <div>
-                      <label className="mb-1 block text-[10px] font-medium text-gray-400">Max Total</label>
+                      <label className="mb-1 flex items-center text-[10px] font-medium text-gray-400">
+                        Max Total
+                        <InfoHint align="center">
+                          Hard cap on combined notional across all your copy positions.
+                          Protects against the leader trading many markets at once or losing
+                          equity (which auto-grows your ratio).
+                        </InfoHint>
+                      </label>
                       <div className="relative">
                         <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[11px] text-gray-500">$</span>
                         <input
@@ -353,7 +429,13 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
                       </div>
                     </div>
                     <div>
-                      <label className="mb-1 block text-[10px] font-medium text-gray-400">Stop Loss</label>
+                      <label className="mb-1 flex items-center text-[10px] font-medium text-gray-400">
+                        Stop Loss
+                        <InfoHint align="end">
+                          Sets a stop-loss trigger on the exchange for each copied position.
+                          Auto-closes if it drops by this % from entry.
+                        </InfoHint>
+                      </label>
                       <div className="relative">
                         <input
                           type="text"
