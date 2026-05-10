@@ -205,25 +205,25 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-[#262626] px-6 py-4">
-          <h2 className="text-lg font-semibold text-white">Follow Trader</h2>
+        <div className="flex items-center justify-between border-b border-[#262626] px-5 py-3">
+          <h2 className="text-sm font-semibold text-white">Follow Trader</h2>
           <button
             onClick={handleClose}
             disabled={step === "submitting"}
-            className="rounded-lg p-1 text-gray-500 transition-colors hover:bg-[#1a1a1a] hover:text-white disabled:opacity-50"
+            className="rounded-md p-1 text-gray-500 transition-colors hover:bg-[#1a1a1a] hover:text-white disabled:opacity-50"
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
               <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
             </svg>
           </button>
         </div>
 
-        <div className="px-6 py-5">
+        <div className="px-5 py-4">
           {/* Not authenticated */}
           {!isAuthenticated && (
-            <div className="py-6 text-center">
-              <p className="text-sm text-gray-400">Connect your wallet and enable copy trading to follow traders.</p>
-              <button onClick={handleClose} className="mt-4 rounded-xl bg-[#1a1a1a] px-6 py-2 text-sm text-white hover:bg-[#222]">
+            <div className="py-4 text-center">
+              <p className="text-xs text-gray-400">Connect your wallet and enable copy trading to follow traders.</p>
+              <button onClick={handleClose} className="mt-3 rounded-lg bg-[#1a1a1a] px-5 py-1.5 text-xs text-white hover:bg-[#222]">
                 Close
               </button>
             </div>
@@ -231,10 +231,10 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
 
           {/* Session not active */}
           {isAuthenticated && sessionActive === false && (
-            <div className="py-6 text-center">
-              <p className="text-sm text-gray-400 mb-2">Copy trading is not activated.</p>
-              <p className="text-xs text-gray-500">Enable it in the Copy Trading tab below the chart first, then try again.</p>
-              <button onClick={handleClose} className="mt-4 rounded-xl bg-[#1a1a1a] px-6 py-2 text-sm text-white hover:bg-[#222]">
+            <div className="py-4 text-center">
+              <p className="text-xs text-gray-400 mb-1">Copy trading is not activated.</p>
+              <p className="text-[11px] text-gray-500">Enable it in the Copy Trading tab below the chart first, then try again.</p>
+              <button onClick={handleClose} className="mt-3 rounded-lg bg-[#1a1a1a] px-5 py-1.5 text-xs text-white hover:bg-[#222]">
                 Close
               </button>
             </div>
@@ -242,7 +242,7 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
 
           {/* Loading session check */}
           {isAuthenticated && sessionActive === null && (
-            <div className="flex h-20 items-center justify-center">
+            <div className="flex h-16 items-center justify-center">
               <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
             </div>
           )}
@@ -250,20 +250,21 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
           {/* Authenticated + session active */}
           {isAuthenticated && sessionActive === true && (
             <>
-              {/* Trader info card */}
-              <div className="mb-5 rounded-xl border border-[#262626] bg-[#141414] p-4">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-mono font-semibold text-white">{fmtAddr(trader.walletAddr)}</span>
-                  <span className="text-[10px] text-gray-500">{trader.totalTrades} trades</span>
-                </div>
-                <div className="mt-2 flex items-center gap-4 text-xs">
-                  <span className={trader.totalPnl >= 0 ? "text-emerald-400 font-semibold" : "text-red-400 font-semibold"}>
+              {/* Trader info card — single line */}
+              <div className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-[#262626] bg-[#141414] px-3 py-2">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <span className="text-xs font-mono font-semibold text-white">{fmtAddr(trader.walletAddr)}</span>
+                  <span className={`text-[11px] font-semibold ${trader.totalPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
                     {fmtPnl(trader.totalPnl)}
                   </span>
-                  <span className={trader.winRate >= 60 ? "text-emerald-400" : trader.winRate >= 50 ? "text-gray-300" : "text-red-400"}>
-                    {trader.winRate.toFixed(0)}% win
+                  <span className={`text-[11px] ${trader.winRate >= 60 ? "text-emerald-400" : trader.winRate >= 50 ? "text-gray-300" : "text-red-400"}`}>
+                    {trader.winRate.toFixed(0)}%
                   </span>
-                  <span className="text-gray-500">Vol {fmtVol(trader.totalVolume)}</span>
+                </div>
+                <div className="flex items-center gap-2 text-[10px] text-gray-500 whitespace-nowrap">
+                  <span>{trader.totalTrades} trades</span>
+                  <span>·</span>
+                  <span>Vol {fmtVol(trader.totalVolume)}</span>
                 </div>
               </div>
 
@@ -271,25 +272,25 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
               {(step === "input" || step === "error") && (
                 <>
                   {/* Allocation */}
-                  <div className="mb-4">
-                    <label className="mb-1.5 block text-xs font-medium text-gray-400">Allocation (USDC)</label>
-                    <div className="relative">
-                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-500">$</span>
-                      <input
-                        type="text"
-                        inputMode="decimal"
-                        value={allocation}
-                        onChange={handleAllocationChange}
-                        placeholder="0.00"
-                        className="w-full rounded-xl border border-[#262626] bg-[#141414] py-3 pl-7 pr-4 text-sm font-mono text-white placeholder-gray-600 outline-none transition-colors focus:border-emerald-500/50"
-                      />
-                    </div>
-                    <div className="mt-2 flex gap-2">
+                  <div className="mb-3">
+                    <label className="mb-1 block text-[11px] font-medium text-gray-400">Allocation (USDC)</label>
+                    <div className="flex gap-1.5">
+                      <div className="relative flex-1">
+                        <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-gray-500">$</span>
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          value={allocation}
+                          onChange={handleAllocationChange}
+                          placeholder="0.00"
+                          className="w-full rounded-lg border border-[#262626] bg-[#141414] py-2 pl-6 pr-2.5 text-xs font-mono text-white placeholder-gray-600 outline-none transition-colors focus:border-emerald-500/50"
+                        />
+                      </div>
                       {[50, 100, 250, 500].map((v) => (
                         <button
                           key={v}
                           onClick={() => setAllocation(v.toString())}
-                          className={`flex-1 rounded-lg border py-1.5 text-xs font-medium transition-colors ${
+                          className={`flex-1 rounded-lg border py-2 text-[11px] font-medium transition-colors ${
                             allocation === v.toString()
                               ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
                               : "border-[#262626] bg-[#141414] text-gray-400 hover:border-emerald-500/30 hover:text-white"
@@ -302,14 +303,14 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
                   </div>
 
                   {/* Leverage */}
-                  <div className="mb-4">
-                    <label className="mb-1.5 block text-xs font-medium text-gray-400">Leverage Multiplier</label>
-                    <div className="flex gap-2">
+                  <div className="mb-3">
+                    <label className="mb-1 block text-[11px] font-medium text-gray-400">Leverage</label>
+                    <div className="flex gap-1.5">
                       {[1, 2, 3, 5].map((v) => (
                         <button
                           key={v}
                           onClick={() => setLeverage(v)}
-                          className={`flex-1 rounded-lg border py-2.5 text-sm font-semibold transition-colors ${
+                          className={`flex-1 rounded-lg border py-1.5 text-xs font-semibold transition-colors ${
                             leverage === v
                               ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-400"
                               : "border-[#262626] bg-[#141414] text-gray-400 hover:border-emerald-500/30 hover:text-white"
@@ -321,107 +322,72 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
                     </div>
                   </div>
 
-                  {/* Limits — compact row */}
-                  <div className="mb-3 grid grid-cols-2 gap-3">
+                  {/* Caps + Stop Loss — single 3-col row */}
+                  <div className="mb-3 grid grid-cols-3 gap-2">
                     <div>
-                      <label className="mb-1.5 flex items-center gap-1 text-xs font-medium text-gray-400">
-                        Max / Market
-                        <span className="text-[10px] text-gray-600">optional</span>
-                      </label>
+                      <label className="mb-1 block text-[10px] font-medium text-gray-400">Max / Market</label>
                       <div className="relative">
-                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-gray-500">$</span>
+                        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[11px] text-gray-500">$</span>
                         <input
                           type="text"
                           inputMode="decimal"
                           value={maxPosition}
                           onChange={handleMaxPositionChange}
-                          placeholder="No limit"
-                          className="w-full rounded-xl border border-[#262626] bg-[#141414] py-2.5 pl-6 pr-3 text-xs font-mono text-white placeholder-gray-600 outline-none transition-colors focus:border-emerald-500/50"
+                          placeholder="—"
+                          className="w-full rounded-lg border border-[#262626] bg-[#141414] py-1.5 pl-5 pr-2 text-[11px] font-mono text-white placeholder-gray-600 outline-none transition-colors focus:border-emerald-500/50"
                         />
                       </div>
                     </div>
                     <div>
-                      <label className="mb-1.5 flex items-center gap-1 text-xs font-medium text-gray-400">
-                        Max Total
-                        <span className="text-[10px] text-gray-600">optional</span>
-                      </label>
+                      <label className="mb-1 block text-[10px] font-medium text-gray-400">Max Total</label>
                       <div className="relative">
-                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-gray-500">$</span>
+                        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[11px] text-gray-500">$</span>
                         <input
                           type="text"
                           inputMode="decimal"
                           value={maxTotal}
                           onChange={handleMaxTotalChange}
-                          placeholder="No limit"
-                          className="w-full rounded-xl border border-[#262626] bg-[#141414] py-2.5 pl-6 pr-3 text-xs font-mono text-white placeholder-gray-600 outline-none transition-colors focus:border-emerald-500/50"
+                          placeholder="—"
+                          className="w-full rounded-lg border border-[#262626] bg-[#141414] py-1.5 pl-5 pr-2 text-[11px] font-mono text-white placeholder-gray-600 outline-none transition-colors focus:border-emerald-500/50"
                         />
                       </div>
                     </div>
-                  </div>
-                  {/* Stop Loss */}
-                  <div className="mb-5">
-                    <label className="mb-1.5 flex items-center gap-1 text-xs font-medium text-gray-400">
-                      Stop Loss
-                      <span className="text-[10px] text-gray-600">optional</span>
-                    </label>
-                    <div className="relative max-w-[50%]">
-                      <input
-                        type="text"
-                        inputMode="decimal"
-                        value={stopLoss}
-                        onChange={handleStopLossChange}
-                        placeholder="None"
-                        className="w-full rounded-xl border border-[#262626] bg-[#141414] py-2.5 pl-3 pr-6 text-xs font-mono text-white placeholder-gray-600 outline-none transition-colors focus:border-emerald-500/50"
-                      />
-                      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-500">%</span>
-                    </div>
-                    <p className="mt-1 text-[9px] text-gray-600">Sets a stop-loss trigger on the exchange for each copied position</p>
-                  </div>
-
-                  {/* Summary box */}
-                  <div className="mb-5 space-y-2 rounded-xl border border-[#262626] bg-[#141414] p-4">
-                    <div className="flex justify-between text-xs">
-                      <span className="text-gray-400">Allocation</span>
-                      <span className="font-mono text-white">${allocNum.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-gray-400">Leverage</span>
-                      <span className="font-mono text-white">{leverage}x</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-gray-400">Max / Market</span>
-                      <span className="font-mono text-white">{maxPosition ? `$${parseFloat(maxPosition).toLocaleString()}` : "Unlimited"}</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-gray-400">Max Total</span>
-                      <span className="font-mono text-white">{maxTotal ? `$${parseFloat(maxTotal).toLocaleString()}` : "Unlimited"}</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-gray-400">Stop Loss</span>
-                      <span className="font-mono text-white">{stopLoss ? `${stopLoss}%` : "None"}</span>
+                    <div>
+                      <label className="mb-1 block text-[10px] font-medium text-gray-400">Stop Loss</label>
+                      <div className="relative">
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          value={stopLoss}
+                          onChange={handleStopLossChange}
+                          placeholder="—"
+                          className="w-full rounded-lg border border-[#262626] bg-[#141414] py-1.5 pl-2 pr-5 text-[11px] font-mono text-white placeholder-gray-600 outline-none transition-colors focus:border-emerald-500/50"
+                        />
+                        <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] text-gray-500">%</span>
+                      </div>
                     </div>
                   </div>
 
                   {/* Error */}
                   {error && (
-                    <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-400">
+                    <div className="mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] text-red-400">
                       {error}
                     </div>
                   )}
 
                   {/* Actions */}
-                  <div className="flex gap-3">
+                  <div className="flex gap-2">
                     <button
                       onClick={handleClose}
-                      className="flex-1 rounded-xl border border-[#262626] bg-[#141414] py-3 text-sm font-medium text-gray-300 transition-colors hover:bg-[#1a1a1a]"
+                      className="flex-1 rounded-lg border border-[#262626] bg-[#141414] py-2 text-xs font-medium text-gray-300 transition-colors hover:bg-[#1a1a1a]"
                     >
                       Cancel
                     </button>
                     <button
                       onClick={handleConfirm}
-                      className="flex-1 rounded-xl border border-emerald-500/30 bg-emerald-500/15 py-3 text-sm font-semibold text-emerald-400 transition-colors hover:bg-emerald-500/25"
+                      className="flex-1 rounded-lg border border-emerald-500/30 bg-emerald-500/15 py-2 text-xs font-semibold text-emerald-400 transition-colors hover:bg-emerald-500/25"
                     >
-                      Follow Trader
+                      Review
                     </button>
                   </div>
                 </>
@@ -430,56 +396,45 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
               {/* Step: Confirm */}
               {step === "confirm" && (
                 <>
-                  <div className="mb-5 rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4">
-                    <p className="mb-3 text-xs font-medium text-emerald-400">Confirm subscription</p>
-                    <div className="space-y-2">
-                      <div className="flex justify-between text-xs">
-                        <span className="text-gray-400">Trader</span>
-                        <span className="font-mono text-white">{fmtAddr(trader.walletAddr)}</span>
-                      </div>
-                      <div className="flex justify-between text-xs">
+                  <div className="mb-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3">
+                    <p className="mb-2 text-[11px] font-medium text-emerald-400">Confirm subscription</p>
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-[11px]">
                         <span className="text-gray-400">Allocation</span>
-                        <span className="font-mono text-white">${allocNum.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                        <span className="font-mono text-white">${allocNum.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · {leverage}x</span>
                       </div>
-                      <div className="flex justify-between text-xs">
-                        <span className="text-gray-400">Leverage</span>
-                        <span className="font-mono text-white">{leverage}x</span>
-                      </div>
-                      {maxPosition && (
-                        <div className="flex justify-between text-xs">
-                          <span className="text-gray-400">Max / Market</span>
-                          <span className="font-mono text-white">${parseFloat(maxPosition).toLocaleString()}</span>
-                        </div>
-                      )}
-                      {maxTotal && (
-                        <div className="flex justify-between text-xs">
-                          <span className="text-gray-400">Max Total</span>
-                          <span className="font-mono text-white">${parseFloat(maxTotal).toLocaleString()}</span>
+                      {(maxPosition || maxTotal) && (
+                        <div className="flex justify-between text-[11px]">
+                          <span className="text-gray-400">Caps</span>
+                          <span className="font-mono text-white">
+                            {maxPosition ? `$${parseFloat(maxPosition).toLocaleString()}/mkt` : "—"}
+                            {maxPosition && maxTotal ? " · " : ""}
+                            {maxTotal ? `$${parseFloat(maxTotal).toLocaleString()} total` : ""}
+                          </span>
                         </div>
                       )}
                       {stopLoss && (
-                        <div className="flex justify-between text-xs">
+                        <div className="flex justify-between text-[11px]">
                           <span className="text-gray-400">Stop Loss</span>
                           <span className="font-mono text-white">{stopLoss}%</span>
                         </div>
                       )}
                     </div>
-                    <p className="mt-3 text-[10px] text-gray-500">
-                      The copy engine will mirror this trader's positions proportionally to your allocation.
-                      You can pause or unfollow at any time.
+                    <p className="mt-2 text-[10px] text-gray-500 leading-snug">
+                      Engine mirrors this trader proportionally. Pause or unfollow anytime.
                     </p>
                   </div>
 
-                  <div className="flex gap-3">
+                  <div className="flex gap-2">
                     <button
                       onClick={() => setStep("input")}
-                      className="flex-1 rounded-xl border border-[#262626] bg-[#141414] py-3 text-sm font-medium text-gray-300 transition-colors hover:bg-[#1a1a1a]"
+                      className="flex-1 rounded-lg border border-[#262626] bg-[#141414] py-2 text-xs font-medium text-gray-300 transition-colors hover:bg-[#1a1a1a]"
                     >
                       Back
                     </button>
                     <button
                       onClick={handleSubmit}
-                      className="flex-1 rounded-xl border border-emerald-500/30 bg-emerald-500/15 py-3 text-sm font-semibold text-emerald-400 transition-colors hover:bg-emerald-500/25"
+                      className="flex-1 rounded-lg border border-emerald-500/30 bg-emerald-500/15 py-2 text-xs font-semibold text-emerald-400 transition-colors hover:bg-emerald-500/25"
                     >
                       Confirm
                     </button>
@@ -489,22 +444,21 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
 
               {/* Step: Submitting */}
               {step === "submitting" && (
-                <div className="flex flex-col items-center py-8">
-                  <div className="mb-4 h-10 w-10 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
-                  <div className="text-sm text-gray-300">Creating subscription...</div>
+                <div className="flex flex-col items-center py-6">
+                  <div className="mb-3 h-8 w-8 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
+                  <div className="text-xs text-gray-300">Creating subscription...</div>
                 </div>
               )}
 
               {/* Step: Success */}
               {step === "success" && (
-                <div className="flex flex-col items-center py-8">
-                  <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-full bg-emerald-500/20">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5" strokeLinecap="round">
+                <div className="flex flex-col items-center py-6">
+                  <div className="mb-2 flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500/20">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5" strokeLinecap="round">
                       <path d="M5 13l4 4L19 7" />
                     </svg>
                   </div>
-                  <div className="text-sm font-medium text-emerald-400">Now following {fmtAddr(trader.walletAddr)}</div>
-                  <div className="mt-1 text-xs text-gray-500">Subscription active</div>
+                  <div className="text-xs font-medium text-emerald-400">Now following {fmtAddr(trader.walletAddr)}</div>
                 </div>
               )}
             </>
