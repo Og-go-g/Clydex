@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useEffect } from "react";
 import { useAuth } from "@/lib/auth/context";
+import { trackInteraction } from "@/lib/util/track-interaction";
 import type { LeaderboardEntry } from "./CompactLeaderboard";
 
 type Step = "input" | "confirm" | "submitting" | "success" | "error";
@@ -178,6 +179,7 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
       }
 
       setStep("success");
+      trackInteraction(trader.walletAddr, "follow");
       // Brief success state, then close and notify parent
       setTimeout(() => {
         handleClose();

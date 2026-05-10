@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { trackInteraction } from "@/lib/util/track-interaction";
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -94,8 +95,9 @@ export function LeaderboardContent({ onCopyTrader }: { onCopyTrader?: (entry: Le
       }
       const body = await res.json();
       const profile = body.data ?? body;
+      const resolvedWallet: string = profile.walletAddr ?? addr;
       setSearchResult({
-        walletAddr: profile.walletAddr ?? addr,
+        walletAddr: resolvedWallet,
         totalPnl: profile.totalPnl ?? 0,
         tradingPnl: profile.tradingPnl ?? 0,
         fundingPnl: profile.fundingPnl ?? 0,
@@ -107,6 +109,7 @@ export function LeaderboardContent({ onCopyTrader }: { onCopyTrader?: (entry: Le
         liquidations: profile.liquidations ?? 0,
         totalVolume: profile.totalVolume ?? 0,
       });
+      trackInteraction(resolvedWallet, "view");
     } catch {
       setSearchError("Search failed");
     } finally {
@@ -157,7 +160,10 @@ export function LeaderboardContent({ onCopyTrader }: { onCopyTrader?: (entry: Le
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-mono font-semibold text-white">{fmtAddr(searchResult.walletAddr)}</span>
               <button
-                onClick={() => onCopyTrader?.(searchResult)}
+                onClick={() => {
+                  trackInteraction(searchResult.walletAddr, "search");
+                  onCopyTrader?.(searchResult);
+                }}
                 className="rounded bg-emerald-500/10 px-2 py-0.5 text-[9px] font-semibold text-emerald-400 hover:bg-emerald-500/20"
               >
                 Copy
@@ -251,7 +257,11 @@ export function LeaderboardContent({ onCopyTrader }: { onCopyTrader?: (entry: Le
                     </td>
                     <td className="px-3 py-1.5 text-right">
                       <button
-                        onClick={(e) => { e.stopPropagation(); onCopyTrader?.(entry); }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          trackInteraction(entry.walletAddr, "search");
+                          onCopyTrader?.(entry);
+                        }}
                         className="rounded bg-emerald-500/10 px-2 py-0.5 text-[9px] font-semibold text-emerald-400 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-emerald-500/20"
                       >
                         Copy
