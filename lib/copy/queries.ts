@@ -316,12 +316,27 @@ export async function insertCopyTrade(params: {
   side: string;
   size: string;
   origTradeId?: string;
+  /** Defaults to 'pending'. Pass 'skipped' or 'failed' for already-final trades to save a roundtrip. */
+  status?: "pending" | "filled" | "failed" | "cancelled" | "skipped";
+  error?: string;
 }): Promise<string> {
   const id = uuid();
   await execute(
-    `INSERT INTO copy_trades (id, subscription_id, follower_addr, leader_addr, market_id, symbol, side, size, orig_trade_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-    [id, params.subscriptionId, params.followerAddr, params.leaderAddr, params.marketId, params.symbol, params.side, params.size, params.origTradeId ?? null],
+    `INSERT INTO copy_trades (id, subscription_id, follower_addr, leader_addr, market_id, symbol, side, size, orig_trade_id, status, error)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, 'pending'), $11)`,
+    [
+      id,
+      params.subscriptionId,
+      params.followerAddr,
+      params.leaderAddr,
+      params.marketId,
+      params.symbol,
+      params.side,
+      params.size,
+      params.origTradeId ?? null,
+      params.status ?? null,
+      params.error ?? null,
+    ],
   );
   return id;
 }
@@ -375,7 +390,12 @@ export async function getActiveLeaders(): Promise<string[]> {
   return rows.map((r) => r.leaderAddr);
 }
 
-/** Get all active followers for a specific leader */
+/**
+ * Get all active followers for a specific leader, oldest subscription
+ * first. Order matters for ownership-collision determinism: when two
+ * followers' subscriptions concurrently bid for ownership of a new
+ * market in the same engine cycle, the older subscription wins.
+ */
 export async function getFollowersForLeader(leaderAddr: string): Promise<CopySubscription[]> {
   return query<CopySubscription>(
     `SELECT id, follower_addr AS "followerAddr", leader_addr AS "leaderAddr",
@@ -383,7 +403,8 @@ export async function getFollowersForLeader(leaderAddr: string): Promise<CopySub
             max_position_usdc AS "maxPositionUsdc", max_total_position_usdc AS "maxTotalPositionUsdc", stop_loss_pct AS "stopLossPct",
             active, created_at AS "createdAt", updated_at AS "updatedAt"
      FROM copy_subscriptions
-     WHERE leader_addr = $1 AND active = TRUE`,
+     WHERE leader_addr = $1 AND active = TRUE
+     ORDER BY created_at ASC`,
     [leaderAddr],
   );
 }
@@ -463,6 +484,10 @@ export async function getOwnership(
  * Atomically claim ownership for (follower, market). Returns true if
  * acquired (or already owned by the same leader), false if owned by
  * another leader. Used as the engine's gate before placeOrder.
+ *
+ * On conflict where the existing owner matches the requested leader
+ * (re-subscribe case after orphan), refresh `subscription_id` to the
+ * current sub. Otherwise preserve existing owner + sub_id (collision).
  */
 export async function acquireOwnership(
   followerAddr: string,
@@ -475,7 +500,12 @@ export async function acquireOwnership(
        (follower_addr, market_id, owning_leader_addr, subscription_id)
      VALUES ($1, $2, $3, $4)
      ON CONFLICT (follower_addr, market_id) DO UPDATE SET
-       owning_leader_addr = copy_position_ownership.owning_leader_addr
+       owning_leader_addr = copy_position_ownership.owning_leader_addr,
+       subscription_id = CASE
+         WHEN copy_position_ownership.owning_leader_addr = EXCLUDED.owning_leader_addr
+         THEN EXCLUDED.subscription_id
+         ELSE copy_position_ownership.subscription_id
+       END
      RETURNING owning_leader_addr AS "owningLeaderAddr"`,
     [followerAddr, marketId, leaderAddr, subscriptionId],
   );

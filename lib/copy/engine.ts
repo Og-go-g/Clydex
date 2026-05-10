@@ -184,16 +184,38 @@ async function executeCopyForFollower(
   follower: CopySubscription,
   leaderEquity: number,
   session: CopySession,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; skipped?: boolean; error?: string }> {
   // ─── Ownership gate ("one leader per market") ───────────────────
   //
-  // Before doing ANY work for a diff, check whether this market is
-  // already owned by a different leader (or locked by a manual
-  // position). Skip is logged as a copy_trade with a "skipped_*"
-  // status so it surfaces in the History tab.
+  // Three return shapes the engine cares about:
+  //   { success: true }                    → snapshot advances, no follow-up
+  //   { success: false, skipped: true }    → snapshot advances (skip is
+  //                                           a deliberate decision, not a
+  //                                           transient failure to retry).
+  //                                           Has copy_trade row for visibility.
+  //   { success: false }                   → snapshot does NOT advance →
+  //                                           diff re-detected next cycle
+  //                                           (real failure, retry path).
+
   const existing = await getOwnership(follower.followerAddr, diff.marketId);
+
+  // Close/decrease only valid if WE currently own this market. No
+  // ownership = nothing to close (bootstrap residue, prior collision,
+  // or the position pre-dates ownership tracking). Foreign ownership =
+  // leader closed something we never mirrored (we own this from a
+  // different leader). In both cases: silent noop, advance snapshot,
+  // do NOT touch the exchange. This protects against accidentally
+  // closing the user's manual position with the same symbol.
+  if (diff.action === "close" || diff.action === "decrease") {
+    if (!existing || existing.owningLeaderAddr !== follower.leaderAddr) {
+      return { success: true };
+    }
+  }
+
+  // Open/increase/flip into a market owned by another leader →
+  // skip with copy_trade row for visibility.
   if (existing && existing.owningLeaderAddr !== follower.leaderAddr) {
-    const tradeId = await insertCopyTrade({
+    await insertCopyTrade({
       subscriptionId: follower.id,
       followerAddr: follower.followerAddr,
       leaderAddr: follower.leaderAddr,
@@ -201,15 +223,15 @@ async function executeCopyForFollower(
       symbol: diff.symbol,
       side: diff.side,
       size: "0",
-    });
-    await updateCopyTradeStatus(tradeId, "skipped", {
+      status: "skipped",
       error: `collision: market ${diff.symbol} owned by leader ${existing.owningLeaderAddr.slice(0, 8)}…`,
     });
-    return { success: false, error: `Market ${diff.symbol} owned by another leader` };
+    return { success: false, skipped: true, error: `Market ${diff.symbol} owned by another leader` };
   }
-  // If no ownership row but this is a NEW position diff, also check
-  // for a manual position in the market — user may have opened that
-  // market themselves and we shouldn't pile on top.
+
+  // Open/increase/flip with no ownership: check for a manual
+  // position. If user opened the market themselves, don't pile copy
+  // on top.
   if (!existing && (diff.action === "open" || diff.action === "increase" || diff.action === "flip")) {
     try {
       const followerAccountId = await resolveAccountId(follower.followerAddr);
@@ -222,7 +244,7 @@ async function executeCopyForFollower(
           (p) => p.marketId === diff.marketId && Math.abs(p.perp?.baseSize ?? 0) > 0,
         );
         if (existingInMarket) {
-          const tradeId = await insertCopyTrade({
+          await insertCopyTrade({
             subscriptionId: follower.id,
             followerAddr: follower.followerAddr,
             leaderAddr: follower.leaderAddr,
@@ -230,11 +252,10 @@ async function executeCopyForFollower(
             symbol: diff.symbol,
             side: diff.side,
             size: "0",
-          });
-          await updateCopyTradeStatus(tradeId, "skipped", {
+            status: "skipped",
             error: `manual: ${diff.symbol} has a non-copy position`,
           });
-          return { success: false, error: `Manual position in ${diff.symbol}` };
+          return { success: false, skipped: true, error: `Manual position in ${diff.symbol}` };
         }
       }
     } catch {
@@ -704,12 +725,13 @@ export async function runCopyEngine(): Promise<EngineResult> {
 
             for (const diff of diffs) {
               const res = await executeCopyForFollower(diff, follower, leaderEquity, session);
-              if (res.success) {
-                result.ordersPlaced++;
-                // Advance THIS follower's snapshot for THIS market —
-                // only on success. Other markets and other followers'
-                // snapshots untouched. Failed diffs naturally re-appear
-                // next cycle for retry.
+
+              // Snapshot advances on both success AND deliberate skips
+              // (collision/manual). Deliberate skips are NOT failures —
+              // re-applying the same diff next cycle would loop forever.
+              // Real failures (success=false, skipped=undefined) leave
+              // snapshot untouched so the diff re-fires for retry.
+              if (res.success || res.skipped) {
                 if (diff.action === "close") {
                   await deleteSnapshot(follower.followerAddr, leaderAddr, diff.marketId);
                 } else {
@@ -721,9 +743,17 @@ export async function runCopyEngine(): Promise<EngineResult> {
                     diff.side,
                   );
                 }
+              }
+
+              if (res.success) {
+                result.ordersPlaced++;
+              } else if (res.skipped) {
+                result.skipped++;
               } else {
                 result.ordersFailed++;
-                if (res.error) addError(result, `${follower.followerAddr}→${diff.symbol}: ${res.error}`);
+              }
+              if (!res.success && res.error) {
+                addError(result, `${follower.followerAddr}→${diff.symbol}: ${res.error}`);
               }
             }
           }
