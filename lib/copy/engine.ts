@@ -185,6 +185,44 @@ async function executeCopyForFollower(
   leaderEquity: number,
   session: CopySession,
 ): Promise<{ success: boolean; skipped?: boolean; error?: string }> {
+  // ─── Memoized follower account access ───────────────────────────
+  //
+  // Up to four downstream checks (manual-position, global notional
+  // cap, margin pre-check, stop-loss setTrigger) need either the
+  // follower's accountId or their full account snapshot. Without
+  // memoization that's 3 redundant getAccount HTTP calls per
+  // executeCopyForFollower for an open/increase action with both
+  // maxTotal and stopLoss configured.
+  //
+  // `undefined` = not resolved yet. `null` = resolved, but lookup
+  // failed (no account) — downstream checks degrade gracefully and
+  // proceed without the corresponding safety net.
+  let _accId: number | null | undefined = undefined;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let _account: any | null | undefined = undefined;
+
+  const getFollowerAccountId = async (): Promise<number | null> => {
+    if (_accId === undefined) _accId = await resolveAccountId(follower.followerAddr);
+    return _accId;
+  };
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const getFollowerAccount = async (): Promise<any | null> => {
+    if (_account !== undefined) return _account;
+    const id = await getFollowerAccountId();
+    if (id === null) {
+      _account = null;
+      return null;
+    }
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      _account = (await getAccount(id)) as any;
+    } catch {
+      _account = null;
+    }
+    return _account;
+  };
+
   // ─── Ownership gate ("one leader per market") ───────────────────
   //
   // Three return shapes the engine cares about:
@@ -233,34 +271,26 @@ async function executeCopyForFollower(
   // position. If user opened the market themselves, don't pile copy
   // on top.
   if (!existing && (diff.action === "open" || diff.action === "increase" || diff.action === "flip")) {
-    try {
-      const followerAccountId = await resolveAccountId(follower.followerAddr);
-      if (followerAccountId !== null) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const followerAccount = await getAccount(followerAccountId) as any;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const positions = (followerAccount?.positions ?? []) as Array<{ marketId: number; perp?: { baseSize?: number } }>;
-        const existingInMarket = positions.find(
-          (p) => p.marketId === diff.marketId && Math.abs(p.perp?.baseSize ?? 0) > 0,
-        );
-        if (existingInMarket) {
-          await insertCopyTrade({
-            subscriptionId: follower.id,
-            followerAddr: follower.followerAddr,
-            leaderAddr: follower.leaderAddr,
-            marketId: diff.marketId,
-            symbol: diff.symbol,
-            side: diff.side,
-            size: "0",
-            status: "skipped",
-            error: `manual: ${diff.symbol} has a non-copy position`,
-          });
-          return { success: false, skipped: true, error: `Manual position in ${diff.symbol}` };
-        }
+    const followerAccount = await getFollowerAccount();
+    if (followerAccount) {
+      const positions = (followerAccount.positions ?? []) as Array<{ marketId: number; perp?: { baseSize?: number } }>;
+      const existingInMarket = positions.find(
+        (p) => p.marketId === diff.marketId && Math.abs(p.perp?.baseSize ?? 0) > 0,
+      );
+      if (existingInMarket) {
+        await insertCopyTrade({
+          subscriptionId: follower.id,
+          followerAddr: follower.followerAddr,
+          leaderAddr: follower.leaderAddr,
+          marketId: diff.marketId,
+          symbol: diff.symbol,
+          side: diff.side,
+          size: "0",
+          status: "skipped",
+          error: `manual: ${diff.symbol} has a non-copy position`,
+        });
+        return { success: false, skipped: true, error: `Manual position in ${diff.symbol}` };
       }
-    } catch {
-      // Manual-position check is best-effort. If it fails, fall through
-      // — exchange will reject if there's a real conflict.
     }
   }
 
@@ -344,25 +374,19 @@ async function executeCopyForFollower(
   // Cap at maxTotalPositionUsdc (global across all markets)
   const maxTotal = follower.maxTotalPositionUsdc ? parseFloat(follower.maxTotalPositionUsdc) : null;
   if (maxTotal && isFinite(maxTotal) && maxTotal > 0 && diff.action !== "close" && diff.action !== "decrease") {
-    try {
-      const followerAccountId = await resolveAccountId(follower.followerAddr);
-      if (followerAccountId !== null) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const followerAccount = await getAccount(followerAccountId) as any;
-        const positions = (followerAccount?.positions ?? []) as Array<{ perp?: { baseSize?: number; price?: number } }>;
-        const existingNotional = positions.reduce((sum, p) => {
-          const bs = Math.abs(p.perp?.baseSize ?? 0);
-          const pr = p.perp?.price ?? 0;
-          return sum + bs * pr;
-        }, 0);
-        const remainingBudget = maxTotal - existingNotional;
-        if (remainingBudget <= 0) {
-          return { success: false, error: `Global cap reached: $${existingNotional.toFixed(0)}/$${maxTotal.toFixed(0)}` };
-        }
-        followerDelta = Math.min(followerDelta, remainingBudget / markPrice);
+    const followerAccount = await getFollowerAccount();
+    if (followerAccount) {
+      const positions = (followerAccount.positions ?? []) as Array<{ perp?: { baseSize?: number; price?: number } }>;
+      const existingNotional = positions.reduce((sum, p) => {
+        const bs = Math.abs(p.perp?.baseSize ?? 0);
+        const pr = p.perp?.price ?? 0;
+        return sum + bs * pr;
+      }, 0);
+      const remainingBudget = maxTotal - existingNotional;
+      if (remainingBudget <= 0) {
+        return { success: false, error: `Global cap reached: $${existingNotional.toFixed(0)}/$${maxTotal.toFixed(0)}` };
       }
-    } catch {
-      // If global cap check fails, continue with per-market cap only
+      followerDelta = Math.min(followerDelta, remainingBudget / markPrice);
     }
   }
 
@@ -406,22 +430,16 @@ async function executeCopyForFollower(
   // equity already 100% used by other positions, omf=$100 looked
   // available and let the order through, only to fail at the exchange.
   if (diff.action !== "close" && diff.action !== "decrease") {
-    try {
-      const followerAccountId = await resolveAccountId(follower.followerAddr);
-      if (followerAccountId !== null) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const followerAccount = await getAccount(followerAccountId) as any;
-        const m = followerAccount?.margins ?? {};
-        const equity = typeof m.omf === "number" && isFinite(m.omf) ? m.omf : 0;
-        const initialMargin = typeof m.imf === "number" && isFinite(m.imf) ? m.imf : 0;
-        const availableMargin = Math.max(0, equity - initialMargin);
-        const marginNeeded = orderValueUsd / leverageMult;
-        if (availableMargin < marginNeeded * 0.5) {
-          return { success: false, error: `Insufficient margin: need ~$${marginNeeded.toFixed(0)}, have $${availableMargin.toFixed(0)} (equity $${equity.toFixed(0)} − used $${initialMargin.toFixed(0)})` };
-        }
+    const followerAccount = await getFollowerAccount();
+    if (followerAccount) {
+      const m = followerAccount.margins ?? {};
+      const equity = typeof m.omf === "number" && isFinite(m.omf) ? m.omf : 0;
+      const initialMargin = typeof m.imf === "number" && isFinite(m.imf) ? m.imf : 0;
+      const availableMargin = Math.max(0, equity - initialMargin);
+      const marginNeeded = orderValueUsd / leverageMult;
+      if (availableMargin < marginNeeded * 0.5) {
+        return { success: false, error: `Insufficient margin: need ~$${marginNeeded.toFixed(0)}, have $${availableMargin.toFixed(0)} (equity $${equity.toFixed(0)} − used $${initialMargin.toFixed(0)})` };
       }
-    } catch {
-      // If margin check fails, continue — exchange will reject if truly insufficient
     }
   }
 
@@ -544,7 +562,7 @@ async function executeCopyForFollower(
     if (stopLossPct && isFinite(stopLossPct) && stopLossPct > 0 && stopLossPct <= 100 &&
         diff.action !== "close" && diff.action !== "decrease") {
       try {
-        const followerAccountId = await resolveAccountId(follower.followerAddr);
+        const followerAccountId = await getFollowerAccountId();
         const stopPrice = diff.side === "Long"
           ? markPrice * (1 - stopLossPct / 100)
           : markPrice * (1 + stopLossPct / 100);
