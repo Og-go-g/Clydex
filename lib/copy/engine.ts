@@ -276,17 +276,36 @@ async function executeCopyForFollower(
     return { success: false, error: `Session restore: ${msg}` };
   }
 
-  // Margin check via REST API (SDK fetchInfo unreliable server-side)
+  // Margin check via REST API (SDK fetchInfo unreliable server-side).
+  //
+  // Available margin for opening NEW orders = omf - imf, where:
+  //   omf = USD-denominated equity (collateral + open positive PnL - debt)
+  //   imf = USD-denominated initial margin already required by existing
+  //         orders/positions to remain open
+  //
+  // Threshold is intentionally permissive (0.5x of needed) — this is a
+  // sanity-pre-check, not strict enforcement. The exchange does the
+  // authoritative margin enforcement; we just want to avoid obvious
+  // "no chance" submits that would burn an HTTP roundtrip and a failed
+  // copy_trade row in the DB.
+  //
+  // Pre-2026-05-10: this check used `margins.omf` directly as available,
+  // which is total equity (NOT free buffer). On a follower with $100
+  // equity already 100% used by other positions, omf=$100 looked
+  // available and let the order through, only to fail at the exchange.
   if (diff.action !== "close" && diff.action !== "decrease") {
     try {
       const followerAccountId = await resolveAccountId(follower.followerAddr);
       if (followerAccountId !== null) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const followerAccount = await getAccount(followerAccountId) as any;
-        const availableMargin = followerAccount?.margins?.omf ?? 0;
+        const m = followerAccount?.margins ?? {};
+        const equity = typeof m.omf === "number" && isFinite(m.omf) ? m.omf : 0;
+        const initialMargin = typeof m.imf === "number" && isFinite(m.imf) ? m.imf : 0;
+        const availableMargin = Math.max(0, equity - initialMargin);
         const marginNeeded = orderValueUsd / leverageMult;
-        if (typeof availableMargin === "number" && isFinite(availableMargin) && availableMargin < marginNeeded * 0.5) {
-          return { success: false, error: `Insufficient margin: need ~$${marginNeeded.toFixed(0)}, have $${availableMargin.toFixed(0)}` };
+        if (availableMargin < marginNeeded * 0.5) {
+          return { success: false, error: `Insufficient margin: need ~$${marginNeeded.toFixed(0)}, have $${availableMargin.toFixed(0)} (equity $${equity.toFixed(0)} − used $${initialMargin.toFixed(0)})` };
         }
       }
     } catch {
