@@ -1,4 +1,5 @@
 import "./polyfill";
+import * as Sentry from "@sentry/nextjs";
 import { query as dbQuery } from "../db-history";
 import { withRetry } from "../util/retry";
 import { getAccount, getUser, getMarketStats } from "../n1/client";
@@ -185,8 +186,37 @@ async function executeCopyForFollower(
   const failures = await getConsecutiveFailures(follower.id);
   if (failures >= MAX_CONSECUTIVE_FAILURES) {
     await toggleSubscription(follower.id, false);
+    Sentry.captureMessage(
+      `[copy-engine] Auto-paused subscription after ${failures} consecutive failures`,
+      {
+        level: "warning",
+        tags: { component: "copy-engine", event: "circuit-breaker" },
+        extra: {
+          subscriptionId: follower.id,
+          followerAddr: follower.followerAddr,
+          leaderAddr: follower.leaderAddr,
+          symbol: diff.symbol,
+          action: diff.action,
+        },
+      },
+    );
     return { success: false, error: `Auto-paused: ${failures} consecutive failures` };
   }
+
+  Sentry.addBreadcrumb({
+    category: "copy-engine",
+    message: `attempt ${diff.action} ${diff.symbol}`,
+    level: "info",
+    data: {
+      followerAddr: follower.followerAddr,
+      leaderAddr: follower.leaderAddr,
+      marketId: diff.marketId,
+      symbol: diff.symbol,
+      action: diff.action,
+      delta: diff.delta,
+      side: diff.side,
+    },
+  });
 
   // Validate numeric inputs
   const allocation = parseFloat(follower.allocationUsdc);
@@ -428,6 +458,24 @@ async function executeCopyForFollower(
       errorMsg = typeof err === "string" ? err : "Unknown error";
     }
     console.error(`[copy-engine] FAILED ${follower.followerAddr} ${diff.action} ${diff.symbol}:`, err);
+    Sentry.captureException(err, {
+      tags: { component: "copy-engine", event: "order-failed" },
+      extra: {
+        tradeId,
+        subscriptionId: follower.id,
+        followerAddr: follower.followerAddr,
+        leaderAddr: follower.leaderAddr,
+        marketId: diff.marketId,
+        symbol: diff.symbol,
+        action: diff.action,
+        side: diff.side,
+        size: roundedSize,
+        markPrice,
+        orderValueUsd,
+        leverageMult,
+        allocation,
+      },
+    });
     await updateCopyTradeStatus(tradeId, "failed", { error: errorMsg.slice(0, 500) });
     return { success: false, error: errorMsg };
   }
@@ -593,6 +641,10 @@ export async function runCopyEngine(): Promise<EngineResult> {
     }
   } catch (err) {
     addError(result, `Engine fatal: ${err instanceof Error ? err.message : "Unknown"}`);
+    Sentry.captureException(err, {
+      level: "fatal",
+      tags: { component: "copy-engine", event: "cycle-fatal" },
+    });
   } finally {
     engineRunning = false;
     nordUserCache.clear(); // clean up restored sessions
