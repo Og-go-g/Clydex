@@ -563,6 +563,27 @@ export async function releaseAllOwnership(
 }
 
 /**
+ * All ownership rows for a follower — used by the Open Copy Positions
+ * panel to enrich with live exchange position data. Includes
+ * orphan-locked rows (subscription_id IS NULL) so the panel can
+ * still show + close those positions.
+ */
+export async function getOwnershipForFollower(
+  followerAddr: string,
+): Promise<PositionOwnership[]> {
+  return query<PositionOwnership>(
+    `SELECT follower_addr AS "followerAddr", market_id AS "marketId",
+            owning_leader_addr AS "owningLeaderAddr",
+            subscription_id AS "subscriptionId",
+            opened_at AS "openedAt"
+     FROM copy_position_ownership
+     WHERE follower_addr = $1
+     ORDER BY opened_at ASC`,
+    [followerAddr],
+  );
+}
+
+/**
  * Get markets owned by OTHER leaders (i.e. forbidden) for this
  * follower if they were to subscribe to a new candidate leader.
  * Used by the FollowTraderDialog overlap-warning UX — shows the user

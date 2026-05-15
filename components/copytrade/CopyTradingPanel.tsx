@@ -62,6 +62,18 @@ interface CopyStatus {
   recentTrades: CopyTradeLog[];
 }
 
+interface OpenCopyPosition {
+  marketId: number;
+  symbol: string;
+  side: "Long" | "Short";
+  size: number;
+  entryPrice: number;
+  tradingPnl: number;
+  fundingPnl: number;
+  owningLeaderAddr: string;
+  openedAt: string;
+}
+
 function shortenAddr(addr: string): string {
   if (addr.startsWith("account:")) return "#" + addr.slice(8);
   return addr.slice(0, 4) + "..." + addr.slice(-4);
@@ -395,6 +407,14 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
   const prevFilledRef = useRef<number>(0);
   const prevFailedRef = useRef<number>(0);
 
+  // Open copy positions — currently-held positions that came from
+  // copy trading. Replaces the old Activity Log, which duplicated
+  // History tab content. This panel is actionable: each row has a
+  // [Close] button that closes that single position via
+  // /api/copy/close-position and releases ownership.
+  const [openPositions, setOpenPositions] = useState<OpenCopyPosition[]>([]);
+  const [closingMarket, setClosingMarket] = useState<number | null>(null);
+
   const fetchStatus = useCallback(async () => {
     if (!isAuthenticated) { setLoading(false); return; }
     try {
@@ -474,6 +494,61 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
       onRefreshRef.current = fetchStatus;
     }
   }, [onRefreshRef, fetchStatus]);
+
+  // Open copy positions — fetcher + 10s polling. Lighter cadence than
+  // the engine cycle (15s) so the panel feels live without burying
+  // the API. Re-fetched immediately after close action for instant
+  // visual feedback.
+  const fetchOpenPositions = useCallback(async () => {
+    if (!isAuthenticated || !status?.sessionActive) return;
+    try {
+      const res = await fetch("/api/copy/open-positions", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json() as { positions: OpenCopyPosition[] };
+      setOpenPositions(Array.isArray(data.positions) ? data.positions : []);
+    } catch {
+      // silent — keep previous state on transient network hiccup
+    }
+  }, [isAuthenticated, status?.sessionActive]);
+
+  useEffect(() => {
+    fetchOpenPositions();
+  }, [fetchOpenPositions]);
+
+  useEffect(() => {
+    if (!isAuthenticated || !status?.sessionActive) return;
+    const id = setInterval(fetchOpenPositions, 10_000);
+    return () => clearInterval(id);
+  }, [isAuthenticated, status?.sessionActive, fetchOpenPositions]);
+
+  const handleClosePosition = useCallback(async (marketId: number, symbol: string) => {
+    setClosingMarket(marketId);
+    // Optimistic remove — restored by re-fetch on error.
+    setOpenPositions((prev) => prev.filter((p) => p.marketId !== marketId));
+    try {
+      const res = await fetch("/api/copy/close-position", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ marketId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        addToast({
+          type: "success",
+          title: "Position Closed",
+          message: data.noop ? `${symbol}: nothing to close` : `${symbol} closed`,
+        });
+        await fetchStatus();
+      } else {
+        addToast({ type: "error", title: "Close Failed", message: data.error ?? "Unknown error" });
+      }
+    } catch {
+      addToast({ type: "error", title: "Network Error", message: `Failed to close ${symbol}` });
+    } finally {
+      await fetchOpenPositions();
+      setClosingMarket(null);
+    }
+  }, [addToast, fetchOpenPositions, fetchStatus]);
 
   const handleActivate = async () => {
     if (!publicKey || !signMessage || !signTransaction) {
@@ -809,33 +884,77 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
             </div>
           )}
 
-          {/* Activity Log */}
-          {status.recentTrades && status.recentTrades.length > 0 && (
+          {/* Open copy positions — actionable replacement for the
+              old Activity Log. Hidden when subscriptions exist but
+              no positions are open (clean state). When NO subs exist
+              at all, the section above already shows "No traders
+              followed yet" so this stays hidden too. */}
+          {status.subscriptions.length > 0 && (
             <div className="pt-2">
-              <p className="text-[10px] font-medium text-[#888] mb-1.5">Activity Log</p>
-              <div className="space-y-1 max-h-[120px] overflow-y-auto">
-                {status.recentTrades.map((t, i) => (
-                  <div key={i} className={`flex items-center justify-between rounded border px-2 py-1 text-[9px] font-mono ${
-                    t.status === "filled"
-                      ? "border-emerald-500/10 bg-emerald-500/5"
-                      : "border-red-500/10 bg-red-500/5"
-                  }`}>
-                    <div className="flex items-center gap-1.5">
-                      <span className={`h-1 w-1 rounded-full ${t.status === "filled" ? "bg-emerald-500" : "bg-red-500"}`} />
-                      <span className={t.side === "Long" ? "text-emerald-400" : "text-red-400"}>{t.side}</span>
-                      <span className="text-[#ccc]">{t.symbol}</span>
-                      <span className="text-[#666]">{parseFloat(t.size).toFixed(2)}</span>
-                      {t.price && <span className="text-[#555]">@${parseFloat(t.price).toLocaleString()}</span>}
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      {t.status === "failed" && t.error && (
-                        <span className="text-red-400/60 max-w-[80px] truncate" title={t.error}>{t.error}</span>
-                      )}
-                      <span className="text-[#555]">{new Date(t.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-                    </div>
-                  </div>
-                ))}
+              <div className="flex items-center justify-between mb-1.5">
+                <p className="text-[10px] font-medium text-[#888]">
+                  Open Positions
+                  {openPositions.length > 0 && (
+                    <span className="ml-1 text-[#555]">({openPositions.length})</span>
+                  )}
+                </p>
+                <a
+                  href="/portfolio"
+                  className="text-[9px] text-[#555] hover:text-[#888] transition-colors"
+                  title="See all positions including manual ones"
+                >
+                  View all →
+                </a>
               </div>
+              {openPositions.length === 0 ? (
+                <p className="text-[10px] text-[#555] text-center py-3 rounded border border-dashed border-[#1a1a1a]">
+                  No open copy positions
+                </p>
+              ) : (
+                <div className="space-y-1 max-h-[200px] overflow-y-auto">
+                  {openPositions.map((p) => {
+                    const pnl = p.tradingPnl + p.fundingPnl;
+                    const notional = p.size * p.entryPrice;
+                    const pnlPct = notional > 0 ? (pnl / notional) * 100 : 0;
+                    const pnlColor = pnl >= 0 ? "text-emerald-400" : "text-red-400";
+                    const sideColor = p.side === "Long" ? "text-emerald-400" : "text-red-400";
+                    const sideDot = p.side === "Long" ? "bg-emerald-500" : "bg-red-500";
+                    return (
+                      <div
+                        key={`${p.owningLeaderAddr}-${p.marketId}`}
+                        className="flex items-center justify-between gap-2 rounded border border-[#262626] bg-[#0a0a0a] px-2 py-1.5 text-[10px] font-mono"
+                      >
+                        <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                          <span className={`h-1 w-1 rounded-full flex-shrink-0 ${sideDot}`} />
+                          <span className={sideColor}>{p.side === "Long" ? "L" : "S"}</span>
+                          <span className="text-[#ccc] font-semibold">{p.symbol.replace("USD", "")}</span>
+                          <span className="text-[#888]">{p.size.toFixed(4)}</span>
+                          <span className="text-[#555]">@${p.entryPrice.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+                          <span className={`${pnlColor} font-semibold`}>
+                            {pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
+                          </span>
+                          <span className={`${pnlColor} text-[9px]`}>
+                            ({pnl >= 0 ? "+" : ""}{pnlPct.toFixed(1)}%)
+                          </span>
+                          <span
+                            className="text-[#444] truncate text-[9px] hidden sm:inline"
+                            title={`Copied from ${p.owningLeaderAddr}`}
+                          >
+                            via {shortenAddr(p.owningLeaderAddr)}
+                          </span>
+                        </div>
+                        <button
+                          onClick={() => handleClosePosition(p.marketId, p.symbol)}
+                          disabled={closingMarket === p.marketId}
+                          className="rounded bg-red-500/10 px-2 py-0.5 text-[9px] font-medium text-red-400 hover:bg-red-500/20 disabled:opacity-40 transition-colors flex-shrink-0"
+                        >
+                          {closingMarket === p.marketId ? "..." : "Close"}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
         </>
