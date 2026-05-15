@@ -25,6 +25,12 @@ export interface CopySubscription extends Record<string, unknown> {
   maxTotalPositionUsdc: string | null;
   stopLossPct: string | null;
   active: boolean;
+  /** NULL = engine has not yet completed first-run bootstrap for this
+   * (follower, leader) pair. Set to NOW() at the end of the first
+   * successful engine cycle that processes this subscription, regardless
+   * of whether leader had any positions to baseline. See
+   * sql/2026-05-15_subscription_bootstrap_flag.sql for the rationale. */
+  bootstrappedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -142,7 +148,7 @@ export async function getSubscriptions(followerAddr: string): Promise<CopySubscr
     `SELECT id, follower_addr AS "followerAddr", leader_addr AS "leaderAddr",
             allocation_usdc AS "allocationUsdc", leverage_mult AS "leverageMult",
             max_position_usdc AS "maxPositionUsdc", max_total_position_usdc AS "maxTotalPositionUsdc", stop_loss_pct AS "stopLossPct",
-            active, created_at AS "createdAt", updated_at AS "updatedAt"
+            active, bootstrapped_at AS "bootstrappedAt", created_at AS "createdAt", updated_at AS "updatedAt"
      FROM copy_subscriptions
      WHERE follower_addr = $1
      ORDER BY created_at DESC`,
@@ -155,7 +161,7 @@ export async function getActiveSubscriptionsByLeader(leaderAddr: string): Promis
     `SELECT id, follower_addr AS "followerAddr", leader_addr AS "leaderAddr",
             allocation_usdc AS "allocationUsdc", leverage_mult AS "leverageMult",
             max_position_usdc AS "maxPositionUsdc", max_total_position_usdc AS "maxTotalPositionUsdc", stop_loss_pct AS "stopLossPct",
-            active, created_at AS "createdAt", updated_at AS "updatedAt"
+            active, bootstrapped_at AS "bootstrappedAt", created_at AS "createdAt", updated_at AS "updatedAt"
      FROM copy_subscriptions
      WHERE leader_addr = $1 AND active = TRUE`,
     [leaderAddr],
@@ -222,6 +228,22 @@ export async function toggleSubscription(id: string, active: boolean): Promise<v
   await execute(
     `UPDATE copy_subscriptions SET active = $1, updated_at = NOW() WHERE id = $2`,
     [active, id],
+  );
+}
+
+/**
+ * Mark a subscription's first-run bootstrap as complete. Called by the
+ * engine at the end of the isFirstRun branch, regardless of whether
+ * the leader had positions to baseline. Sets bootstrapped_at = NOW()
+ * if it's currently NULL; idempotent on subsequent calls (NULL check
+ * prevents overwriting an earlier timestamp).
+ */
+export async function markSubscriptionBootstrapped(id: string): Promise<void> {
+  await execute(
+    `UPDATE copy_subscriptions
+     SET bootstrapped_at = NOW()
+     WHERE id = $1 AND bootstrapped_at IS NULL`,
+    [id],
   );
 }
 
@@ -401,7 +423,7 @@ export async function getFollowersForLeader(leaderAddr: string): Promise<CopySub
     `SELECT id, follower_addr AS "followerAddr", leader_addr AS "leaderAddr",
             allocation_usdc AS "allocationUsdc", leverage_mult AS "leverageMult",
             max_position_usdc AS "maxPositionUsdc", max_total_position_usdc AS "maxTotalPositionUsdc", stop_loss_pct AS "stopLossPct",
-            active, created_at AS "createdAt", updated_at AS "updatedAt"
+            active, bootstrapped_at AS "bootstrappedAt", created_at AS "createdAt", updated_at AS "updatedAt"
      FROM copy_subscriptions
      WHERE leader_addr = $1 AND active = TRUE
      ORDER BY created_at ASC`,

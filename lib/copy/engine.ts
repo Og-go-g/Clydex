@@ -17,6 +17,7 @@ import {
   updateCopyTradeStatus,
   getConsecutiveFailures,
   toggleSubscription,
+  markSubscriptionBootstrapped,
   getOwnership,
   acquireOwnership,
   releaseOwnership,
@@ -748,8 +749,19 @@ export async function runCopyEngine(): Promise<EngineResult> {
             const session = followerSessions.get(follower.followerAddr);
             if (!session) continue;
 
-            const snapshots = await getSnapshots(follower.followerAddr, leaderAddr);
-            const isFirstRun = snapshots.length === 0;
+            // First-run is tracked via the subscription's bootstrapped_at
+            // column, NOT via "snapshots empty". The empty-snapshots
+            // proxy was buggy when leader had zero positions at sub-time:
+            // first-run loop wrote no rows, snapshots stayed empty, the
+            // next cycle treated it as first-run AGAIN, and the very
+            // first position the leader subsequently opened was silently
+            // baselined instead of copied. The flag is set to NOW() at
+            // the END of the first-run branch — see
+            // sql/2026-05-15_subscription_bootstrap_flag.sql.
+            const isFirstRun = !follower.bootstrappedAt;
+            const snapshots = isFirstRun
+              ? []
+              : await getSnapshots(follower.followerAddr, leaderAddr);
 
             // First run = no diffs (don't bootstrap to current leader
             // state); just populate the baseline and let the next cycle
@@ -767,6 +779,10 @@ export async function runCopyEngine(): Promise<EngineResult> {
                   baseSize > 0 ? "Long" : "Short",
                 );
               }
+              // Mark AFTER the baseline upserts. If we crash mid-loop,
+              // bootstrapped_at stays NULL → next cycle re-attempts the
+              // whole baseline (upsert is idempotent → safe).
+              await markSubscriptionBootstrapped(follower.id);
               continue;
             }
 
