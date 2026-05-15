@@ -43,18 +43,31 @@ export interface MarketStat {
 type SortField = "pnl" | "winrate" | "volume" | "trades";
 type Period = "7d" | "30d" | "all";
 
-// ─── In-memory cache (avoids heavy query on every request) ─────
+// ─── In-memory caches (avoids heavy query on every request) ─────
 
-interface CacheEntry {
-  data: LeaderboardEntry[];
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+interface CacheEntry<T> {
+  data: T;
   ts: number;
 }
 
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-const cache = new Map<string, CacheEntry>();
+const cache = new Map<string, CacheEntry<LeaderboardEntry[]>>();
+const summaryCache = new Map<string, CacheEntry<LeaderboardEntry>>();
+const profileCache = new Map<string, CacheEntry<TraderProfile>>();
 
 function getCacheKey(period: Period, sort: SortField, limit: number): string {
   return `${period}:${sort}:${limit}`;
+}
+
+function readCache<T>(map: Map<string, CacheEntry<T>>, key: string): T | null {
+  const hit = map.get(key);
+  if (hit && Date.now() - hit.ts < CACHE_TTL_MS) return hit.data;
+  return null;
+}
+
+function writeCache<T>(map: Map<string, CacheEntry<T>>, key: string, data: T): void {
+  map.set(key, { data, ts: Date.now() });
 }
 
 // ─── Period filter ──────────────────────────────────────────────
@@ -251,42 +264,63 @@ async function resolveTraderAddress(input: string): Promise<string | null> {
   return null;
 }
 
-export async function getTraderProfile(input: string): Promise<TraderProfile | null> {
+/**
+ * Lightweight trader summary — just the headline stats that fit in
+ * the search result card (PnL, win-rate, trade count, volume, etc).
+ *
+ * Skips the expensive top-trades-by-closedPnL recursive CTE that
+ * `getTraderProfile` does — for a high-activity trader like 96vj
+ * (47k+ trades across 10+ markets) the recursive CTE alone takes
+ * 20-30s. Search UI doesn't render that data, so computing it for
+ * a search hit was pure waste.
+ *
+ * Returns the full LeaderboardEntry shape so callers can substitute
+ * this for a leaderboard row without UI changes.
+ *
+ * Cached 5 min in-process, so repeat searches of the same trader
+ * are sub-millisecond. Cache key is the resolved walletAddr — both
+ * `account:N` and base58 inputs hit the same cache slot once
+ * resolved.
+ */
+export async function getTraderSummary(input: string): Promise<LeaderboardEntry | null> {
   const walletAddr = await resolveTraderAddress(input);
   if (!walletAddr) return null;
 
-  // Re-query specifically for this wallet
-  const statsRows = await query<{
-    total_pnl: string;
-    trading_pnl: string;
-    funding_pnl: string;
-  }>(
-    `SELECT "totalPnl"::numeric AS total_pnl,
-            "totalTradingPnl"::numeric AS trading_pnl,
-            "totalFundingPnl"::numeric AS funding_pnl
-     FROM pnl_totals WHERE "walletAddr" = $1`,
-    [walletAddr],
-  );
+  const cached = readCache(summaryCache, walletAddr);
+  if (cached) return cached;
+
+  // Run all four base queries in parallel — they have no dependencies
+  // on each other and pg pool has plenty of headroom (max=10 conns).
+  const [statsRows, tradeCountRows, liqRows, volRows] = await Promise.all([
+    query<{
+      total_pnl: string;
+      trading_pnl: string;
+      funding_pnl: string;
+    }>(
+      `SELECT "totalPnl"::numeric AS total_pnl,
+              "totalTradingPnl"::numeric AS trading_pnl,
+              "totalFundingPnl"::numeric AS funding_pnl
+       FROM pnl_totals WHERE "walletAddr" = $1`,
+      [walletAddr],
+    ),
+    query<{ total_trades: number; wins: number; losses: number }>(
+      `SELECT
+         (SELECT COUNT(DISTINCT "tradeId")::int FROM trade_history WHERE "walletAddr" = $1) AS total_trades,
+         (SELECT COUNT(*)::int FROM pnl_history WHERE "walletAddr" = $1 AND "tradingPnl" > 0) AS wins,
+         (SELECT COUNT(*)::int FROM pnl_history WHERE "walletAddr" = $1 AND "tradingPnl" < 0) AS losses`,
+      [walletAddr],
+    ),
+    query<{ liquidations: number }>(
+      `SELECT COUNT(*)::int AS liquidations FROM liquidation_history WHERE "walletAddr" = $1`,
+      [walletAddr],
+    ),
+    query<{ total_volume: string }>(
+      `SELECT COALESCE(SUM(volume), 0)::numeric AS total_volume FROM volume_calendar WHERE "walletAddr" = $1`,
+      [walletAddr],
+    ),
+  ]);
 
   if (statsRows.length === 0) return null;
-
-  const tradeCountRows = await query<{ total_trades: number; wins: number; losses: number }>(
-    `SELECT
-       (SELECT COUNT(DISTINCT "tradeId")::int FROM trade_history WHERE "walletAddr" = $1) AS total_trades,
-       (SELECT COUNT(*)::int FROM pnl_history WHERE "walletAddr" = $1 AND "tradingPnl" > 0) AS wins,
-       (SELECT COUNT(*)::int FROM pnl_history WHERE "walletAddr" = $1 AND "tradingPnl" < 0) AS losses`,
-    [walletAddr],
-  );
-
-  const liqRows = await query<{ liquidations: number }>(
-    `SELECT COUNT(*)::int AS liquidations FROM liquidation_history WHERE "walletAddr" = $1`,
-    [walletAddr],
-  );
-
-  const volRows = await query<{ total_volume: string }>(
-    `SELECT COALESCE(SUM(volume), 0)::numeric AS total_volume FROM volume_calendar WHERE "walletAddr" = $1`,
-    [walletAddr],
-  );
 
   const stats = statsRows[0];
   const tc = tradeCountRows[0] ?? { total_trades: 0, wins: 0, losses: 0 };
@@ -309,16 +343,45 @@ export async function getTraderProfile(input: string): Promise<TraderProfile | n
     totalVolume: parseFloat(volRows[0]?.total_volume ?? "0") || 0,
   };
 
-  // 2. Top trades by closedPnl (uses recursive CTE from queries.ts pattern)
-  const topTrades = await getTraderTopTrades(walletAddr, 10);
+  writeCache(summaryCache, walletAddr, entry);
+  return entry;
+}
 
-  // 3. Market breakdown
-  const marketBreakdown = await getTraderMarketBreakdown(walletAddr);
+/**
+ * Full trader profile — summary + top trades + market breakdown +
+ * recent trades.
+ *
+ * Heavy because of the per-market recursive CTE in
+ * `getTraderTopTrades`. Used by AI chat tools (`getTraderProfile`,
+ * `compareTraders`) where the AI's own latency tolerance hides the
+ * cost. Search UI uses the lighter `getTraderSummary` instead.
+ *
+ * Cached separately from summary (5 min). Both caches share the
+ * resolved walletAddr as key.
+ */
+export async function getTraderProfile(input: string): Promise<TraderProfile | null> {
+  const summary = await getTraderSummary(input);
+  if (!summary) return null;
 
-  // 4. Recent trades (last 5)
-  const recentTrades = await getRecentTrades(walletAddr, 5);
+  // walletAddr is the canonical resolved address — use it for the
+  // heavy queries and as the profile cache key.
+  const walletAddr = summary.walletAddr;
 
-  return { ...entry, topTrades, marketBreakdown, recentTrades };
+  const cached = readCache(profileCache, walletAddr);
+  if (cached) return cached;
+
+  // Three heavy parts in parallel — getTraderTopTrades is itself
+  // parallel internally now. Total wall time = max of the three,
+  // not sum.
+  const [topTrades, marketBreakdown, recentTrades] = await Promise.all([
+    getTraderTopTrades(walletAddr, 10),
+    getTraderMarketBreakdown(walletAddr),
+    getRecentTrades(walletAddr, 5),
+  ]);
+
+  const profile: TraderProfile = { ...summary, topTrades, marketBreakdown, recentTrades };
+  writeCache(profileCache, walletAddr, profile);
+  return profile;
 }
 
 // ─── Top Trades by Closed PnL ───────────────────────────────────
@@ -332,54 +395,54 @@ async function getTraderTopTrades(walletAddr: string, limit: number): Promise<Tr
 
   if (marketRows.length === 0) return [];
 
-  // For each market, compute PnL via recursive CTE, collect all, sort by |pnl|
-  const allPnl: TraderTrade[] = [];
-
-  for (const { marketId } of marketRows) {
-    const rows = await query<{
-      tradeId: string; symbol: string; side: string; size: string;
-      price: string; closedPnl: string; time: Date;
-    }>(
-      `WITH RECURSIVE
-       numbered AS MATERIALIZED (
-         SELECT "tradeId", side, price::numeric AS price, size::numeric AS size,
-                symbol, "time",
-                (CASE WHEN side = 'Long' THEN size ELSE -size END)::numeric AS delta,
-                ROW_NUMBER() OVER (ORDER BY "time" ASC, CAST("tradeId" AS bigint) ASC) AS rn
-         FROM trade_history
-         WHERE "walletAddr" = $1 AND "marketId" = $2 AND size > 0 AND price > 0
-       ),
-       tracker AS (
-         SELECT n."tradeId", n.symbol, n.side, n.size::text AS size, n.price::text AS price,
-                n."time", n.delta AS pos_after, n.price AS avg_entry,
-                0::numeric AS closed_pnl, n.rn
-         FROM numbered n WHERE n.rn = 1
-         UNION ALL
-         SELECT n."tradeId", n.symbol, n.side, n.size::text, n.price::text, n."time",
-           CASE WHEN t.pos_after = 0 OR SIGN(n.delta) = SIGN(t.pos_after)
-                THEN t.pos_after + n.delta
-                WHEN ABS(n.delta) > ABS(t.pos_after) THEN n.delta + t.pos_after
-                ELSE t.pos_after + n.delta END,
-           CASE WHEN t.pos_after = 0 THEN n.price
-                WHEN SIGN(n.delta) = SIGN(t.pos_after)
-                THEN (t.avg_entry * t.pos_after + n.price * n.delta) / (t.pos_after + n.delta)
-                WHEN ABS(n.delta) > ABS(t.pos_after) THEN n.price
-                WHEN t.pos_after + n.delta = 0 THEN 0::numeric
-                ELSE t.avg_entry END,
-           CASE WHEN t.pos_after = 0 OR SIGN(n.delta) = SIGN(t.pos_after) THEN 0::numeric
-                ELSE (n.price - t.avg_entry) * LEAST(ABS(n.delta), ABS(t.pos_after)) * SIGN(t.pos_after) END,
-           n.rn
-         FROM numbered n JOIN tracker t ON n.rn = t.rn + 1
-       )
-       SELECT "tradeId", symbol, side, size, price,
-              closed_pnl::text AS "closedPnl", "time"
-       FROM tracker WHERE ABS(closed_pnl) > 0.0001
-       ORDER BY ABS(closed_pnl) DESC LIMIT $3`,
-      [walletAddr, marketId, limit],
-    );
-
-    for (const r of rows) {
-      allPnl.push({
+  // Run the per-market recursive CTE in parallel — each query is
+  // independent and pg pool size (max=10) handles concurrency
+  // gracefully (excess queries queue at the pool, still much faster
+  // than sequential). For a 10-market trader this drops 20s → ~2s.
+  const perMarket = await Promise.all(
+    marketRows.map(async ({ marketId }) => {
+      const rows = await query<{
+        tradeId: string; symbol: string; side: string; size: string;
+        price: string; closedPnl: string; time: Date;
+      }>(
+        `WITH RECURSIVE
+         numbered AS MATERIALIZED (
+           SELECT "tradeId", side, price::numeric AS price, size::numeric AS size,
+                  symbol, "time",
+                  (CASE WHEN side = 'Long' THEN size ELSE -size END)::numeric AS delta,
+                  ROW_NUMBER() OVER (ORDER BY "time" ASC, CAST("tradeId" AS bigint) ASC) AS rn
+           FROM trade_history
+           WHERE "walletAddr" = $1 AND "marketId" = $2 AND size > 0 AND price > 0
+         ),
+         tracker AS (
+           SELECT n."tradeId", n.symbol, n.side, n.size::text AS size, n.price::text AS price,
+                  n."time", n.delta AS pos_after, n.price AS avg_entry,
+                  0::numeric AS closed_pnl, n.rn
+           FROM numbered n WHERE n.rn = 1
+           UNION ALL
+           SELECT n."tradeId", n.symbol, n.side, n.size::text, n.price::text, n."time",
+             CASE WHEN t.pos_after = 0 OR SIGN(n.delta) = SIGN(t.pos_after)
+                  THEN t.pos_after + n.delta
+                  WHEN ABS(n.delta) > ABS(t.pos_after) THEN n.delta + t.pos_after
+                  ELSE t.pos_after + n.delta END,
+             CASE WHEN t.pos_after = 0 THEN n.price
+                  WHEN SIGN(n.delta) = SIGN(t.pos_after)
+                  THEN (t.avg_entry * t.pos_after + n.price * n.delta) / (t.pos_after + n.delta)
+                  WHEN ABS(n.delta) > ABS(t.pos_after) THEN n.price
+                  WHEN t.pos_after + n.delta = 0 THEN 0::numeric
+                  ELSE t.avg_entry END,
+             CASE WHEN t.pos_after = 0 OR SIGN(n.delta) = SIGN(t.pos_after) THEN 0::numeric
+                  ELSE (n.price - t.avg_entry) * LEAST(ABS(n.delta), ABS(t.pos_after)) * SIGN(t.pos_after) END,
+             n.rn
+           FROM numbered n JOIN tracker t ON n.rn = t.rn + 1
+         )
+         SELECT "tradeId", symbol, side, size, price,
+                closed_pnl::text AS "closedPnl", "time"
+         FROM tracker WHERE ABS(closed_pnl) > 0.0001
+         ORDER BY ABS(closed_pnl) DESC LIMIT $3`,
+        [walletAddr, marketId, limit],
+      );
+      return rows.map<TraderTrade>((r) => ({
         tradeId: r.tradeId,
         marketId,
         symbol: r.symbol,
@@ -388,12 +451,13 @@ async function getTraderTopTrades(walletAddr: string, limit: number): Promise<Tr
         price: r.price,
         closedPnl: r.closedPnl,
         time: new Date(r.time).toISOString(),
-      });
-    }
-  }
+      }));
+    }),
+  );
 
-  // Sort all trades across markets by |pnl| descending, take top N
-  return allPnl
+  // Flatten + sort all trades across markets by |pnl| descending, take top N
+  return perMarket
+    .flat()
     .sort((a, b) => Math.abs(parseFloat(b.closedPnl)) - Math.abs(parseFloat(a.closedPnl)))
     .slice(0, limit);
 }

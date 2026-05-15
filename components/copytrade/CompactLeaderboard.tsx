@@ -88,7 +88,11 @@ export function LeaderboardContent({ onCopyTrader }: { onCopyTrader?: (entry: Le
     setSearchError(null);
     setSearchResult(null);
     try {
-      const res = await fetch(`/api/traders/${encodeURIComponent(addr)}/profile`);
+      // Search card displays only headline stats — fetch the cheap
+      // summary endpoint, not the full profile (which runs an
+      // expensive per-market recursive PnL CTE that takes 20-30s for
+      // active traders, then we throw the result away here).
+      const res = await fetch(`/api/traders/${encodeURIComponent(addr)}/summary`);
       if (!res.ok) {
         setSearchError("Trader not found");
         return;
