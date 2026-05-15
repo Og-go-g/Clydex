@@ -205,9 +205,56 @@ export async function getLeaderboard(
 
 // ─── Trader Profile ─────────────────────────────────────────────
 
-export async function getTraderProfile(walletAddr: string): Promise<TraderProfile | null> {
-  // 1. Get leaderboard entry for this trader
-  const entries = await getLeaderboard("all", "pnl", 1);
+/**
+ * Resolve a user-supplied trader identifier to the canonical walletAddr
+ * used as the join key across all history tables (pnl_totals,
+ * trade_history, pnl_history, etc.).
+ *
+ * Two input forms supported:
+ *   - Base58 Solana pubkey → returned as-is (caller validates format
+ *     before calling this).
+ *   - `account:<N>` placeholder → resolved via:
+ *     1. pnl_totals.accountId (canonical: whatever walletAddr that table
+ *        uses, real or placeholder, ALL downstream tables also use it).
+ *     2. Fallback: account_pubkey (built by lib/history/wallet-resolver
+ *        cron, every 15 min), in case the account was just discovered
+ *        and pnl_totals hasn't been materialized yet. Profile will
+ *        render with empty stats but the wallet is at least known.
+ *   - Anything else → null (caller treats as not-found).
+ *
+ * Pre-2026-05-11: getTraderProfile queried `WHERE walletAddr = 'account:N'`
+ * directly. After wallet-resolver landed (2026-04-18) and replaced
+ * placeholder rows with real wallets, every search-by-ID returned 404.
+ * "Trader not found" for any account that the resolver had touched.
+ */
+async function resolveTraderAddress(input: string): Promise<string | null> {
+  if (!input.startsWith("account:")) {
+    return input;
+  }
+  const n = parseInt(input.slice(8), 10);
+  if (!Number.isFinite(n) || n < 0) return null;
+
+  const totalsRows = await query<{ walletAddr: string }>(
+    `SELECT "walletAddr" FROM pnl_totals WHERE "accountId" = $1 LIMIT 1`,
+    [n],
+  );
+  if (totalsRows.length > 0) return totalsRows[0].walletAddr;
+
+  const pkRows = await query<{ pubkey: string }>(
+    `SELECT pubkey FROM account_pubkey
+     WHERE "accountId" = $1 AND pubkey IS NOT NULL
+     LIMIT 1`,
+    [n],
+  );
+  if (pkRows.length > 0) return pkRows[0].pubkey;
+
+  return null;
+}
+
+export async function getTraderProfile(input: string): Promise<TraderProfile | null> {
+  const walletAddr = await resolveTraderAddress(input);
+  if (!walletAddr) return null;
+
   // Re-query specifically for this wallet
   const statsRows = await query<{
     total_pnl: string;
