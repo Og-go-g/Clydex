@@ -44,7 +44,42 @@ export interface MarketStat {
 }
 
 type SortField = "pnl" | "winrate" | "volume" | "trades";
-type Period = "7d" | "30d" | "all";
+
+/**
+ * Time window for any aggregation.
+ *   "all"  — no date filter (lifetime stats)
+ *   N      — last N days where N is a positive integer
+ *
+ * Replaces the old enum `"7d" | "30d" | "all"`. The AI can now pass
+ * arbitrary windows ("last 3 days" → 3, "за 10 дней" → 10) and the
+ * SQL builds the right INTERVAL inline. UI badges format the number
+ * directly (e.g. `3D`, `10D`, `30D`, `ALL-TIME`).
+ */
+export type Period = number | "all";
+
+/** Normalise: returns positive integer days, or null for "all". */
+export function periodDays(p: Period): number | null {
+  if (p === "all") return null;
+  const n = Math.floor(p);
+  if (!Number.isFinite(n) || n < 1) return null;
+  return n;
+}
+
+/** Parse a string from the wire (REST query param, AI tool input as
+ *  string) into a Period. Accepts integer strings, "Nd" form, "all"
+ *  (case-insensitive). Returns null on garbage so callers can choose
+ *  a default. */
+export function parsePeriod(raw: string | null | undefined): Period | null {
+  if (raw == null) return null;
+  const s = String(raw).trim().toLowerCase();
+  if (!s) return null;
+  if (s === "all") return "all";
+  const m = s.match(/^(\d+)d?$/);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  if (!Number.isFinite(n) || n < 1 || n > 365) return null;
+  return n;
+}
 
 // ─── In-memory caches (avoids heavy query on every request) ─────
 
@@ -83,11 +118,11 @@ const VALID_ALIASES = new Set([
 const VALID_COLS = new Set(["time"]);
 
 function periodClause(period: Period, alias: string, col: string): string {
-  if (period === "all") return "";
+  const days = periodDays(period);
+  if (days == null) return "";
   if (!VALID_ALIASES.has(alias) || !VALID_COLS.has(col)) {
     throw new Error("Invalid period clause parameters");
   }
-  const days = period === "7d" ? 7 : 30;
   return ` AND ${alias}."${col}" >= NOW() - INTERVAL '${days} days'`;
 }
 
@@ -161,17 +196,18 @@ export async function getLeaderboard(
     ),
     vol AS (
       -- volume_calendar.date is text 'YYYY-MM-DD' — cast for the period
-      -- comparison. Pre-2026-05-16 this CTE was unfiltered, so a "7d"
+      -- comparison. Pre-2026-05-16 this CTE was unfiltered, so a 7d
       -- leaderboard mixed 7d trade counts with all-time volume → users
       -- saw the leaderboard claim e.g. "32 trades, $138M volume" for a
       -- recent trader whose 7d volume was actually $138K.
       SELECT "walletAddr", COALESCE(SUM(volume), 0)::numeric AS total_volume
       FROM volume_calendar
-      WHERE 1=1 ${
-        period === "all"
+      WHERE 1=1 ${(() => {
+        const d = periodDays(period);
+        return d == null
           ? ""
-          : ` AND volume_calendar."date"::date >= (NOW() - INTERVAL '${period === "7d" ? 7 : 30} days')::date`
-      }
+          : ` AND volume_calendar."date"::date >= (NOW() - INTERVAL '${d} days')::date`;
+      })()}
       GROUP BY "walletAddr"
     )
     SELECT
@@ -358,7 +394,7 @@ export async function getTraderSummary(
   // Each query is per-table independent (no JOINs across tables, no
   // multiplicative inflation). volume_calendar.date is text 'YYYY-MM-DD'
   // so we cast `::date` for the period comparison.
-  const days = period === "7d" ? 7 : 30;
+  const days = periodDays(period)!;
   const [pnlRows, tradeCountRows, winLossRows, liqRows, volRows] = await Promise.all([
     query<{ total_pnl: string; trading_pnl: string; funding_pnl: string }>(
       `SELECT
@@ -523,7 +559,7 @@ async function getTraderTopTrades(
   // below picks only trades inside the window, but we narrow the market
   // list here too so we don't run a recursive CTE on a market the user
   // hasn't touched in months.
-  const days = period === "all" ? null : period === "7d" ? 7 : 30;
+  const days = periodDays(period);
   const marketRows = days == null
     ? await query<{ marketId: number }>(
         `SELECT DISTINCT "marketId" FROM trade_history WHERE "walletAddr" = $1`,
@@ -637,7 +673,7 @@ async function getTraderMarketBreakdown(
   // Fix: aggregate trades and pnl independently, then join the
   // aggregates 1-to-1 on marketId. This gives the correct numbers and
   // is actually faster — Postgres only walks each table once.
-  const days = period === "all" ? null : period === "7d" ? 7 : 30;
+  const days = periodDays(period);
   const timeFilter = days == null ? "" : ` AND "time" >= NOW() - INTERVAL '${days} days'`;
   const rows = await query<{
     market_id: number; symbol: string; trades: number; pnl: string;
@@ -699,8 +735,10 @@ export async function getTopTradersByMarket(
     ? symbol.toUpperCase()
     : symbol.toUpperCase() + "USD";
 
-  const periodFilter = period === "all" ? ""
-    : ` AND t."time" >= NOW() - INTERVAL '${period === "7d" ? 7 : 30} days'`;
+  const days = periodDays(period);
+  const periodFilter = days == null
+    ? ""
+    : ` AND t."time" >= NOW() - INTERVAL '${days} days'`;
 
   const sql = `
     WITH market_traders AS (
@@ -762,7 +800,7 @@ async function getRecentTrades(
   period: Period,
   limit: number,
 ): Promise<TraderTrade[]> {
-  const days = period === "all" ? null : period === "7d" ? 7 : 30;
+  const days = periodDays(period);
   const timeFilter = days == null ? "" : ` AND "time" >= NOW() - INTERVAL '${days} days'`;
   const rows = await query<{
     tradeId: string; marketId: number; symbol: string; side: string;

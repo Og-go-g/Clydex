@@ -19,7 +19,17 @@ export interface LeaderboardEntry {
   totalVolume: number;
 }
 
-type Period = "7d" | "30d" | "all";
+type Period = number | "all";
+
+const PERIOD_PRESETS = [
+  { value: 7 as Period, label: "7D" },
+  { value: 30 as Period, label: "30D" },
+  { value: "all" as Period, label: "All" },
+];
+
+function periodToQuery(p: Period): string {
+  return p === "all" ? "all" : String(p);
+}
 
 // ─── Formatters ─────────────────────────────────────────────────
 
@@ -50,7 +60,7 @@ function fmtAddr(addr: string): string {
 
 /** Leaderboard content without wrapper — used inside CopyTradeSection tabs */
 export function LeaderboardContent({ onCopyTrader }: { onCopyTrader?: (entry: LeaderboardEntry) => void }) {
-  const [period, setPeriod] = useState<Period>("7d");
+  const [period, setPeriod] = useState<Period>(7);
   const [data, setData] = useState<LeaderboardEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
@@ -61,7 +71,7 @@ export function LeaderboardContent({ onCopyTrader }: { onCopyTrader?: (entry: Le
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/leaderboard?period=${period}&sort=pnl&limit=10`);
+      const res = await fetch(`/api/leaderboard?period=${periodToQuery(period)}&sort=pnl&limit=10`);
       if (res.ok) {
         const body = await res.json();
         setData(body.data ?? []);
@@ -196,17 +206,17 @@ export function LeaderboardContent({ onCopyTrader }: { onCopyTrader?: (entry: Le
           {data.length > 0 ? `${data.length} traders` : ""}
         </span>
         <div className="flex items-center gap-0.5">
-          {(["7d", "30d", "all"] as const).map((p) => (
+          {PERIOD_PRESETS.map((preset) => (
             <button
-              key={p}
-              onClick={() => setPeriod(p)}
+              key={preset.label}
+              onClick={() => setPeriod(preset.value)}
               className={`px-1.5 py-0.5 text-[10px] font-medium rounded transition-colors ${
-                period === p
+                period === preset.value
                   ? "text-emerald-400 bg-emerald-400/10"
                   : "text-muted hover:text-foreground"
               }`}
             >
-              {p === "all" ? "All" : p.toUpperCase()}
+              {preset.label}
             </button>
           ))}
         </div>

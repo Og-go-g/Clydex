@@ -196,7 +196,13 @@ interface LeaderRow {
 
 export function LeaderboardCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
   const traders = (data.traders as LeaderRow[] | undefined) ?? [];
-  const period = String(data.period ?? "all");
+  const periodRaw = data.period;
+  const period: number | "all" =
+    typeof periodRaw === "number" && periodRaw > 0
+      ? periodRaw
+      : periodRaw === "all"
+        ? "all"
+        : "all";
   const sort = String(data.sort ?? "pnl");
   if (traders.length === 0) {
     return (
@@ -211,7 +217,7 @@ export function LeaderboardCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
       badge={{ count: traders.length }}
       rightHeader={
         <span>
-          {period.toUpperCase()} · sort: {sort}
+          {periodLabel(period)} · sort: {sort}
         </span>
       }
     >
@@ -273,8 +279,9 @@ export function LeaderboardCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
 interface TraderProfileData {
   wallet: string;
   fullAddress: string;
-  /** Window the numbers cover. Mirrored from the AI tool input. */
-  period?: "7d" | "30d" | "all";
+  /** Window the numbers cover. `number` = days, `"all"` = lifetime.
+   * Mirrored from the AI tool input → forwarded by the route. */
+  period?: number | "all";
   totalPnl: number;
   tradingPnl: number;
   fundingPnl: number;
@@ -289,10 +296,14 @@ interface TraderProfileData {
   marketBreakdown: Array<{ symbol: string; pnl: number; trades: number }>;
 }
 
-function periodLabel(p: "7d" | "30d" | "all" | undefined): string {
-  if (p === "7d") return "7D";
-  if (p === "30d") return "30D";
+function periodLabel(p: number | "all" | undefined): string {
+  if (p === "all" || p == null) return "ALL-TIME";
+  if (typeof p === "number" && Number.isFinite(p) && p > 0) return `${p}D`;
   return "ALL-TIME";
+}
+
+function isScopedPeriod(p: number | "all" | undefined): boolean {
+  return typeof p === "number" && p > 0;
 }
 
 function MetricCell({ label, value, tone }: { label: string; value: string; tone?: string }) {
@@ -318,7 +329,7 @@ export function TraderProfileCard({ data, ctx }: { data: Json; ctx?: CardCtx }) 
               numbers always match what the profile card shows. */}
           <span
             className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${
-              d.period === "7d" || d.period === "30d"
+              isScopedPeriod(d.period)
                 ? "bg-emerald-500/15 text-emerald-400"
                 : "bg-white/5 text-[#888]"
             }`}
@@ -797,7 +808,7 @@ export function SuggestTradersCard({ data, ctx }: { data: Json; ctx?: CardCtx })
 
 interface MarketTopData {
   market: string;
-  period: string;
+  period: number | "all";
   traders: Array<{
     rank: number;
     wallet: string;
@@ -815,7 +826,7 @@ export function MarketTopTradersCard({ data, ctx }: { data: Json; ctx?: CardCtx 
     <CardShell
       title={`Top on ${d.market}`}
       badge={{ count: d.traders.length }}
-      rightHeader={<span>{d.period.toUpperCase()}</span>}
+      rightHeader={<span>{periodLabel(d.period)}</span>}
     >
       <div className="overflow-x-auto">
         <table className="w-full text-xs">

@@ -4,7 +4,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { z } from "zod";
 import { getAuthAddress } from "@/lib/auth/session";
 import { RATE_LIMITS, safeRateLimit } from "@/lib/ratelimit";
-import { getLeaderboard, getTraderProfile, getTopTradersByMarket } from "@/lib/copytrade/leaderboard";
+import { getLeaderboard, getTraderProfile, getTopTradersByMarket, type Period } from "@/lib/copytrade/leaderboard";
 import { isSessionActive } from "@/lib/copy/session-activator";
 import {
   getSubscriptions,
@@ -168,11 +168,15 @@ Markets (always normalize):
 - SOL, sol, сол → "SOLUSD"
 - Any other → uppercase + "USD" suffix if missing.
 
-Period:
-- "this week" / "за неделю" → "7d"
-- "this month" / "за месяц" → "30d"
-- "all time" / "за всё время" / no period mentioned → "all"
-- For leaderboard requests with no period, prefer "7d" — fresher data is more relevant.
+Period (pass as \`periodDays\` integer, or omit for all-time):
+- Explicit days: "last 3 days" / "за 3 дня" / "3-day" → periodDays=3
+- "last 10 days" / "за 10 дней" → periodDays=10
+- "this week" / "за неделю" / "7-day" → periodDays=7
+- "two weeks" / "две недели" → periodDays=14
+- "this month" / "за месяц" / "30-day" → periodDays=30
+- "all time" / "за всё время" / "lifetime" / no period mentioned → omit periodDays (= all-time)
+- Default for leaderboard with no period mentioned → periodDays=7 (fresh data)
+- Clamp range: 1-365 days. If user asks for >365, use 365 and mention it.
 
 Allocation / leverage:
 - "$200" / "200 долларов" → allocationUsdc: 200
@@ -184,13 +188,16 @@ Allocation / leverage:
 ═══════════════════════════════════════════════════════
 
 "analyze best BTC trader":
-  findTopTraderByMarket(BTCUSD, 7d) → take rank 1 → getTraderProfile(addr, period=7d) → one-sentence summary
+  findTopTraderByMarket(BTCUSD, periodDays=7) → take rank 1 → getTraderProfile(addr, periodDays=7) → one-sentence summary
+
+"top traders last 3 days":
+  getLeaderboard(periodDays=3) → 3d leaderboard. Subsequent analyze chains pass periodDays=3.
 
 "copy top trader on BTC":
   findTopTraderByMarket(BTCUSD) → call followTrader(rank1, $100, 1x) directly (engine refuses if session is off — surface that error verbatim)
 
 "compare top 3 ETH traders":
-  findTopTraderByMarket(ETHUSD, limit=3) → compareTraders(addrs, period=7d)
+  findTopTraderByMarket(ETHUSD, limit=3) → compareTraders(addrs, periodDays=7)
 
 "how am I doing?":
   getCopyStatus → if session inactive say so; if subscriptions exist, summarize stats from card
@@ -204,26 +211,33 @@ You have up to 5 tool calls per turn. Chain freely.
  PERIOD CHAINING (critical for consistent numbers)
 ═══════════════════════════════════════════════════════
 
-getTraderProfile and compareTraders accept a \`period\` argument that
-MUST match the period the user just asked the leaderboard / market-top
-for. Otherwise the row they clicked shows "+\$5K, 32 trades" and the
-profile pops up with "+\$1.89K, 107 trades" — same wallet, different
-windows, total confusion.
+getTraderProfile, compareTraders, getLeaderboard, findTopTraderByMarket
+all accept a \`periodDays\` integer (1-365). MUST match what the
+user just asked the leaderboard / market-top for. Otherwise the row
+they clicked shows "+\$5K, 32 trades" and the profile pops up with
+"+\$1.89K, 107 trades" — same wallet, different windows, total
+confusion.
 
 Rules:
-- Track the LAST period the user asked for. The phrasings:
-    "this week" / "за неделю" / no period mentioned ⇒ 7d
-    "this month" / "за месяц" ⇒ 30d
-    "all time" / "за всё время" / "lifetime" ⇒ all
+- Track the LAST periodDays the user asked for. Phrasings:
+    "last 3 days" / "за 3 дня" ⇒ periodDays=3
+    "last 10 days" / "за 10 дней" ⇒ periodDays=10
+    "this week" / "за неделю" / "7-day" ⇒ periodDays=7
+    "two weeks" / "за 2 недели" ⇒ periodDays=14
+    "this month" / "за месяц" / "30-day" ⇒ periodDays=30
+    "all time" / "за всё время" / "lifetime" ⇒ omit periodDays
+    no period mentioned ⇒ default 7 for leaderboards, all for
+    explicit profile lookups by trader id
 - When the user analyzes / compares a trader after a leaderboard /
-  market-top query, pass the SAME period to getTraderProfile /
+  market-top query, pass the SAME periodDays to getTraderProfile /
   compareTraders.
 - If the user explicitly says "show me LIFETIME stats" / "all-time"
-  / "за всё время" while looking at a 7d row, switch to period=all
-  and call out the change in your one-sentence framing.
-- If getTraderProfile returns "no activity in the last 7d" error,
-  fall back to period=30d, then period=all, and tell the user that
-  the trader's recent window is empty.
+  / "за всё время" while looking at a window-scoped row, omit
+  periodDays (= all-time) and call out the change in your
+  one-sentence framing.
+- If getTraderProfile returns "no activity in the last N days",
+  retry with a 2-3× wider window or omit periodDays (= all-time),
+  and tell the user that the trader's recent window is empty.
 
 ═══════════════════════════════════════════════════════
  ANALYSIS GUIDELINES
@@ -365,17 +379,17 @@ export async function POST(req: Request) {
       // ─── Leaderboard ─────────────────────────────────
       getLeaderboard: tool({
         description:
-          "Get the leaderboard of top traders on 01 Exchange. Renders as a leaderboard card with rank/PnL/winrate/volume and a [Copy] button per row. Use for: 'top traders', 'leaderboard', 'best performers', 'rankings'.",
+          "Get the leaderboard of top traders on 01 Exchange. Renders as a leaderboard card with rank/PnL/winrate/volume and a [Copy] button per row. Use for: 'top traders', 'leaderboard', 'best performers', 'rankings'. **Pass `periodDays` as the exact number of days the user asked for** (e.g. 'last 3 days' → 3, 'last 10 days' → 10, 'this week' → 7, 'this month' → 30). Omit it for all-time.",
         inputSchema: zodSchema(
           z.object({
-            period: z.enum(["7d", "30d", "all"]).optional().describe("Time period (default: 7d for fresh data)"),
+            periodDays: z.number().int().min(1).max(365).optional().describe("Exact day window. Omit for all-time."),
             sort: z.enum(["pnl", "winrate", "volume", "trades"]).optional().describe("Sort key (default: pnl)"),
             limit: z.number().min(1).max(50).optional().describe("Number of rows (default: 10)"),
           }),
         ),
-        execute: async ({ period, sort, limit }) => {
+        execute: async ({ periodDays: pd, sort, limit }) => {
           try {
-            const p = period ?? "7d";
+            const p: Period = typeof pd === "number" ? pd : 7; // default 7d if not specified — "fresh data" preference
             const s = sort ?? "pnl";
             const data = await getLeaderboard(p, s, limit ?? 10);
             return sanitize({
@@ -409,26 +423,29 @@ export async function POST(req: Request) {
       // ─── Trader Profile ──────────────────────────────
       getTraderProfile: tool({
         description:
-          "Get a detailed profile of one trader: full PnL/winrate/trades, per-market breakdown, top 5 trades, liquidations. **CHAIN PERIOD** from whatever leaderboard/market-top query preceded this — if the user asked 'top traders this week', pass period='7d' here so the profile numbers match the row they clicked. Default 'all' is for explicit lifetime requests like 'analyze the lifetime stats of #XXXX'. If the period returns no activity for that wallet, the tool replies with an empty-window error message — you should suggest a wider period.",
+          "Get a detailed profile of one trader: full PnL/winrate/trades, per-market breakdown, top 5 trades, liquidations. **CHAIN PERIOD** from whatever leaderboard/market-top query preceded this — if the user asked 'top traders this week' (7d), pass periodDays=7 here so the profile numbers match the row they clicked. Omit `periodDays` for lifetime / all-time. If the period returns no activity for that wallet, the tool replies with an empty-window error — you should suggest a wider window.",
         inputSchema: zodSchema(
           z.object({
             address: z.string().describe("Trader address (wallet or account:ID)"),
-            period: z
-              .enum(["7d", "30d", "all"])
+            periodDays: z
+              .number()
+              .int()
+              .min(1)
+              .max(365)
               .optional()
-              .describe("Time window — match the leaderboard's period (default: all)"),
+              .describe("Exact day window matching the preceding leaderboard query. Omit for all-time."),
           }),
         ),
-        execute: async ({ address, period }) => {
+        execute: async ({ address, periodDays: pd }) => {
           try {
-            const p = period ?? "all";
+            const p: Period = typeof pd === "number" ? pd : "all";
             const profile = await getTraderProfile(address, p);
             if (!profile) {
               return {
                 error:
                   p === "all"
                     ? `Trader ${fmtAddr(address)} not found.`
-                    : `${fmtAddr(address)} has no activity in the last ${p}. Try period="all" or a longer window.`,
+                    : `${fmtAddr(address)} has no activity in the last ${p} day(s). Try a longer window or omit periodDays for all-time.`,
               };
             }
             return sanitize({
@@ -738,21 +755,22 @@ export async function POST(req: Request) {
       // ─── Find Top Trader by Market ────────────────────
       findTopTraderByMarket: tool({
         description:
-          "Find the best traders for ONE symbol (BTC, ETH, SOL, etc). Symbol auto-normalises to e.g. 'BTCUSD'. Use for 'top BTC trader', 'best on ETH'.",
+          "Find the best traders for ONE symbol (BTC, ETH, SOL, etc). Symbol auto-normalises to e.g. 'BTCUSD'. Use for 'top BTC trader', 'best on ETH'. **Pass `periodDays` as the user's exact window** (3 → last 3 days, 10 → last 10 days). Omit for all-time. Default 7 if not specified.",
         inputSchema: zodSchema(
           z.object({
             symbol: z.string().describe("Symbol or base asset (BTC, ETH, SOL, ...)"),
-            period: z.enum(["7d", "30d", "all"]).optional().describe("Time period (default: 7d)"),
+            periodDays: z.number().int().min(1).max(365).optional().describe("Exact day window. Omit for all-time."),
             limit: z.number().min(1).max(20).optional().describe("Result count (default: 5)"),
           }),
         ),
-        execute: async ({ symbol, period, limit }) => {
+        execute: async ({ symbol, periodDays: pd, limit }) => {
           try {
-            const p = period ?? "7d";
+            // Default 7 if not specified — fresh-data preference for market top.
+            const p: Period = typeof pd === "number" ? pd : 7;
             const data = await getTopTradersByMarket(symbol, p, limit ?? 5);
             if (data.length === 0) {
               return {
-                error: `No traders found for ${symbol.toUpperCase()} over ${p}. Market may have low activity.`,
+                error: `No traders found for ${symbol.toUpperCase()} over ${p} day(s). Market may have low activity.`,
               };
             }
             const market = symbol.toUpperCase().endsWith("USD")
@@ -786,19 +804,22 @@ export async function POST(req: Request) {
       // ─── Compare Traders ──────────────────────────────
       compareTraders: tool({
         description:
-          "Compare 2 or 3 traders side-by-side: PnL, winrate, trades, liquidations, volume, risk score, top markets. CHAIN PERIOD from the preceding leaderboard/market-top query (same rule as getTraderProfile).",
+          "Compare 2 or 3 traders side-by-side: PnL, winrate, trades, liquidations, volume, risk score, top markets. CHAIN PERIOD from the preceding leaderboard/market-top query (pass `periodDays` matching what they just queried). Omit `periodDays` for all-time.",
         inputSchema: zodSchema(
           z.object({
             addresses: z.array(z.string()).min(2).max(3).describe("2-3 trader addresses"),
-            period: z
-              .enum(["7d", "30d", "all"])
+            periodDays: z
+              .number()
+              .int()
+              .min(1)
+              .max(365)
               .optional()
-              .describe("Time window — match the leaderboard's period (default: all)"),
+              .describe("Exact day window. Omit for all-time."),
           }),
         ),
-        execute: async ({ addresses, period }) => {
+        execute: async ({ addresses, periodDays: pd }) => {
           try {
-            const p = period ?? "all";
+            const p: Period = typeof pd === "number" ? pd : "all";
             const profiles = await Promise.all(addresses.map((a) => getTraderProfile(a, p)));
             const out = profiles.map((pr, i) => {
               if (!pr) return { address: fmtAddr(addresses[i]), fullAddress: addresses[i], error: "Not found" };

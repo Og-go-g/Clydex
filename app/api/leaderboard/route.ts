@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getLeaderboard } from "@/lib/copytrade/leaderboard";
+import { getLeaderboard, parsePeriod } from "@/lib/copytrade/leaderboard";
 import { safeInt } from "@/lib/history/validate";
 
 /**
  * GET /api/leaderboard — public endpoint, no auth required.
  *
  * Query params:
- *   period: "7d" | "30d" | "all" (default: "all")
+ *   period: integer day count (1-365), `7d` / `30d` shorthand, or
+ *           `all` (default: `all`). Garbage falls back to `all`.
  *   sort:   "pnl" | "winrate" | "volume" | "trades" (default: "pnl")
  *   limit:  1-100 (default: 50)
  *
@@ -15,10 +16,7 @@ import { safeInt } from "@/lib/history/validate";
 export async function GET(req: NextRequest) {
   const params = req.nextUrl.searchParams;
 
-  const periodRaw = params.get("period") ?? "all";
-  const period = (["7d", "30d", "all"] as const).includes(periodRaw as "7d" | "30d" | "all")
-    ? (periodRaw as "7d" | "30d" | "all")
-    : "all";
+  const period = parsePeriod(params.get("period")) ?? "all";
 
   const sortRaw = params.get("sort") ?? "pnl";
   const sort = (["pnl", "winrate", "volume", "trades"] as const).includes(sortRaw as "pnl")
