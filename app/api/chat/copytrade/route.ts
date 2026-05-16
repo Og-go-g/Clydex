@@ -78,7 +78,7 @@ You speak English and Russian. ALWAYS reply in the same language the user wrote 
 DISCOVERY
 - getLeaderboard — top traders by PnL / winrate / volume, period 7d/30d/all.
 - findTopTraderByMarket — best traders on one symbol (BTC, ETH, SOL, ...).
-- suggestTrader — filtered recommendations by risk level.
+- suggestTrader — curated recommendations: pulls top 50 for the window, drops market-makers / bots / low-sample candidates, ranks survivors, returns top 3 with per-candidate flags and a "why" summary line. Use for "who should I copy / кого скопировать / recommend me a trader".
 
 ANALYSIS
 - getTraderProfile — full profile, market breakdown, top trades, liquidations.
@@ -194,6 +194,9 @@ Allocation / leverage:
 
 "copy top trader on BTC":
   findTopTraderByMarket(BTCUSD) → take rank 1 → followTrader(rank1) — returns a PREVIEW card with the trader's stats and an "Open Copy Dialog" button. Your prose: "Top BTC trader is #X. Open the dialog on the right to set allocation and start copying." NEVER claim you subscribed — the subscription only happens after the user confirms in the dialog.
+
+"who should I copy" / "кого скопировать" / "recommend a trader":
+  suggestTrader(periodDays=7, riskLevel=balanced) — returns 3 curated picks already filtered for market-makers / bots / low-sample. Your prose: in ONE sentence, name the top pick and the standout reason from its \`summary\` field. Example: "Pick #X looks strongest — clean record, 100% winrate over 32 trades, no liquidations." If the user mentioned a different risk profile ("safe / conservative / aggressive / wild"), map it accordingly. If user mentioned a different window ("over the last month / за месяц"), pass periodDays.
 
 "compare top 3 ETH traders":
   findTopTraderByMarket(ETHUSD, limit=3) → compareTraders(addrs, periodDays=7)
@@ -705,57 +708,190 @@ export async function POST(req: Request) {
         },
       }),
 
-      // ─── Suggest Trader ───────────────────────────────
+      // ─── Suggest Trader (curated recommendation) ──────
       suggestTrader: tool({
         description:
-          "Recommend up to 5 traders to copy based on risk preference. Use for 'who should I copy', 'suggest a trader', 'best trader for me'.",
+          "AI-curated recommendation of which traders to copy. Fetches the top 50 from the leaderboard for the chosen window, applies market-maker / bot / low-sample filters, ranks the survivors, and returns the top 3 with a `flags` array and a one-line `summary` per candidate explaining WHY they made the cut. Use for: 'who should I copy', 'recommend a trader', 'кого скопировать'. Default window is the last 7 days — pass periodDays to override.",
         inputSchema: zodSchema(
           z.object({
-            riskLevel: z.enum(["low", "medium", "high"]).optional().describe("Risk preference (default: medium)"),
-            minTrades: z.number().optional().describe("Minimum trades filter (default: 20)"),
+            riskLevel: z
+              .enum(["conservative", "balanced", "aggressive"])
+              .optional()
+              .describe("Risk profile (default: balanced)"),
+            periodDays: z
+              .number()
+              .int()
+              .min(1)
+              .max(365)
+              .optional()
+              .describe("Day window over which to score traders. Default 7. Omit to use all-time."),
           }),
         ),
-        execute: async ({ riskLevel, minTrades }) => {
+        execute: async ({ riskLevel, periodDays: pd }) => {
           try {
-            const all = await getLeaderboard("all", "pnl", 50);
-            const minT = minTrades ?? 20;
-            let filtered = all.filter((t) => t.totalTrades >= minT && t.totalPnl > 0);
-            if (riskLevel === "low") {
-              filtered = filtered.filter((t) => t.winRate >= 55 && t.liquidations === 0);
-            } else if (riskLevel === "medium" || !riskLevel) {
-              filtered = filtered.filter((t) => t.winRate >= 45 && t.liquidations <= 2);
-            }
-            const top = filtered.slice(0, 5).map((t, i) => {
+            const p: Period = typeof pd === "number" ? pd : 7;
+            const profile = riskLevel ?? "balanced";
+
+            // Pull a wide candidate set (top 50 by PnL in the window).
+            // We over-fetch on purpose because the screening drops a
+            // big chunk (market-makers, sub-sample, etc.) — without
+            // the buffer we'd run out of candidates after filtering.
+            const candidates = await getLeaderboard(p, "pnl", 50);
+            const rawCount = candidates.length;
+
+            // ── Screening pass ────────────────────────────
+            //
+            // Each survivor carries a `flags` array describing what
+            // we know about them. The AI uses those flags + the
+            // computed `summary` to write its prose recommendation.
+            //
+            // Market-maker / bot heuristics (no perfect signal, but
+            // these cut most of the obvious operators):
+            //   - volume/|pnl| ratio > 50 000 → tiny edge per dollar
+            //     turned, classic MM profile.
+            //   - totalTrades > 5 000 in the window → bot frequency.
+            //   - winRate > 95% with > 500 trades → unrealistic
+            //     human winrate, usually an MM scalper.
+            // Low-sample noise:
+            //   - totalTrades < (riskLevel === "conservative" ? 30 : 10)
+            //   - |totalPnl| < $50 → not enough signal.
+            type Survivor = {
+              wallet: string;
+              fullAddress: string;
+              totalPnl: number;
+              winRate: number;
+              totalTrades: number;
+              liquidations: number;
+              totalVolume: number;
+              avgPnlPerTrade: number;
+              tradingPnl: number;
+              fundingPnl: number;
+              riskScore: number;
+              consistencyScore: number;
+              flags: string[];
+              summary: string;
+            };
+
+            const minTrades = profile === "conservative" ? 30 : profile === "aggressive" ? 8 : 15;
+            const minPnl = 50;
+            const survivors: Survivor[] = [];
+            let rejectedMM = 0;
+            let rejectedSample = 0;
+            let rejectedRisk = 0;
+
+            for (const c of candidates) {
+              // Only profitable traders qualify — the user wants to
+              // COPY them, not learn from losers.
+              if (c.totalPnl <= minPnl) { rejectedSample++; continue; }
+              if (c.totalTrades < minTrades) { rejectedSample++; continue; }
+
+              const volPnlRatio = c.totalVolume > 0 ? c.totalVolume / Math.abs(c.totalPnl || 1) : 0;
+              const isMMLike =
+                volPnlRatio > 50_000 ||
+                c.totalTrades > 5_000 ||
+                (c.winRate > 95 && c.totalTrades > 500);
+              if (isMMLike) { rejectedMM++; continue; }
+
+              // Risk-profile screen.
+              if (profile === "conservative") {
+                if (c.liquidations !== 0) { rejectedRisk++; continue; }
+                if (c.winRate < 55) { rejectedRisk++; continue; }
+              } else if (profile === "balanced") {
+                if (c.liquidations > 2) { rejectedRisk++; continue; }
+                if (c.winRate < 45) { rejectedRisk++; continue; }
+              } else {
+                // aggressive: liqs OK, winrate floor low — wild trades welcome
+                if (c.winRate < 30) { rejectedRisk++; continue; }
+              }
+
+              // Numeric scores.
               const riskScore = Math.min(
                 10,
-                Math.max(1, Math.round(10 - t.winRate / 10 - (t.liquidations === 0 ? 2 : 0) + t.liquidations * 2)),
+                Math.max(
+                  1,
+                  Math.round(10 - c.winRate / 10 - (c.liquidations === 0 ? 2 : 0) + c.liquidations * 2),
+                ),
               );
-              return {
-                rank: i + 1,
-                wallet: fmtAddr(t.walletAddr),
-                fullAddress: t.walletAddr,
-                totalPnl: t.totalPnl,
-                winRate: t.winRate,
-                totalTrades: t.totalTrades,
-                liquidations: t.liquidations,
+              // Consistency proxy: |pnl| / sqrt(trades). Higher = more
+              // dollars earned per square root of attempts → less
+              // luck-driven. Capped at 100 for display.
+              const consistencyScore = Math.min(
+                100,
+                Math.round(Math.abs(c.totalPnl) / Math.max(1, Math.sqrt(c.totalTrades))),
+              );
+
+              // Human-readable flags + summary line.
+              const flags: string[] = [];
+              if (c.liquidations === 0) flags.push("No liquidations");
+              if (c.winRate >= 60) flags.push(`${c.winRate.toFixed(0)}% winrate`);
+              if (c.totalTrades >= 100) flags.push("Large sample");
+              if (c.totalTrades < 30) flags.push("Small sample — early signal");
+              if (consistencyScore >= 50) flags.push("Consistent edge");
+              if (c.totalVolume >= 1_000_000) flags.push("High volume");
+              if (c.liquidations > 0) flags.push(`${c.liquidations} liquidation${c.liquidations > 1 ? "s" : ""}`);
+
+              // One-line "why" the AI can quote or paraphrase.
+              const summary =
+                c.liquidations === 0 && c.winRate >= 60
+                  ? `+$${(c.totalPnl / 1000).toFixed(1)}K with a ${c.winRate.toFixed(0)}% winrate over ${c.totalTrades} trades and zero blowups.`
+                  : c.winRate >= 50
+                    ? `+$${(c.totalPnl / 1000).toFixed(1)}K profit on ${c.totalTrades} trades, ${c.winRate.toFixed(0)}% winrate.`
+                    : `+$${(c.totalPnl / 1000).toFixed(1)}K profit driven by ${c.totalTrades} trades — ${c.winRate.toFixed(0)}% winrate (big-wins style).`;
+
+              survivors.push({
+                wallet: fmtAddr(c.walletAddr),
+                fullAddress: c.walletAddr,
+                totalPnl: c.totalPnl,
+                winRate: c.winRate,
+                totalTrades: c.totalTrades,
+                liquidations: c.liquidations,
+                totalVolume: c.totalVolume,
+                avgPnlPerTrade: c.avgPnlPerTrade,
+                tradingPnl: c.tradingPnl,
+                fundingPnl: c.fundingPnl,
                 riskScore,
-                suggestedAllocation: riskScore <= 3 ? "$200-500" : riskScore <= 6 ? "$50-200" : "$10-50",
-              };
+                consistencyScore,
+                flags,
+                summary,
+              });
+            }
+
+            // Rank survivors. Conservative cares most about
+            // consistency + 0-liqs; aggressive wants pure PnL.
+            survivors.sort((a, b) => {
+              if (profile === "conservative") {
+                if (a.liquidations !== b.liquidations) return a.liquidations - b.liquidations;
+                if (b.consistencyScore !== a.consistencyScore) return b.consistencyScore - a.consistencyScore;
+                return b.totalPnl - a.totalPnl;
+              }
+              if (profile === "aggressive") return b.totalPnl - a.totalPnl;
+              // balanced — weighted blend
+              const aScore = a.totalPnl * 0.5 + a.consistencyScore * 100 + (a.liquidations === 0 ? 500 : 0);
+              const bScore = b.totalPnl * 0.5 + b.consistencyScore * 100 + (b.liquidations === 0 ? 500 : 0);
+              return bScore - aScore;
             });
+
+            const top = survivors.slice(0, 3).map((s, i) => ({ rank: i + 1, ...s }));
+
             return sanitize({
-              criteria: { riskLevel: riskLevel ?? "medium", minTrades: minT },
-              matchCount: filtered.length,
+              period: p,
+              riskProfile: profile,
+              screened: rawCount,
+              survived: survivors.length,
+              rejectedMM,
+              rejectedSample,
+              rejectedRisk,
               suggestions: top,
               nextSteps: top.length > 0
                 ? [
-                    "Analyze the top suggestion",
-                    "Copy the top suggestion with $100",
-                    "Compare the top 3 suggestions",
+                    "Analyze the top recommendation",
+                    "Copy the top recommendation",
+                    "Compare the top 3 recommendations",
                   ]
                 : [
                     "Show the full leaderboard",
-                    "Show top traders this week",
                     "Try a different risk level",
+                    "Try a longer window",
                   ],
             });
           } catch (err) {

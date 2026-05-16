@@ -863,11 +863,16 @@ export function TraderPositionsCard({ data, ctx }: { data: Json; ctx?: CardCtx }
   );
 }
 
-// ─── 7. SuggestTradersCard ──────────────────────────────────────
+// ─── 7. SuggestTradersCard (AI-curated recommendation) ──────────
 
 interface SuggestData {
-  criteria: { riskLevel: string; minTrades: number };
-  matchCount: number;
+  period: number | "all";
+  riskProfile: "conservative" | "balanced" | "aggressive";
+  screened: number;
+  survived: number;
+  rejectedMM: number;
+  rejectedSample: number;
+  rejectedRisk: number;
   suggestions: Array<{
     rank: number;
     wallet: string;
@@ -876,44 +881,63 @@ interface SuggestData {
     winRate: number;
     totalTrades: number;
     liquidations: number;
+    totalVolume: number;
+    avgPnlPerTrade: number;
+    tradingPnl: number;
+    fundingPnl: number;
     riskScore: number;
-    suggestedAllocation: string;
+    consistencyScore: number;
+    flags: string[];
+    summary: string;
   }>;
 }
 
 export function SuggestTradersCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
   const d = data as unknown as SuggestData;
-  if (d.suggestions.length === 0) {
+  if (!d.suggestions || d.suggestions.length === 0) {
     return (
-      <CardShell title="Suggested Traders">
-        <EmptyHint msg="No matches for the chosen risk profile. Try widening the criteria." />
+      <CardShell title="Recommended Traders">
+        <EmptyHint
+          msg={`No survivors after screening ${d.screened ?? 0} candidates. Try a different risk profile or window.`}
+        />
       </CardShell>
     );
   }
+  // Screening summary — surfaces the curating work the tool did.
+  const screened = d.screened ?? 0;
+  const rejected = (d.rejectedMM ?? 0) + (d.rejectedSample ?? 0) + (d.rejectedRisk ?? 0);
   return (
     <CardShell
-      title="Suggested Traders"
+      title="Recommended Traders"
       badge={{ count: d.suggestions.length }}
-      rightHeader={<span>Risk: {d.criteria.riskLevel}</span>}
+      rightHeader={
+        <span>
+          {periodLabel(d.period)} · {d.riskProfile}
+        </span>
+      }
     >
+      {/* Screening transparency: shows how many candidates were
+          considered and rejected, so the user trusts the picks. */}
+      <div className="border-b border-[#1f1f1f] bg-[#0a0a0a] px-3 py-1.5 text-[10px] text-[#888]">
+        Screened {screened} traders · rejected {rejected}
+        {(d.rejectedMM ?? 0) > 0 && ` (${d.rejectedMM} MM-like)`}
+        {(d.rejectedSample ?? 0) > 0 && ` · ${d.rejectedSample} low-sample`}
+        {(d.rejectedRisk ?? 0) > 0 && ` · ${d.rejectedRisk} risk-filter`}
+      </div>
+
       <div className="space-y-2 p-3">
         {d.suggestions.map((s) => (
           <div
             key={s.fullAddress}
-            className="grid grid-cols-[auto,1fr,auto] items-center gap-3 rounded-lg border border-[#1f1f1f] bg-[#141414] px-3 py-2"
+            className="flex flex-col gap-2 rounded-lg border border-[#1f1f1f] bg-[#141414] p-3"
           >
-            <span className={`text-base font-bold ${rankColor(s.rank)}`}>{s.rank}</span>
-            <div className="flex flex-col gap-0.5">
-              <span className="font-mono text-sm text-white">{s.wallet}</span>
-              <div className="flex items-center gap-3 text-[10px]">
-                <span className={pnlColor(s.totalPnl)}>{fmtPnl(s.totalPnl)}</span>
-                <span className={winrateColor(s.winRate)}>{s.winRate.toFixed(0)}% win</span>
-                <span className="text-[#666]">{s.totalTrades} trades</span>
-                <span className={`font-semibold ${riskColor(s.riskScore)}`}>Risk {s.riskScore}/10</span>
-              </div>
-            </div>
-            <div className="flex flex-col items-end gap-1">
-              <span className="text-[9px] text-[#888]">Suggested: {s.suggestedAllocation}</span>
+            {/* Header row: rank, wallet, risk score, Copy button */}
+            <div className="flex items-center gap-3">
+              <span className={`text-base font-bold ${rankColor(s.rank)}`}>{s.rank}</span>
+              <span className="flex-1 font-mono text-sm text-white">{s.wallet}</span>
+              <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-bold ${riskColor(s.riskScore)}`}>
+                R{s.riskScore}
+              </span>
               <button
                 onClick={() => {
                   if (ctx?.onCopyTrader) {
@@ -921,20 +945,57 @@ export function SuggestTradersCard({ data, ctx }: { data: Json; ctx?: CardCtx })
                       toLeaderboardEntry({
                         walletAddr: s.fullAddress,
                         totalPnl: s.totalPnl,
+                        tradingPnl: s.tradingPnl,
+                        fundingPnl: s.fundingPnl,
                         winRate: s.winRate,
                         totalTrades: s.totalTrades,
                         liquidations: s.liquidations,
+                        totalVolume: s.totalVolume,
+                        avgPnlPerTrade: s.avgPnlPerTrade,
                       }),
                     );
                   } else {
                     ctx?.onSendMessage?.(`Copy ${s.fullAddress} with $100`);
                   }
                 }}
-                className="rounded bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400 hover:bg-emerald-500/25"
+                className="shrink-0 rounded bg-emerald-500/15 px-2.5 py-1 text-[10px] font-semibold text-emerald-400 hover:bg-emerald-500/25"
               >
                 Copy
               </button>
             </div>
+
+            {/* Stats row */}
+            <div className="flex items-center gap-3 text-[10px]">
+              <span className={`font-mono ${pnlColor(s.totalPnl)}`}>{fmtPnl(s.totalPnl)}</span>
+              <span className={winrateColor(s.winRate)}>{s.winRate.toFixed(0)}% win</span>
+              <span className="text-[#666]">{s.totalTrades} trades</span>
+              <span className="text-[#666]">{fmtVol(s.totalVolume)}</span>
+              <span className="text-[#666]">Consistency {s.consistencyScore}/100</span>
+            </div>
+
+            {/* "Why" — one-line reason this candidate made the cut */}
+            <p className="text-[11px] leading-snug text-gray-300">{s.summary}</p>
+
+            {/* Flags row */}
+            {s.flags && s.flags.length > 0 && (
+              <div className="flex flex-wrap gap-1">
+                {s.flags.map((f) => {
+                  const isWarn = /liquidation|small/i.test(f);
+                  return (
+                    <span
+                      key={f}
+                      className={`rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                        isWarn
+                          ? "bg-amber-500/10 text-amber-300"
+                          : "bg-emerald-500/10 text-emerald-300"
+                      }`}
+                    >
+                      {f}
+                    </span>
+                  );
+                })}
+              </div>
+            )}
           </div>
         ))}
       </div>
