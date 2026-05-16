@@ -1,10 +1,22 @@
 // Chat session persistence — localStorage CRUD
 
+import type { ChatMode } from "@/lib/chat/chart-panel-context";
+
 export interface ChatSession {
   id: string;
   title: string;
   createdAt: number;
   updatedAt: number;
+  /**
+   * Mode the chat was created in. Cannot be changed after creation
+   * (toggling Trade ↔ Analyze in the UI always creates a NEW chat).
+   * Acts as the single source of truth for which API route the
+   * transport hits for this chat.
+   *
+   * Legacy sessions without `mode` are treated as `"trading"` by
+   * `getSessions()`'s migration shim.
+   */
+  mode: ChatMode;
 }
 
 const KEYS = {
@@ -26,13 +38,21 @@ const MAX_AGE_MS = 50 * 24 * 60 * 60 * 1000; // 50 days
 // --- Sessions ---
 
 function isValidSession(s: unknown): s is ChatSession {
+  if (typeof s !== "object" || s === null) return false;
+  const v = s as Partial<ChatSession>;
   return (
-    typeof s === "object" && s !== null &&
-    typeof (s as ChatSession).id === "string" &&
-    typeof (s as ChatSession).title === "string" &&
-    typeof (s as ChatSession).createdAt === "number" &&
-    typeof (s as ChatSession).updatedAt === "number"
+    typeof v.id === "string" &&
+    typeof v.title === "string" &&
+    typeof v.createdAt === "number" &&
+    typeof v.updatedAt === "number"
   );
+}
+
+/** Coerce a parsed session to the current schema. Legacy rows missing
+ * `mode` get the historical default `"trading"`. */
+function migrate(s: Partial<ChatSession> & { id: string; title: string; createdAt: number; updatedAt: number }): ChatSession {
+  const mode: ChatMode = s.mode === "copytrade" ? "copytrade" : "trading";
+  return { id: s.id, title: s.title, createdAt: s.createdAt, updatedAt: s.updatedAt, mode };
 }
 
 export function getSessions(): ChatSession[] {
@@ -41,8 +61,11 @@ export function getSessions(): ChatSession[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    // Validate shape to protect against tampered localStorage
-    const all: ChatSession[] = parsed.filter(isValidSession);
+    // Validate shape to protect against tampered localStorage, then
+    // migrate legacy rows (no `mode` field) to the current schema.
+    const all: ChatSession[] = parsed
+      .filter(isValidSession)
+      .map((s) => migrate(s as ChatSession));
     const now = Date.now();
     const fresh = all.filter((s) => now - s.updatedAt < MAX_AGE_MS);
     // Clean up expired sessions and their messages
@@ -63,12 +86,13 @@ export function saveSessions(sessions: ChatSession[]) {
   }
 }
 
-export function createSession(): ChatSession {
+export function createSession(mode: ChatMode = "trading"): ChatSession {
   const session: ChatSession = {
     id: crypto.randomUUID(),
     title: "New Chat",
     createdAt: Date.now(),
     updatedAt: Date.now(),
+    mode,
   };
   const sessions = getSessions();
   sessions.unshift(session);

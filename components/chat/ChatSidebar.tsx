@@ -2,6 +2,23 @@
 
 import { useState } from "react";
 import { useChatSessions } from "@/lib/chat/context";
+import type { ChatMode } from "@/lib/chat/chart-panel-context";
+
+function ModeBadge({ mode }: { mode: ChatMode }) {
+  const isAnalyze = mode === "copytrade";
+  return (
+    <span
+      className={`shrink-0 rounded px-1 py-px text-[8px] font-semibold uppercase tracking-wider ${
+        isAnalyze
+          ? "bg-emerald-500/15 text-emerald-400"
+          : "bg-blue-500/15 text-blue-400"
+      }`}
+      title={isAnalyze ? "Analyze (copy trading)" : "Trade (perp trading)"}
+    >
+      {isAnalyze ? "Analyze" : "Trade"}
+    </span>
+  );
+}
 
 function timeAgo(ts: number): string {
   const diff = Date.now() - ts;
@@ -46,7 +63,10 @@ export function ChatSidebar() {
                 : "text-[#999] hover:bg-[#161616] hover:text-white"
             }`}
           >
-            <span className="truncate text-sm leading-tight">{s.title}</span>
+            <div className="flex items-center gap-1.5">
+              <span className="truncate text-sm leading-tight flex-1">{s.title}</span>
+              <ModeBadge mode={s.mode} />
+            </div>
             <span className="mt-0.5 text-[11px] text-[#555]">
               {timeAgo(s.updatedAt)}
             </span>

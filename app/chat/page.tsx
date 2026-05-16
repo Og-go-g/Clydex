@@ -404,15 +404,30 @@ function useStatusToast(
 // ─── Main Page ───────────────────────────────────────────────────
 
 export default function ChatPage() {
-  const { activeId, createChat } = useChatSessions();
-  const { setChatId, chatMode, setChatMode } = useChartPanel();
+  const { activeId, sessions, createChat } = useChatSessions();
+  const { setChatId, setChatMode } = useChartPanel();
+
+  // Mode is now a permanent property of the chat session
+  // (lib/chat/store.ts → ChatSession.mode). Read it from the active
+  // session — there is no UI-only "selected mode" anymore.
+  const activeSession = sessions.find((s) => s.id === activeId);
+  const chatMode: ChatMode = activeSession?.mode ?? "trading";
+
+  // Mirror the active session's mode into the chart-panel context so
+  // ChartPanel (orderbook vs CopyTrading split) reacts to it without
+  // having to subscribe to ChatSessions directly.
+  useEffect(() => {
+    setChatMode(chatMode);
+  }, [chatMode, setChatMode]);
 
   const handleModeChange = useCallback((mode: ChatMode) => {
-    if (mode !== chatMode) {
-      setChatMode(mode);
-      createChat(); // new session → ChatContent remounts, mode persists in context
-    }
-  }, [chatMode, setChatMode, createChat]);
+    if (mode === chatMode) return;
+    // Always create (or reuse an empty matching-mode chat) — never
+    // mutate the current chat's mode. createChat(mode) handles the
+    // 2-empty cap + reuses an empty chat of the SAME mode if one
+    // already exists.
+    createChat(mode);
+  }, [chatMode, createChat]);
 
   // "Trade X" from markets: if pending exists and current chat has messages → create new chat
   const didCreateRef = useRef(false);
@@ -424,7 +439,7 @@ export default function ChatPage() {
       const hasMessages = getMessages(activeId).length > 0;
       if (hasMessages) {
         didCreateRef.current = true;
-        createChat();
+        createChat("trading");
       }
     } catch { /* ignore */ }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -435,7 +450,17 @@ export default function ChatPage() {
   }, [activeId, setChatId]);
 
   if (!activeId) return null;
-  return <ChatContent key={activeId} chatId={activeId} chatMode={chatMode} onModeChange={handleModeChange} />;
+  // key includes chatMode so any unexpected mode change forces a clean
+  // remount of useChat (kills any stale DefaultChatTransport pointing
+  // to the wrong /api/chat route).
+  return (
+    <ChatContent
+      key={`${activeId}_${chatMode}`}
+      chatId={activeId}
+      chatMode={chatMode}
+      onModeChange={handleModeChange}
+    />
+  );
 }
 
 function ChatContent({ chatId, chatMode, onModeChange }: { chatId: string; chatMode: ChatMode; onModeChange: (mode: ChatMode) => void }) {
@@ -653,23 +678,29 @@ function ChatContent({ chatId, chatMode, onModeChange }: { chatId: string; chatM
       {/* Messages */}
       <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 py-6">
         <div className="mx-auto flex max-w-2xl flex-col gap-4">
-          {/* Welcome message */}
-          <div className="flex justify-start">
-            <div className="max-w-[80%] rounded-2xl border border-border bg-card/50 backdrop-blur-sm px-4 py-3 text-sm leading-relaxed text-foreground">
-              <div className="whitespace-pre-wrap">
-                {showWelcome ? modeConfig.welcome : ""}
-                {modeConfig.prompts.map((p, i) => (
-                  <span key={p.example}>
-                    {i > 0 ? "\n" : ""}{"- "}
-                    <strong>{p.label}</strong>
-                    {" — "}
-                    <button type="button" onClick={() => setInput(p.example)} className="text-muted underline hover:text-foreground transition-colors">{`"${p.example}"`}</button>
-                  </span>
-                ))}
-                {showWelcome ? modeConfig.footer : ""}
+          {/* Welcome message — only shown on an empty chat. Once the
+              user sends anything, hints disappear so they can't lie
+              about the active mode (every persisted chat has its own
+              mode, and the hint card would otherwise advertise the
+              CURRENT toggle state, not the chat's actual mode). */}
+          {showWelcome && (
+            <div className="flex justify-start">
+              <div className="max-w-[80%] rounded-2xl border border-border bg-card/50 backdrop-blur-sm px-4 py-3 text-sm leading-relaxed text-foreground">
+                <div className="whitespace-pre-wrap">
+                  {modeConfig.welcome}
+                  {modeConfig.prompts.map((p, i) => (
+                    <span key={p.example}>
+                      {i > 0 ? "\n" : ""}{"- "}
+                      <strong>{p.label}</strong>
+                      {" — "}
+                      <button type="button" onClick={() => setInput(p.example)} className="text-muted underline hover:text-foreground transition-colors">{`"${p.example}"`}</button>
+                    </span>
+                  ))}
+                  {modeConfig.footer}
+                </div>
               </div>
             </div>
-          </div>
+          )}
 
           {messages.map((msg, msgIdx) => {
             // Check if the next user message dismisses action cards (cancel/no/etc.)

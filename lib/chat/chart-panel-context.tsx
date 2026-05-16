@@ -25,7 +25,11 @@ const PENDING_KEY = "chart-pending-open";
 const DEFAULT_MARKET_ID = 0;
 const DEFAULT_BASE_ASSET = "BTC";
 
-interface PersistedState { isOpen: boolean; marketId: number; baseAsset: string; chatMode: ChatMode }
+// `chatMode` lives on ChatSession.mode (lib/chat/store.ts) and is set
+// at session creation — the chat panel only mirrors it for the
+// orderbook-vs-copytrading split. So this file persists chart layout
+// (open + market + base asset), but NOT mode anymore.
+interface PersistedState { isOpen: boolean; marketId: number; baseAsset: string }
 
 function loadForChat(chatId: string): PersistedState {
   try {
@@ -36,11 +40,10 @@ function loadForChat(chatId: string): PersistedState {
         isOpen: s.isOpen ?? false,
         marketId: typeof s.marketId === "number" ? s.marketId : DEFAULT_MARKET_ID,
         baseAsset: typeof s.baseAsset === "string" ? s.baseAsset : DEFAULT_BASE_ASSET,
-        chatMode: s.chatMode === "copytrade" ? "copytrade" : "trading",
       };
     }
   } catch { /* ignore */ }
-  return { isOpen: false, marketId: DEFAULT_MARKET_ID, baseAsset: DEFAULT_BASE_ASSET, chatMode: "trading" };
+  return { isOpen: false, marketId: DEFAULT_MARKET_ID, baseAsset: DEFAULT_BASE_ASSET };
 }
 
 function persistForChat(chatId: string, state: PersistedState) {
@@ -62,11 +65,14 @@ export function ChartPanelProvider({ children }: { children: ReactNode }) {
   const [isOpen, setIsOpen] = useState(false);
   const [marketId, setMarketId] = useState(DEFAULT_MARKET_ID);
   const [baseAsset, setBaseAsset] = useState(DEFAULT_BASE_ASSET);
+  // `chatMode` is a passive mirror of the active ChatSession's `mode`.
+  // The page (app/chat/page.tsx) calls setChatMode() whenever the active
+  // session changes. Persistence lives on ChatSession, not here.
   const [chatMode, setChatModeState] = useState<ChatMode>("trading");
   const skipPersistRef = useRef(false);
   // Ref for fresh state values (avoids stale closures)
-  const stateRef = useRef({ isOpen, marketId, baseAsset, chatMode });
-  stateRef.current = { isOpen, marketId, baseAsset, chatMode };
+  const stateRef = useRef({ isOpen, marketId, baseAsset });
+  stateRef.current = { isOpen, marketId, baseAsset };
 
   // Core: called when active chat changes
   const setChatId = useCallback((id: string | null) => {
@@ -97,7 +103,6 @@ export function ChartPanelProvider({ children }: { children: ReactNode }) {
         setIsOpen(saved.isOpen);
         setMarketId(saved.marketId);
         setBaseAsset(saved.baseAsset);
-        setChatModeState(saved.chatMode);
         requestAnimationFrame(() => { skipPersistRef.current = false; });
         return;
       }
@@ -108,8 +113,7 @@ export function ChartPanelProvider({ children }: { children: ReactNode }) {
       setMarketId(pending.marketId);
       setBaseAsset(pending.baseAsset);
       setIsOpen(true);
-      setChatModeState("trading");
-      persistForChat(id, { isOpen: true, marketId: pending.marketId, baseAsset: pending.baseAsset, chatMode: "trading" });
+      persistForChat(id, { isOpen: true, marketId: pending.marketId, baseAsset: pending.baseAsset });
       if (pending.prefill) {
         try { sessionStorage.setItem("chart-prefill", pending.prefill); } catch { /* ignore */ }
       }
@@ -117,24 +121,22 @@ export function ChartPanelProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    // Load saved state — for new chats (no saved state), preserve current chatMode
+    // Load saved state — for new chats (no saved state), preserve current layout
     const raw = (() => { try { return localStorage.getItem(STORAGE_PREFIX + id); } catch { return null; } })();
     if (raw) {
-      // Existing chat — restore everything including mode
+      // Existing chat — restore layout
       const saved = loadForChat(id);
       skipPersistRef.current = true;
       setIsOpen(saved.isOpen);
       setMarketId(saved.marketId);
       setBaseAsset(saved.baseAsset);
-      setChatModeState(saved.chatMode);
       requestAnimationFrame(() => { skipPersistRef.current = false; });
     } else {
-      // New chat — keep current chatMode (set by handleModeChange before createChat)
+      // New chat — keep current layout
       skipPersistRef.current = true;
       setIsOpen(stateRef.current.isOpen);
       setMarketId(stateRef.current.marketId);
       setBaseAsset(stateRef.current.baseAsset);
-      // chatMode already set by setChatMode() call — don't override
       requestAnimationFrame(() => { skipPersistRef.current = false; });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -157,7 +159,7 @@ export function ChartPanelProvider({ children }: { children: ReactNode }) {
   // Persist whenever state changes (must be in useEffect, not during render)
   useEffect(() => {
     schedPersist();
-  }, [isOpen, marketId, baseAsset, chatMode, schedPersist]);
+  }, [isOpen, marketId, baseAsset, schedPersist]);
 
   const toggle = useCallback(() => setIsOpen((v) => !v), []);
   const close = useCallback(() => setIsOpen(false), []);

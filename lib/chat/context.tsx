@@ -22,13 +22,19 @@ import {
   getMessages,
   saveMessages,
 } from "./store";
+import type { ChatMode } from "@/lib/chat/chart-panel-context";
 import { useAuth } from "@/lib/auth/context";
 import { loadSessionsFromDb, loadMessagesFromDb, deleteSessionFromDb } from "./sync";
 
 interface ChatContextValue {
   sessions: ChatSession[];
   activeId: string | null;
-  createChat: () => void;
+  /**
+   * Create a new chat session. Pass `mode` to lock the session to a
+   * specific API route (Trade vs Analyze); the chat keeps that mode
+   * for its entire lifetime.
+   */
+  createChat: (mode?: ChatMode) => void;
   selectChat: (id: string) => void;
   deleteChat: (id: string) => void;
   renameChat: (id: string, title: string) => void;
@@ -155,12 +161,16 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             continue;
           }
 
-          // Add session to localStorage
+          // Add session to localStorage. The DB schema doesn't yet
+          // carry `mode`, so DB-only restores default to "trading"
+          // (historical default). New sessions created post-refactor
+          // will round-trip mode via localStorage.
           const restored: ChatSession = {
             id: rs.id,
             title: rs.title,
             createdAt: new Date(rs.createdAt).getTime(),
             updatedAt: new Date(rs.updatedAt).getTime(),
+            mode: "trading",
           };
           local.push(restored);
 
@@ -189,20 +199,23 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     return () => { cancelled = true; };
   }, [isAuthenticated, dbSynced]);
 
-  const createChat = useCallback(() => {
-    // Limit: max 2 empty chats (no messages) at a time
+  const createChat = useCallback((mode: ChatMode = "trading") => {
+    // Limit: max 2 empty chats (no messages) at a time. When that cap
+    // is hit AND there's already an empty chat in the requested mode,
+    // reuse it. If the only empty chats are in a different mode, we
+    // must create a fresh one anyway — otherwise toggling Trade ↔
+    // Analyze would silently route into a chat locked to the wrong
+    // mode (the original bug behind the trade-mode response in
+    // Analyze UI). See lib/chat/store.ts → ChatSession.mode.
     const current = getSessions();
-    const emptyCount = current.filter((s) => getMessages(s.id).length === 0).length;
-    if (emptyCount >= 2) {
-      // Switch to the most recent empty chat instead of creating
-      const emptyChat = current.find((s) => getMessages(s.id).length === 0);
-      if (emptyChat) {
-        storeSetActiveId(emptyChat.id);
-        setActiveId(emptyChat.id);
-        return;
-      }
+    const empties = current.filter((s) => getMessages(s.id).length === 0);
+    const reusable = empties.find((s) => s.mode === mode);
+    if (empties.length >= 2 && reusable) {
+      storeSetActiveId(reusable.id);
+      setActiveId(reusable.id);
+      return;
     }
-    const session = createSession();
+    const session = createSession(mode);
     setSessions(getSessions());
     setActiveId(session.id);
   }, []);
