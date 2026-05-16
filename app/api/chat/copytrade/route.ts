@@ -277,21 +277,60 @@ export async function POST(req: Request) {
   }
 
   const ALLOWED_ROLES = new Set(["user", "assistant"]);
-  const sanitizedMessages = messages.filter(
+  const roleFiltered = messages.filter(
     (msg: { role?: string }) => typeof msg.role === "string" && ALLOWED_ROLES.has(msg.role),
   );
-  if (sanitizedMessages.length === 0) {
+  if (roleFiltered.length === 0) {
     return new Response("No valid messages after role filtering", { status: 400 });
   }
 
   const MAX_MSG_LENGTH = 20_000;
-  for (const msg of sanitizedMessages) {
+  for (const msg of roleFiltered) {
     if (typeof msg.content === "string" && msg.content.length > MAX_MSG_LENGTH) {
       return new Response("Message content too long", { status: 400 });
     }
   }
 
-  const modelMessages = await convertToModelMessages(sanitizedMessages);
+  // Drop ORPHAN tool calls — i.e. tool-XXX parts where state is still
+  // `input-streaming` or `input-available` (call started but result
+  // never came back). When the previous request crashed mid-stream
+  // (heavy DB query timeout, route handler killed, etc.), the chat
+  // saves the assistant message with the started tool_use part but
+  // no matching tool_result. On the NEXT user message the entire
+  // history (including the orphan) is sent to Anthropic, which
+  // rejects with "Tool result is missing for tool call …".
+  //
+  // Strip those orphan parts before convertToModelMessages so the
+  // model never sees a tool_use without tool_result. If an assistant
+  // message has no parts left after the strip, drop it entirely so
+  // the conversation flow remains coherent.
+  const sanitizedMessages = roleFiltered
+    .map((msg: { role?: string; parts?: Array<{ type?: string; state?: string }> }) => {
+      if (msg.role !== "assistant" || !Array.isArray(msg.parts)) return msg;
+      const cleanParts = msg.parts.filter((p) => {
+        if (typeof p.type !== "string") return true;
+        const isToolPart = p.type === "dynamic-tool" || p.type.startsWith("tool-");
+        if (!isToolPart) return true;
+        // Keep only completed tool parts. AI SDK marks completed
+        // calls with state "output-available" or "output-error".
+        return p.state === "output-available" || p.state === "output-error";
+      });
+      return { ...msg, parts: cleanParts };
+    })
+    .filter((msg: { role?: string; parts?: unknown[]; content?: string }) => {
+      // Drop empty assistant messages produced by the strip above.
+      if (msg.role !== "assistant") return true;
+      const hasParts = Array.isArray(msg.parts) && msg.parts.length > 0;
+      const hasContent = typeof msg.content === "string" && msg.content.trim().length > 0;
+      return hasParts || hasContent;
+    });
+
+  if (sanitizedMessages.length === 0) {
+    return new Response("No valid messages after sanitization", { status: 400 });
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const modelMessages = await convertToModelMessages(sanitizedMessages as any);
 
   const result = streamText({
     model: getModel(),

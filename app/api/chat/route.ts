@@ -334,16 +334,16 @@ export async function POST(req: Request) {
 
   // Security: only allow user/assistant roles from client
   const ALLOWED_ROLES = new Set(["user", "assistant"]);
-  const sanitizedMessages = messages.filter(
+  const roleFiltered = messages.filter(
     (msg: { role?: string }) => typeof msg.role === "string" && ALLOWED_ROLES.has(msg.role)
   );
-  if (sanitizedMessages.length === 0) {
+  if (roleFiltered.length === 0) {
     return new Response("No valid messages after role filtering", { status: 400 });
   }
 
   // Cap per-message content length
   const MAX_MSG_LENGTH = 20_000;
-  for (const msg of sanitizedMessages) {
+  for (const msg of roleFiltered) {
     if (typeof msg.content === "string" && msg.content.length > MAX_MSG_LENGTH) {
       return new Response("Message content too long", { status: 400 });
     }
@@ -360,7 +360,7 @@ export async function POST(req: Request) {
 
   // Cumulative size check — prevent excessively large payloads
   let totalSize = 0;
-  for (const msg of sanitizedMessages) {
+  for (const msg of roleFiltered) {
     totalSize += typeof msg.content === "string" ? msg.content.length : 0;
     if (Array.isArray(msg.parts)) totalSize += JSON.stringify(msg.parts).length;
   }
@@ -368,7 +368,39 @@ export async function POST(req: Request) {
     return new Response("Total message payload too large", { status: 413 });
   }
 
-  const modelMessages = await convertToModelMessages(sanitizedMessages);
+  // Drop ORPHAN tool calls — tool-XXX parts where state is still
+  // `input-streaming` or `input-available` (call started, no result).
+  // Symptom on prod: the previous request crashed mid-stream, chat
+  // saved the assistant message with the started tool_use but no
+  // matching tool_result. On the next user message Anthropic sees
+  // a tool_use without tool_result and rejects with
+  // "Tool result is missing for tool call …". Same scrub as in
+  // /api/chat/copytrade — kept inline (no shared helper) to keep
+  // both routes self-contained.
+  const sanitizedMessages = roleFiltered
+    .map((msg: { role?: string; parts?: Array<{ type?: string; state?: string }> }) => {
+      if (msg.role !== "assistant" || !Array.isArray(msg.parts)) return msg;
+      const cleanParts = msg.parts.filter((p) => {
+        if (typeof p.type !== "string") return true;
+        const isToolPart = p.type === "dynamic-tool" || p.type.startsWith("tool-");
+        if (!isToolPart) return true;
+        return p.state === "output-available" || p.state === "output-error";
+      });
+      return { ...msg, parts: cleanParts };
+    })
+    .filter((msg: { role?: string; parts?: unknown[]; content?: string }) => {
+      if (msg.role !== "assistant") return true;
+      const hasParts = Array.isArray(msg.parts) && msg.parts.length > 0;
+      const hasContent = typeof msg.content === "string" && msg.content.trim().length > 0;
+      return hasParts || hasContent;
+    });
+
+  if (sanitizedMessages.length === 0) {
+    return new Response("No valid messages after sanitization", { status: 400 });
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const modelMessages = await convertToModelMessages(sanitizedMessages as any);
 
   const result = streamText({
     model: getModel(),
