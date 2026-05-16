@@ -371,16 +371,42 @@ export async function getTraderProfile(input: string): Promise<TraderProfile | n
   if (cached) return cached;
 
   // Three heavy parts in parallel — getTraderTopTrades is itself
-  // parallel internally now. Total wall time = max of the three,
-  // not sum.
-  const [topTrades, marketBreakdown, recentTrades] = await Promise.all([
+  // parallel internally now (per-market recursive CTE). Total wall
+  // time = max of the three, not sum.
+  //
+  // Use `Promise.allSettled` so that a high-activity trader (e.g. a
+  // top-leaderboard wallet with 35k+ trades across many markets,
+  // where the per-market CTE can saturate the pg pool and time out)
+  // still returns SOMETHING — the summary + whichever parts loaded.
+  // Pre-2026-05-16 a single failed part rejected the whole Promise.all
+  // and surfaced "Failed to fetch trader profile." for the busiest
+  // (= most interesting) traders.
+  const [topRes, breakdownRes, recentRes] = await Promise.allSettled([
     getTraderTopTrades(walletAddr, 10),
     getTraderMarketBreakdown(walletAddr),
     getRecentTrades(walletAddr, 5),
   ]);
 
+  const topTrades = topRes.status === "fulfilled" ? topRes.value : [];
+  const marketBreakdown = breakdownRes.status === "fulfilled" ? breakdownRes.value : [];
+  const recentTrades = recentRes.status === "fulfilled" ? recentRes.value : [];
+
+  if (topRes.status === "rejected") {
+    console.error("[copytrade] getTraderTopTrades failed for", walletAddr, topRes.reason);
+  }
+  if (breakdownRes.status === "rejected") {
+    console.error("[copytrade] getTraderMarketBreakdown failed for", walletAddr, breakdownRes.reason);
+  }
+  if (recentRes.status === "rejected") {
+    console.error("[copytrade] getRecentTrades failed for", walletAddr, recentRes.reason);
+  }
+
   const profile: TraderProfile = { ...summary, topTrades, marketBreakdown, recentTrades };
-  writeCache(profileCache, walletAddr, profile);
+  // Only cache if at least one heavy part succeeded; otherwise next
+  // call should retry rather than serve a hollow profile from cache.
+  if (topRes.status === "fulfilled" || breakdownRes.status === "fulfilled" || recentRes.status === "fulfilled") {
+    writeCache(profileCache, walletAddr, profile);
+  }
   return profile;
 }
 
