@@ -1,25 +1,37 @@
 import Link from "next/link";
 
-const features = [
+// Copy Trading is highlighted first — it's the differentiating feature
+// most users won't discover via the AI-chat narrative alone. Order
+// reflects the funnel: copy first (zero-knowledge users who just want
+// to mirror winners), then chat (hands-on traders), then capability
+// cards (markets / portfolio / risk) that apply to both modes.
+const features: Array<{ title: string; description: string; highlight?: boolean }> = [
+  {
+    title: "Copy Trading",
+    description:
+      "Subscribe to top-performing traders and auto-mirror their positions. Set your allocation, leverage multiplier, and per-market caps — the engine executes within seconds of each leader trade.",
+    highlight: true,
+  },
   {
     title: "AI Trading Chat",
     description:
-      "Open and close positions, set stop-losses, and manage your portfolio — all through natural language on 01 Exchange.",
+      "Open positions, check prices, set triggers — all in plain English. No forms, no menus, no clicking through nested dropdowns.",
+    highlight: true,
   },
   {
     title: "Perpetual Futures",
     description:
-      "Trade 24+ perpetual markets on Solana with up to 50x leverage. BTC, ETH, SOL, and more.",
+      "24+ perp markets on Solana with up to 50x leverage. BTC, ETH, SOL, and more — settled in USDC.",
   },
   {
     title: "Portfolio Management",
     description:
-      "Track your positions, PnL, margin health, and open orders in real time. Deposit and withdraw USDC directly.",
+      "Live positions, PnL, margin health, open orders. Deposit and withdraw USDC directly to your own wallet.",
   },
   {
     title: "Risk Controls",
     description:
-      "Set stop-loss and take-profit triggers through chat. AI validates leverage limits per market tier before every trade.",
+      "Per-position stop-loss, per-market caps, global notional limits. Configured once, enforced on every trade — copy or manual.",
   },
 ];
 
@@ -36,9 +48,10 @@ export default function Home() {
           <br />
           <span className="text-accent">Agent</span>
         </h1>
-        <p className="max-w-lg text-lg text-muted">
-          Trade perpetual futures on 01 Exchange with an AI assistant.
-          Open positions, manage risk, and track your portfolio — all through chat.
+        <p className="max-w-xl text-lg text-muted">
+          Two ways to trade perpetual futures on 01 Exchange: chat with an AI
+          that places orders for you, or auto-mirror top performers.
+          Non-custodial — your wallet stays in control.
         </p>
         <div className="flex gap-4 pt-4">
           <Link
@@ -48,10 +61,10 @@ export default function Home() {
             Start Trading
           </Link>
           <Link
-            href="/markets"
+            href="/chat"
             className="rounded-xl border border-border px-6 py-3 font-medium text-foreground transition-colors hover:bg-card"
           >
-            View Markets
+            Browse Top Traders
           </Link>
         </div>
       </section>
@@ -61,7 +74,11 @@ export default function Home() {
         {features.map((f) => (
           <div
             key={f.title}
-            className="rounded-2xl border border-border bg-card/50 backdrop-blur-sm p-6 transition-colors hover:bg-card/70"
+            className={`rounded-2xl border backdrop-blur-sm p-6 transition-colors ${
+              f.highlight
+                ? "border-accent/30 bg-accent/5 hover:bg-accent/10"
+                : "border-border bg-card/50 hover:bg-card/70"
+            }`}
           >
             <h3 className="mb-2 text-lg font-semibold">{f.title}</h3>
             <p className="text-sm leading-relaxed text-muted">
