@@ -491,18 +491,38 @@ async function getTraderTopTrades(walletAddr: string, limit: number): Promise<Tr
 // ─── Market Breakdown ───────────────────────────────────────────
 
 async function getTraderMarketBreakdown(walletAddr: string): Promise<MarketStat[]> {
+  // PRE-2026-05-16 bug: this used a single SELECT with
+  //   `FROM trade_history t LEFT JOIN pnl_history p ON (walletAddr, marketId)`
+  // which produces a Cartesian product per (marketId) — N trade rows × M
+  // pnl rows for the same market → SUM(pnl) was inflated by a factor of
+  // N. Example seen on prod: a wallet with $1.86K real trading PnL and
+  // 60 BTC trades reported +$271.53K for BTCUSD in the profile card.
+  //
+  // Fix: aggregate trades and pnl independently, then join the
+  // aggregates 1-to-1 on marketId. This gives the correct numbers and
+  // is actually faster — Postgres only walks each table once.
   const rows = await query<{
     market_id: number; symbol: string; trades: number; pnl: string;
   }>(
-    `SELECT t."marketId" AS market_id,
-            t.symbol,
-            COUNT(DISTINCT t."tradeId")::int AS trades,
-            COALESCE(SUM(p."tradingPnl"), 0)::numeric::text AS pnl
-     FROM trade_history t
-     LEFT JOIN pnl_history p ON p."walletAddr" = t."walletAddr" AND p."marketId" = t."marketId"
-     WHERE t."walletAddr" = $1
-     GROUP BY t."marketId", t.symbol
-     ORDER BY trades DESC`,
+    `WITH trade_counts AS (
+       SELECT "marketId", symbol, COUNT(DISTINCT "tradeId")::int AS trades
+       FROM trade_history
+       WHERE "walletAddr" = $1
+       GROUP BY "marketId", symbol
+     ),
+     pnl_sums AS (
+       SELECT "marketId", COALESCE(SUM("tradingPnl"), 0)::numeric AS pnl
+       FROM pnl_history
+       WHERE "walletAddr" = $1
+       GROUP BY "marketId"
+     )
+     SELECT tc."marketId" AS market_id,
+            tc.symbol,
+            tc.trades,
+            COALESCE(ps.pnl, 0)::text AS pnl
+     FROM trade_counts tc
+     LEFT JOIN pnl_sums ps ON ps."marketId" = tc."marketId"
+     ORDER BY tc.trades DESC`,
     [walletAddr],
   );
 
