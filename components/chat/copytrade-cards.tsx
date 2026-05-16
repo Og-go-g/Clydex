@@ -15,12 +15,44 @@
 // trigger the shared modal.
 
 import type { CloseCopyModalData } from "@/components/copytrade/CloseCopyPositionModal";
+import type { LeaderboardEntry } from "@/components/copytrade/CompactLeaderboard";
 
 // ─── Shared types ───────────────────────────────────────────────
 
 export interface CardCtx {
   onSendMessage?: (msg: string) => void;
   onOpenCloseCopyModal?: (data: CloseCopyModalData) => void;
+  /**
+   * Pops the shared FollowTraderDialog (the proper UX for picking
+   * allocation / leverage / max-pos / stop-loss). Called by Copy
+   * buttons on Trader Profile / Suggest / Compare / Positions
+   * cards. The host page wires this to also open the chart panel
+   * if it's currently collapsed.
+   */
+  onCopyTrader?: (trader: LeaderboardEntry) => void;
+}
+
+/**
+ * Helper to construct a LeaderboardEntry from partial tool-result
+ * data. The FollowTraderDialog only needs walletAddr to actually
+ * subscribe — the other fields are for display in the dialog
+ * header. Missing fields default to 0 so the dialog doesn't
+ * render NaN.
+ */
+function toLeaderboardEntry(p: Partial<LeaderboardEntry> & { walletAddr: string }): LeaderboardEntry {
+  return {
+    walletAddr: p.walletAddr,
+    totalPnl: p.totalPnl ?? 0,
+    tradingPnl: p.tradingPnl ?? 0,
+    fundingPnl: p.fundingPnl ?? 0,
+    totalTrades: p.totalTrades ?? 0,
+    wins: p.wins ?? 0,
+    losses: p.losses ?? 0,
+    winRate: p.winRate ?? 0,
+    avgPnlPerTrade: p.avgPnlPerTrade ?? 0,
+    liquidations: p.liquidations ?? 0,
+    totalVolume: p.totalVolume ?? 0,
+  };
 }
 
 type Json = Record<string, unknown>;
@@ -419,14 +451,41 @@ export function TraderProfileCard({ data, ctx }: { data: Json; ctx?: CardCtx }) 
           </div>
         )}
 
-        {/* CTA row — vague references; AI resolves "this trader" from
-            the profile result that's already in conversation context */}
+        {/* CTA row.
+            - Copy button → opens the chart-panel-hosted
+              FollowTraderDialog (proper UX for picking allocation /
+              leverage / max-pos / SL). Falls back to a chat message
+              if onCopyTrader isn't wired in (defensive, host always
+              wires it in the production page).
+            - Live Positions → vague chat reference; AI resolves
+              "this trader" from the profile result already in
+              conversation context. */}
         <div className="flex gap-2 pt-1">
           <button
-            onClick={() => ctx?.onSendMessage?.("Copy this trader with $100")}
+            onClick={() => {
+              if (ctx?.onCopyTrader) {
+                ctx.onCopyTrader(
+                  toLeaderboardEntry({
+                    walletAddr: d.fullAddress,
+                    totalPnl: d.totalPnl,
+                    tradingPnl: d.tradingPnl,
+                    fundingPnl: d.fundingPnl,
+                    totalTrades: d.totalTrades,
+                    wins: d.wins,
+                    losses: d.losses,
+                    winRate: d.winRate,
+                    avgPnlPerTrade: d.avgPnlPerTrade,
+                    liquidations: d.liquidations,
+                    totalVolume: d.totalVolume,
+                  }),
+                );
+              } else {
+                ctx?.onSendMessage?.("Copy this trader with $100");
+              }
+            }}
             className="flex-1 rounded-lg bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-400 transition-colors hover:bg-emerald-500/25"
           >
-            Copy with $100
+            Copy this trader
           </button>
           <button
             onClick={() => ctx?.onSendMessage?.("Show this trader's open positions")}
@@ -729,10 +788,16 @@ export function TraderPositionsCard({ data, ctx }: { data: Json; ctx?: CardCtx }
       )}
       <div className="border-t border-[#1f1f1f] px-3 py-2">
         <button
-          onClick={() => ctx?.onSendMessage?.("Copy this trader with $100")}
+          onClick={() => {
+            if (ctx?.onCopyTrader) {
+              ctx.onCopyTrader(toLeaderboardEntry({ walletAddr: d.fullAddress }));
+            } else {
+              ctx?.onSendMessage?.("Copy this trader with $100");
+            }
+          }}
           className="w-full rounded-lg bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-400 hover:bg-emerald-500/25"
         >
-          Copy {d.trader} with $100
+          Copy {d.trader}
         </button>
       </div>
     </CardShell>
@@ -791,7 +856,21 @@ export function SuggestTradersCard({ data, ctx }: { data: Json; ctx?: CardCtx })
             <div className="flex flex-col items-end gap-1">
               <span className="text-[9px] text-[#888]">Suggested: {s.suggestedAllocation}</span>
               <button
-                onClick={() => ctx?.onSendMessage?.(`Copy ${s.fullAddress} with $100`)}
+                onClick={() => {
+                  if (ctx?.onCopyTrader) {
+                    ctx.onCopyTrader(
+                      toLeaderboardEntry({
+                        walletAddr: s.fullAddress,
+                        totalPnl: s.totalPnl,
+                        winRate: s.winRate,
+                        totalTrades: s.totalTrades,
+                        liquidations: s.liquidations,
+                      }),
+                    );
+                  } else {
+                    ctx?.onSendMessage?.(`Copy ${s.fullAddress} with $100`);
+                  }
+                }}
                 className="rounded bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400 hover:bg-emerald-500/25"
               >
                 Copy
@@ -961,7 +1040,23 @@ export function CompareTradersCard({ data, ctx }: { data: Json; ctx?: CardCtx })
                 </div>
               )}
               <button
-                onClick={() => ctx?.onSendMessage?.(`Copy ${ft.fullAddress} with $100`)}
+                onClick={() => {
+                  if (ctx?.onCopyTrader) {
+                    ctx.onCopyTrader(
+                      toLeaderboardEntry({
+                        walletAddr: ft.fullAddress,
+                        totalPnl: ft.totalPnl,
+                        winRate: ft.winRate,
+                        totalTrades: ft.totalTrades,
+                        liquidations: ft.liquidations,
+                        totalVolume: ft.totalVolume,
+                        avgPnlPerTrade: ft.avgPnlPerTrade,
+                      }),
+                    );
+                  } else {
+                    ctx?.onSendMessage?.(`Copy ${ft.fullAddress} with $100`);
+                  }
+                }}
                 className="mt-1 rounded bg-emerald-500/15 px-2 py-1 text-[10px] font-semibold text-emerald-400 hover:bg-emerald-500/25"
               >
                 Copy

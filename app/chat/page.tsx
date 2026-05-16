@@ -21,6 +21,8 @@ import {
 import { isNordWsEnabledForSession } from "@/lib/feature-flags";
 import { ClosePositionModal } from "@/components/collateral/ClosePositionModal";
 import { CloseCopyPositionModal, type CloseCopyModalData } from "@/components/copytrade/CloseCopyPositionModal";
+import { openFollowTraderDialog } from "@/components/copytrade/CopyTradeSection";
+import type { LeaderboardEntry } from "@/components/copytrade/CompactLeaderboard";
 import { useToast } from "@/components/alerts/ToastProvider";
 import { usePageActive } from "@/hooks/usePageActive";
 import { useChartPanel, useChartPanelSafe, type ChatMode } from "@/lib/chat/chart-panel-context";
@@ -467,6 +469,11 @@ function ChatContent({ chatId, chatMode, onModeChange }: { chatId: string; chatM
   const { address } = useWallet();
   const { isAuthenticated } = useAuth();
   const { renameChat, touchChat, sessions } = useChatSessions();
+  // Used by Copy buttons on chat cards (TraderProfile / Suggest /
+  // Compare / TraderPositions) — clicking opens the chart panel
+  // (if hidden) so the user sees the Copy Trading state, then pops
+  // the shared FollowTraderDialog with this trader pre-filled.
+  const chartPanel = useChartPanel();
   // NordUser session is created on-demand when user clicks Execute/Close button.
   // No auto-init — wallet popup only happens on explicit user action.
   const addressRef = useRef(address);
@@ -669,6 +676,19 @@ function ChatContent({ chatId, chatMode, onModeChange }: { chatId: string; chatM
     sendMessage({ text });
   }, [isLoading, sendMessage]);
 
+  // Pop the FollowTraderDialog with a specific trader. Triggered by
+  // the "Copy this trader" button on Analyze-mode chat cards. The
+  // chart panel (right pane that hosts CopyTradeSection + the
+  // dialog) is opened first if it's currently collapsed, otherwise
+  // the dialog would render off-screen.
+  const handleCopyTrader = useCallback(
+    (trader: LeaderboardEntry) => {
+      if (!chartPanel.isOpen) chartPanel.open();
+      openFollowTraderDialog(trader);
+    },
+    [chartPanel],
+  );
+
   return (
     <div className="flex h-[calc(100vh-4rem+1px)] flex-col">
       {/* Mode toggle */}
@@ -736,6 +756,7 @@ function ChatContent({ chatId, chatMode, onModeChange }: { chatId: string; chatM
                     onSendMessage={handleCardAction}
                     onOpenCloseModal={setCloseModalData}
                     onOpenCloseCopyModal={setCloseCopyModalData}
+                    onCopyTrader={handleCopyTrader}
                     isDismissed={isDismissed}
                     messageId={msg.id}
                   />
@@ -814,6 +835,7 @@ function MessageContent({
   onSendMessage,
   onOpenCloseModal,
   onOpenCloseCopyModal,
+  onCopyTrader,
   isDismissed,
   messageId,
 }: {
@@ -824,6 +846,7 @@ function MessageContent({
   onSendMessage?: (msg: string) => void;
   onOpenCloseModal?: (data: CloseModalData) => void;
   onOpenCloseCopyModal?: (data: CloseCopyModalData) => void;
+  onCopyTrader?: (trader: LeaderboardEntry) => void;
   isDismissed?: boolean;
   messageId?: string;
 }) {
@@ -918,6 +941,7 @@ function MessageContent({
               onSendMessage={onSendMessage}
               onOpenCloseModal={onOpenCloseModal}
               onOpenCloseCopyModal={onOpenCloseCopyModal}
+              onCopyTrader={onCopyTrader}
               isDismissed={isDismissed}
               cardIndex={g.tools[0].idx}
               messageId={messageId}
@@ -1012,7 +1036,7 @@ function SimpleMarkdown({ text }: { text: string }) {
 
 // ─── Tool Result Rendering ───────────────────────────────────────
 
-function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, onOpenCloseModal, onOpenCloseCopyModal, isDismissed, cardIndex, messageId, descriptionText, beforeText }: { part: ToolMessagePart; realtimePrices?: Record<string, number>; closedSymbols?: Set<string>; onSendMessage?: (msg: string) => void; onOpenCloseModal?: (data: CloseModalData) => void; onOpenCloseCopyModal?: (data: CloseCopyModalData) => void; isDismissed?: boolean; cardIndex?: number; messageId?: string; descriptionText?: string; beforeText?: string }) {
+function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, onOpenCloseModal, onOpenCloseCopyModal, onCopyTrader, isDismissed, cardIndex, messageId, descriptionText, beforeText }: { part: ToolMessagePart; realtimePrices?: Record<string, number>; closedSymbols?: Set<string>; onSendMessage?: (msg: string) => void; onOpenCloseModal?: (data: CloseModalData) => void; onOpenCloseCopyModal?: (data: CloseCopyModalData) => void; onCopyTrader?: (trader: LeaderboardEntry) => void; isDismissed?: boolean; cardIndex?: number; messageId?: string; descriptionText?: string; beforeText?: string }) {
   const toolName = part.toolName || part.type?.replace("tool-", "");
   const state = part.state;
   const result = part.output;
@@ -1256,7 +1280,7 @@ function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, onOpen
   // share one CardCtx, so onSendMessage drives inline CTAs (rows of
   // [Analyze]/[Copy]/[Close] etc.) and onOpenCloseCopyModal lets the
   // close-confirm card pop the shared CloseCopyPositionModal.
-  const copyCtx: CardCtx = { onSendMessage, onOpenCloseCopyModal };
+  const copyCtx: CardCtx = { onSendMessage, onOpenCloseCopyModal, onCopyTrader };
   if (toolName === "getLeaderboard") {
     return (
       <CollapsibleCard cardKey={cKey} label="Leaderboard" beforeText={beforeText} descriptionText={descriptionText}>

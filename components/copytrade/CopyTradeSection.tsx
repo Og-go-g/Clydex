@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useAuth } from "@/lib/auth/context";
 import { CopyTradingContent } from "./CopyTradingPanel";
 import { LeaderboardContent } from "./CompactLeaderboard";
@@ -10,11 +10,33 @@ import type { LeaderboardEntry } from "./CompactLeaderboard";
 
 type Tab = "leaderboard" | "copy" | "history";
 
+// ─── Module-level opener ────────────────────────────────────────
+//
+// Lets nested components anywhere in the tree (notably the chat-
+// mode Trader Profile / Suggest / Compare cards) open the
+// FollowTraderDialog with a specific trader without prop-drilling
+// through ChartPanel → CopyTradeSection. CopyTradeSection mounts
+// once per page; the global setter is set on mount, cleared on
+// unmount. Mirrors the same pattern used for openCloseModalFn.
+
+let openFollowFn: ((t: LeaderboardEntry) => void) | null = null;
+
+export function openFollowTraderDialog(t: LeaderboardEntry) {
+  openFollowFn?.(t);
+}
+
 export function CopyTradeSection() {
   const { isAuthenticated } = useAuth();
   const [activeTab, setActiveTab] = useState<Tab>("copy");
   const [copyTrader, setCopyTrader] = useState<LeaderboardEntry | null>(null);
   const refreshRef = useRef<(() => void) | null>(null);
+
+  // Register module-level opener so the chat-cards module can pop
+  // this dialog without needing a ref or prop chain.
+  useEffect(() => {
+    openFollowFn = (t) => setCopyTrader(t);
+    return () => { openFollowFn = null; };
+  }, []);
 
   const handleCopyTrader = useCallback((entry: LeaderboardEntry) => {
     setCopyTrader(entry);
