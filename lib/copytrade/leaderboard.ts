@@ -385,21 +385,40 @@ export async function getTraderProfile(input: string): Promise<TraderProfile | n
   const cached = readCache(profileCache, walletAddr);
   if (cached) return cached;
 
-  // Three heavy parts in parallel — getTraderTopTrades is itself
-  // parallel internally now (per-market recursive CTE). Total wall
-  // time = max of the three, not sum.
+  // Three heavy parts in parallel, each guarded by a JS-side timeout.
   //
-  // Use `Promise.allSettled` so that a high-activity trader (e.g. a
-  // top-leaderboard wallet with 35k+ trades across many markets,
-  // where the per-market CTE can saturate the pg pool and time out)
-  // still returns SOMETHING — the summary + whichever parts loaded.
-  // Pre-2026-05-16 a single failed part rejected the whole Promise.all
-  // and surfaced "Failed to fetch trader profile." for the busiest
-  // (= most interesting) traders.
+  // Without the timeout, a single high-activity wallet (e.g. the 67k
+  // trade × 25 market wallet seen on prod) can hold the per-market
+  // recursive CTE running for 60+ seconds, the fetch stream stays
+  // open, and the AI SDK's frontend reports "network error" because
+  // it gives up before the route handler returns.
+  //
+  // With the timeout: each part is granted 8 seconds. If it doesn't
+  // finish in time, JS treats it as rejected; allSettled below
+  // collects whatever did finish. The underlying pg query continues
+  // running server-side until it completes or pg kills it — that
+  // connection stays "leaked" until release, but the user-facing
+  // request returns immediately with partial data.
+  //
+  // 8s × 3 parallel = 8s wall time worst case (they run concurrently),
+  // well under any reasonable streamText timeout.
+  const HEAVY_TIMEOUT_MS = 8_000;
+  const withTimeout = <T>(p: Promise<T>, label: string): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`[copytrade] ${label} > ${HEAVY_TIMEOUT_MS}ms`)),
+        HEAVY_TIMEOUT_MS,
+      );
+      p.then(
+        (v) => { clearTimeout(timer); resolve(v); },
+        (e) => { clearTimeout(timer); reject(e); },
+      );
+    });
+
   const [topRes, breakdownRes, recentRes] = await Promise.allSettled([
-    getTraderTopTrades(walletAddr, 10),
-    getTraderMarketBreakdown(walletAddr),
-    getRecentTrades(walletAddr, 5),
+    withTimeout(getTraderTopTrades(walletAddr, 10), "getTraderTopTrades"),
+    withTimeout(getTraderMarketBreakdown(walletAddr), "getTraderMarketBreakdown"),
+    withTimeout(getRecentTrades(walletAddr, 5), "getRecentTrades"),
   ]);
 
   const topTrades = topRes.status === "fulfilled" ? topRes.value : [];
@@ -436,12 +455,25 @@ async function getTraderTopTrades(walletAddr: string, limit: number): Promise<Tr
 
   if (marketRows.length === 0) return [];
 
-  // Run the per-market recursive CTE in parallel — each query is
-  // independent and pg pool size (max=10) handles concurrency
-  // gracefully (excess queries queue at the pool, still much faster
-  // than sequential). For a 10-market trader this drops 20s → ~2s.
-  const perMarket = await Promise.all(
-    marketRows.map(async ({ marketId }) => {
+  // Run the per-market recursive CTE in parallel, but in CAPPED batches
+  // — not as one giant Promise.all over every market.
+  //
+  // Pool has max=10 connections. A wallet that trades all ~25 markets
+  // would otherwise fire 25 simultaneous recursive CTEs; with 10
+  // available slots, 15 of them stack-queue at the client pool and
+  // the slowest ones can hang for >30s (each CTE is itself O(N)
+  // over trades in that market — heavy on a 67k-trade wallet).
+  //
+  // Batch size 4 keeps pool utilization at ~40%, leaving room for
+  // the other two heavy queries (marketBreakdown, recentTrades)
+  // that run in parallel via getTraderProfile's allSettled, plus
+  // any concurrent unrelated chat session.
+  const BATCH = 4;
+  const perMarket: TraderTrade[][] = [];
+  for (let i = 0; i < marketRows.length; i += BATCH) {
+    const slice = marketRows.slice(i, i + BATCH);
+    const batchResults = await Promise.all(
+      slice.map(async ({ marketId }) => {
       const rows = await query<{
         tradeId: string; symbol: string; side: string; size: string;
         price: string; closedPnl: string; time: Date;
@@ -493,8 +525,10 @@ async function getTraderTopTrades(walletAddr: string, limit: number): Promise<Tr
         closedPnl: r.closedPnl,
         time: new Date(r.time).toISOString(),
       }));
-    }),
-  );
+      }),
+    );
+    perMarket.push(...batchResults);
+  }
 
   // Flatten + sort all trades across markets by |pnl| descending, take top N
   return perMarket
