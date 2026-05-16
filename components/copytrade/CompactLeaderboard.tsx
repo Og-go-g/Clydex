@@ -62,6 +62,11 @@ function fmtAddr(addr: string): string {
 export function LeaderboardContent({ onCopyTrader }: { onCopyTrader?: (entry: LeaderboardEntry) => void }) {
   const [period, setPeriod] = useState<Period>(7);
   const [data, setData] = useState<LeaderboardEntry[]>([]);
+  // MM-filter toggle. Default ON — this panel feeds the copy flow,
+  // and market-maker rows pollute the top without being tradeable.
+  // User can flip it off to see the raw leaderboard.
+  const [hideMM, setHideMM] = useState(true);
+  const [mmFiltered, setMmFiltered] = useState(0);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResult, setSearchResult] = useState<LeaderboardEntry | null>(null);
@@ -71,14 +76,16 @@ export function LeaderboardContent({ onCopyTrader }: { onCopyTrader?: (entry: Le
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/leaderboard?period=${periodToQuery(period)}&sort=pnl&limit=10`);
+      const includeMM = hideMM ? "" : "&includeMM=true";
+      const res = await fetch(`/api/leaderboard?period=${periodToQuery(period)}&sort=pnl&limit=10${includeMM}`);
       if (res.ok) {
         const body = await res.json();
         setData(body.data ?? []);
+        setMmFiltered(typeof body.mmFiltered === "number" ? body.mmFiltered : 0);
       }
     } catch { /* silent */ }
     finally { setLoading(false); }
-  }, [period]);
+  }, [period, hideMM]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -200,25 +207,47 @@ export function LeaderboardContent({ onCopyTrader }: { onCopyTrader?: (entry: Le
         )}
       </div>
 
-      {/* Period filter */}
+      {/* Period filter + MM toggle */}
       <div className="flex items-center justify-between px-3 py-1.5">
-        <span className="text-[10px] text-muted">
-          {data.length > 0 ? `${data.length} traders` : ""}
-        </span>
-        <div className="flex items-center gap-0.5">
-          {PERIOD_PRESETS.map((preset) => (
-            <button
-              key={preset.label}
-              onClick={() => setPeriod(preset.value)}
-              className={`px-1.5 py-0.5 text-[10px] font-medium rounded transition-colors ${
-                period === preset.value
-                  ? "text-emerald-400 bg-emerald-400/10"
-                  : "text-muted hover:text-foreground"
-              }`}
+        <div className="flex items-center gap-2 text-[10px] text-muted">
+          {data.length > 0 && <span>{data.length} traders</span>}
+          {hideMM && mmFiltered > 0 && (
+            <span
+              className="text-[#555]"
+              title={`${mmFiltered} market-maker / bot account(s) hidden — heuristics: huge volume/PnL ratio, >5 000 trades in the window, or >95% winrate over >500 trades. Click "All" to see them.`}
             >
-              {preset.label}
-            </button>
-          ))}
+              · {mmFiltered} MM-like hidden
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          {/* Hide MM toggle. Default ON since this panel feeds copy. */}
+          <button
+            onClick={() => setHideMM((v) => !v)}
+            className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+              hideMM
+                ? "bg-emerald-400/10 text-emerald-400"
+                : "border border-[#262626] bg-[#141414] text-muted hover:text-foreground"
+            }`}
+            title={hideMM ? "Hiding market-maker / bot accounts" : "Showing all accounts including MMs"}
+          >
+            {hideMM ? "No MMs" : "All"}
+          </button>
+          <div className="flex items-center gap-0.5">
+            {PERIOD_PRESETS.map((preset) => (
+              <button
+                key={preset.label}
+                onClick={() => setPeriod(preset.value)}
+                className={`px-1.5 py-0.5 text-[10px] font-medium rounded transition-colors ${
+                  period === preset.value
+                    ? "text-emerald-400 bg-emerald-400/10"
+                    : "text-muted hover:text-foreground"
+                }`}
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 

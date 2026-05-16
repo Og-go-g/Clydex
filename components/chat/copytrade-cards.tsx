@@ -236,6 +236,8 @@ export function LeaderboardCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
         ? "all"
         : "all";
   const sort = String(data.sort ?? "pnl");
+  const mmFiltered = typeof data.mmFiltered === "number" ? data.mmFiltered : 0;
+  const mmIncluded = data.mmIncluded === true;
   if (traders.length === 0) {
     return (
       <CardShell title="Leaderboard">
@@ -253,6 +255,21 @@ export function LeaderboardCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
         </span>
       }
     >
+      {/* MM transparency strip — shows when at least one MM-like row
+          was hidden. Click hint sends a chat message that re-runs
+          the query with includeMM=true. */}
+      {mmFiltered > 0 && !mmIncluded && (
+        <div className="border-b border-[#1f1f1f] bg-[#0a0a0a] px-3 py-1.5 text-[10px] text-[#888]">
+          {mmFiltered} market-maker / bot account{mmFiltered === 1 ? "" : "s"} hidden ·{" "}
+          <button
+            type="button"
+            onClick={() => ctx?.onSendMessage?.("Show all top traders including market makers")}
+            className="text-emerald-400 underline hover:text-emerald-300"
+          >
+            include them
+          </button>
+        </div>
+      )}
       <div className="overflow-x-auto">
         <table className="w-full text-xs">
           <thead>
@@ -1008,6 +1025,8 @@ export function SuggestTradersCard({ data, ctx }: { data: Json; ctx?: CardCtx })
 interface MarketTopData {
   market: string;
   period: number | "all";
+  mmFiltered?: number;
+  mmIncluded?: boolean;
   traders: Array<{
     rank: number;
     wallet: string;
@@ -1021,12 +1040,26 @@ interface MarketTopData {
 
 export function MarketTopTradersCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
   const d = data as unknown as MarketTopData;
+  const mmFiltered = d.mmFiltered ?? 0;
+  const mmIncluded = d.mmIncluded === true;
   return (
     <CardShell
       title={`Top on ${d.market}`}
       badge={{ count: d.traders.length }}
       rightHeader={<span>{periodLabel(d.period)}</span>}
     >
+      {mmFiltered > 0 && !mmIncluded && (
+        <div className="border-b border-[#1f1f1f] bg-[#0a0a0a] px-3 py-1.5 text-[10px] text-[#888]">
+          {mmFiltered} market-maker / bot account{mmFiltered === 1 ? "" : "s"} hidden ·{" "}
+          <button
+            type="button"
+            onClick={() => ctx?.onSendMessage?.(`Show all top ${d.market} traders including market makers`)}
+            className="text-emerald-400 underline hover:text-emerald-300"
+          >
+            include them
+          </button>
+        </div>
+      )}
       <div className="overflow-x-auto">
         <table className="w-full text-xs">
           <thead>

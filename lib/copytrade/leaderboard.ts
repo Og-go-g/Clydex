@@ -81,6 +81,30 @@ export function parsePeriod(raw: string | null | undefined): Period | null {
   return n;
 }
 
+// ─── Market-maker / bot heuristic ───────────────────────────────
+//
+// Single source of truth — same predicate as `suggestTrader`'s
+// curating pass. Exported so getLeaderboard / getTopTradersByMarket
+// can use it too. Three independent signals; any one triggers.
+//
+// - `volume / |totalPnl| > 50_000` — tiny edge per dollar turned,
+//   classic MM economics.
+// - `totalTrades > 5_000` — bot-level frequency for the window
+//   the row covers (already period-scoped at this point).
+// - `winRate > 95% && totalTrades > 500` — unrealistic for a
+//   discretionary trader, typical of MM scalpers.
+//
+// No perfect signal — a high-frequency quant might trip the
+// volume/PnL rule legitimately — so always show the filtered count
+// in the UI so the user knows we hid something.
+export function isMMLike(t: Pick<LeaderboardEntry, "totalPnl" | "totalTrades" | "totalVolume" | "winRate">): boolean {
+  const volPnlRatio = t.totalVolume > 0 ? t.totalVolume / Math.abs(t.totalPnl || 1) : 0;
+  if (volPnlRatio > 50_000) return true;
+  if (t.totalTrades > 5_000) return true;
+  if (t.winRate > 95 && t.totalTrades > 500) return true;
+  return false;
+}
+
 // ─── In-memory caches (avoids heavy query on every request) ─────
 
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes

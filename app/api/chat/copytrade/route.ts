@@ -4,7 +4,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { z } from "zod";
 import { getAuthAddress } from "@/lib/auth/session";
 import { RATE_LIMITS, safeRateLimit } from "@/lib/ratelimit";
-import { getLeaderboard, getTraderProfile, getTopTradersByMarket, type Period } from "@/lib/copytrade/leaderboard";
+import { getLeaderboard, getTraderProfile, getTopTradersByMarket, isMMLike, type Period } from "@/lib/copytrade/leaderboard";
 import { isSessionActive } from "@/lib/copy/session-activator";
 import {
   getSubscriptions,
@@ -210,6 +210,33 @@ Allocation / leverage:
 You have up to 5 tool calls per turn. Chain freely.
 
 ═══════════════════════════════════════════════════════
+ MARKET-MAKER FILTER (on by default)
+═══════════════════════════════════════════════════════
+
+getLeaderboard, findTopTraderByMarket and the public
+/api/leaderboard endpoint all EXCLUDE market-maker / bot accounts
+by default. The heuristic flags a row as MM-like when any of:
+  - volume / |totalPnl| > 50 000   (tiny edge per dollar turned)
+  - totalTrades > 5 000             (bot-level frequency)
+  - winRate > 95% with > 500 trades (unrealistic for humans)
+
+Result includes \`mmFiltered\` (count hidden) and \`mmIncluded\`
+(opt-out flag). The cards render a "N MM-like accounts hidden ·
+include them" link automatically — DO NOT recite the count
+yourself unless the user asks "why aren't there more rows" or
+similar.
+
+Pass \`includeMM=true\` ONLY when the user explicitly asks:
+  - "show all top traders including market makers"
+  - "show me the raw leaderboard"
+  - "включая MM" / "со всеми скальперами"
+  - "the full board" / "all of them"
+
+NEVER pass includeMM=true on routine "top traders / лучшие
+трейдеры" requests — those go through copy-trading and MMs are
+noise.
+
+═══════════════════════════════════════════════════════
  PERIOD CHAINING (critical for consistent numbers)
 ═══════════════════════════════════════════════════════
 
@@ -383,22 +410,33 @@ export async function POST(req: Request) {
       // ─── Leaderboard ─────────────────────────────────
       getLeaderboard: tool({
         description:
-          "Get the leaderboard of top traders on 01 Exchange. Renders as a leaderboard card with rank/PnL/winrate/volume and a [Copy] button per row. Use for: 'top traders', 'leaderboard', 'best performers', 'rankings'. **Pass `periodDays` as the exact number of days the user asked for** (e.g. 'last 3 days' → 3, 'last 10 days' → 10, 'this week' → 7, 'this month' → 30). Omit it for all-time.",
+          "Get the leaderboard of top traders on 01 Exchange. By DEFAULT excludes market-maker / bot accounts (`includeMM=false`) since this view feeds the copy-trading flow — those rows aren't tradeable signal. Pass `includeMM=true` only when the user explicitly asks ('show all top traders including market makers / show the full board / включая MM'). **Pass `periodDays` as the exact day count** ('last 3 days' → 3, 'this week' → 7, 'this month' → 30). Omit for all-time.",
         inputSchema: zodSchema(
           z.object({
             periodDays: z.number().int().min(1).max(365).optional().describe("Exact day window. Omit for all-time."),
             sort: z.enum(["pnl", "winrate", "volume", "trades"]).optional().describe("Sort key (default: pnl)"),
             limit: z.number().min(1).max(50).optional().describe("Number of rows (default: 10)"),
+            includeMM: z.boolean().optional().describe("Default false — include market-maker / bot accounts only when user explicitly asks."),
           }),
         ),
-        execute: async ({ periodDays: pd, sort, limit }) => {
+        execute: async ({ periodDays: pd, sort, limit, includeMM }) => {
           try {
-            const p: Period = typeof pd === "number" ? pd : 7; // default 7d if not specified — "fresh data" preference
+            const p: Period = typeof pd === "number" ? pd : 7; // default 7d for fresh data
             const s = sort ?? "pnl";
-            const data = await getLeaderboard(p, s, limit ?? 10);
+            const lim = limit ?? 10;
+            const wantedExclude = !includeMM;
+            // Over-fetch so we still have `lim` rows after the MM
+            // post-filter. 4× cushion handles the common case where
+            // MMs occupy ~25-50% of the raw top-N for a window.
+            const rawLimit = wantedExclude ? Math.min(lim * 4, 100) : lim;
+            const raw = await getLeaderboard(p, s, rawLimit);
+            const data = wantedExclude ? raw.filter((t) => !isMMLike(t)).slice(0, lim) : raw.slice(0, lim);
+            const mmFiltered = wantedExclude ? raw.length - data.length : 0;
             return sanitize({
               period: p,
               sort: s,
+              mmFiltered,
+              mmIncluded: includeMM === true,
               traders: data.map((t, i) => ({
                 rank: i + 1,
                 wallet: fmtAddr(t.walletAddr),
@@ -414,7 +452,7 @@ export async function POST(req: Request) {
               nextSteps: [
                 "Analyze the top trader",
                 "Compare the top 3",
-                "Show my active copies",
+                mmFiltered > 0 ? "Show all top traders including market makers" : "Show my active copies",
               ],
             });
           } catch (err) {
@@ -904,22 +942,44 @@ export async function POST(req: Request) {
       // ─── Find Top Trader by Market ────────────────────
       findTopTraderByMarket: tool({
         description:
-          "Find the best traders for ONE symbol (BTC, ETH, SOL, etc). Symbol auto-normalises to e.g. 'BTCUSD'. Use for 'top BTC trader', 'best on ETH'. **Pass `periodDays` as the user's exact window** (3 → last 3 days, 10 → last 10 days). Omit for all-time. Default 7 if not specified.",
+          "Find the best traders for ONE symbol (BTC, ETH, SOL, etc). Symbol auto-normalises to e.g. 'BTCUSD'. Default behaviour EXCLUDES market-maker / bot accounts so the result feeds the copy flow cleanly — pass `includeMM=true` only when the user explicitly asks. Pass `periodDays` (3, 10, 30, …) for the exact window; omit for all-time. Default 7.",
         inputSchema: zodSchema(
           z.object({
             symbol: z.string().describe("Symbol or base asset (BTC, ETH, SOL, ...)"),
             periodDays: z.number().int().min(1).max(365).optional().describe("Exact day window. Omit for all-time."),
             limit: z.number().min(1).max(20).optional().describe("Result count (default: 5)"),
+            includeMM: z.boolean().optional().describe("Default false — include market-maker / bot accounts only when user asks."),
           }),
         ),
-        execute: async ({ symbol, periodDays: pd, limit }) => {
+        execute: async ({ symbol, periodDays: pd, limit, includeMM }) => {
           try {
             // Default 7 if not specified — fresh-data preference for market top.
             const p: Period = typeof pd === "number" ? pd : 7;
-            const data = await getTopTradersByMarket(symbol, p, limit ?? 5);
+            const lim = limit ?? 5;
+            const wantedExclude = !includeMM;
+            // Over-fetch 4× so MM post-filter leaves enough rows.
+            const rawLimit = wantedExclude ? Math.min(lim * 4, 50) : lim;
+            const raw = await getTopTradersByMarket(symbol, p, rawLimit);
+            // Adapt MarketTrader shape → isMMLike's expected scalars.
+            const data = wantedExclude
+              ? raw
+                  .filter(
+                    (t) =>
+                      !isMMLike({
+                        totalPnl: t.pnl,
+                        totalTrades: t.trades,
+                        totalVolume: t.volume,
+                        winRate: t.winRate,
+                      }),
+                  )
+                  .slice(0, lim)
+              : raw.slice(0, lim);
+            const mmFiltered = wantedExclude ? raw.length - data.length : 0;
             if (data.length === 0) {
               return {
-                error: `No traders found for ${symbol.toUpperCase()} over ${p} day(s). Market may have low activity.`,
+                error: `No traders found for ${symbol.toUpperCase()} over ${p} day(s). Market may have low activity.${
+                  mmFiltered > 0 ? ` (${mmFiltered} MM-like accounts excluded — pass includeMM=true to see them.)` : ""
+                }`,
               };
             }
             const market = symbol.toUpperCase().endsWith("USD")
@@ -928,6 +988,8 @@ export async function POST(req: Request) {
             return sanitize({
               market,
               period: p,
+              mmFiltered,
+              mmIncluded: includeMM === true,
               traders: data.map((t, i) => ({
                 rank: i + 1,
                 wallet: fmtAddr(t.walletAddr),
@@ -940,7 +1002,9 @@ export async function POST(req: Request) {
               nextSteps: [
                 `Analyze the top ${market} trader`,
                 `Copy the top ${market} trader`,
-                `Compare the top ${Math.min(3, data.length)} on ${market}`,
+                mmFiltered > 0
+                  ? `Show all top ${market} traders including market makers`
+                  : `Compare the top ${Math.min(3, data.length)} on ${market}`,
               ],
             });
           } catch (err) {
