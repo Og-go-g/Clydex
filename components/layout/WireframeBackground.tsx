@@ -89,6 +89,24 @@ export function WireframeBackground() {
       // Opacity multiplier — controls overall brightness
       const brightness = 0.5;
 
+      // Bug-stroke guard. Cells with very small `dz` near the camera
+      // project at scale = fov/dz ≈ hundreds, sending `p.x * scale`
+      // to ±tens-of-thousands of pixels off-screen. When such a cell
+      // shares an edge with a less-extreme neighbour, the connecting
+      // line stretches across thousands of pixels — visible as a
+      // single long stray stroke across the grid.
+      //
+      // The filter: drop the line if its endpoint is more than
+      // ~5 viewports off-screen. Legitimate edge bridges between
+      // wave-peak and wave-trough cells can have endpoints a few
+      // viewports off (wave amplitude × moderate scale) and SHOULD
+      // render — they form the smooth grid mesh at the boundary.
+      // Projection blow-ups end at tens of thousands of pixels — well
+      // past this threshold and unambiguously bug-pattern.
+      const MAX_OFF = 5 * Math.max(W, H);
+      const farOff = (sx: number, sy: number): boolean =>
+        sx < -MAX_OFF || sx > W + MAX_OFF || sy < -MAX_OFF || sy > H + MAX_OFF;
+
       for (let r = gridRows - 1; r >= 0; r--) {
         for (let c = 0; c < gridCols; c++) {
           const p = pts[r][c];
@@ -102,14 +120,18 @@ export function WireframeBackground() {
           const gg = Math.floor(80 + heightNorm * 105);
           const bb = Math.floor(55 + heightNorm * 40);
 
-          // Horizontal lines
+          // Horizontal lines. Cull only when s2 is dramatically
+          // off-screen (bug-stroke signature). Lines whose endpoint
+          // is a few viewports off due to wave-amplitude differences
+          // still draw — they form legitimate bridges that read as
+          // smooth grid continuation at the edges.
           if (c < gridCols - 1) {
             const p2 = pts[r][c + 1];
             const s2 = project(p2);
             const h2 = Math.max(0, Math.min(1, (p2.y - camY + 150) / 300));
             const avgH = (heightNorm + h2) / 2;
             const a = depthFade * (0.07 + avgH * 0.28) * brightness;
-            if (a > 0.005 && s2.sx > -100 && s2.sx < W + 100) {
+            if (a > 0.005 && !farOff(s2.sx, s2.sy)) {
               ctx!.beginPath();
               ctx!.moveTo(s.sx, s.sy);
               ctx!.lineTo(s2.sx, s2.sy);
@@ -119,14 +141,14 @@ export function WireframeBackground() {
             }
           }
 
-          // Vertical lines
+          // Vertical lines. Same extended-bounds guard.
           if (r < gridRows - 1) {
             const p2 = pts[r + 1][c];
             const s2 = project(p2);
             const h2 = Math.max(0, Math.min(1, (p2.y - camY + 150) / 300));
             const avgH = (heightNorm + h2) / 2;
             const a = depthFade * (0.05 + avgH * 0.22) * brightness;
-            if (a > 0.005 && s2.sy > -100 && s2.sy < H + 100) {
+            if (a > 0.005 && !farOff(s2.sx, s2.sy)) {
               ctx!.beginPath();
               ctx!.moveTo(s.sx, s.sy);
               ctx!.lineTo(s2.sx, s2.sy);
