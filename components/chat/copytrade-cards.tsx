@@ -645,45 +645,104 @@ export function CopyStatusCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
   );
 }
 
-// ─── 4. FollowSuccessCard ───────────────────────────────────────
+// ─── 4. FollowConfirmCard ───────────────────────────────────────
+//
+// Renders the AI's `followTrader` PREVIEW. No subscription is created
+// at this point — the user must click "Open Copy Dialog" to land in
+// FollowTraderDialog (right panel) and confirm allocation / leverage /
+// max-pos / SL there. This deliberately mirrors the close-copy
+// pattern so every state-changing action funnels through the proper
+// UX, never through a chat tool call.
 
-export function FollowSuccessCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
-  const leader = String(data.leader ?? "");
-  const alloc = Number(data.allocationUsdc);
-  const lev = Number(data.leverageMult);
+interface FollowConfirmData {
+  preview: true;
+  wallet: string;
+  fullAddress: string;
+  sessionActive?: boolean;
+  totalPnl?: number;
+  winRate?: number;
+  totalTrades?: number;
+  liquidations?: number;
+  totalVolume?: number;
+  tradingPnl?: number;
+  fundingPnl?: number;
+  avgPnlPerTrade?: number;
+  wins?: number;
+  losses?: number;
+}
+
+export function FollowConfirmCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
+  const d = data as unknown as FollowConfirmData;
+  const handleOpen = () => {
+    ctx?.onCopyTrader?.(
+      toLeaderboardEntry({
+        walletAddr: d.fullAddress,
+        totalPnl: d.totalPnl,
+        tradingPnl: d.tradingPnl,
+        fundingPnl: d.fundingPnl,
+        totalTrades: d.totalTrades,
+        wins: d.wins,
+        losses: d.losses,
+        winRate: d.winRate,
+        avgPnlPerTrade: d.avgPnlPerTrade,
+        liquidations: d.liquidations,
+        totalVolume: d.totalVolume,
+      }),
+    );
+  };
   return (
-    <CardShell title="Now Following">
-      <div className="space-y-3 p-4">
-        <div className="flex items-center justify-center gap-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-3">
-          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500/15">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#34d399" strokeWidth="3">
-              <path d="M20 6L9 17l-5-5" />
-            </svg>
+    <CardShell title="Ready to Copy">
+      <div className="space-y-3 p-3">
+        <div className="rounded-lg border border-[#1f1f1f] bg-[#141414] p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="font-mono text-sm font-semibold text-white">{d.wallet}</span>
+            {d.liquidations != null && (
+              <span
+                className={`rounded px-1.5 py-0.5 text-[9px] font-semibold ${
+                  d.liquidations === 0 ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"
+                }`}
+              >
+                {d.liquidations} liq
+              </span>
+            )}
           </div>
-          <div className="flex flex-col">
-            <span className="font-mono text-sm font-semibold text-white">{leader}</span>
-            <span className="text-[10px] text-gray-400">
-              ${alloc.toFixed(0)} allocation · {lev}x leverage
-            </span>
+          <div className="grid grid-cols-3 gap-2 text-[11px]">
+            <div className="flex flex-col">
+              <span className="text-[9px] uppercase text-[#666]">Total PnL</span>
+              <span className={`font-mono font-semibold ${pnlColor(d.totalPnl)}`}>{fmtPnl(d.totalPnl)}</span>
+            </div>
+            <div className="flex flex-col">
+              <span className="text-[9px] uppercase text-[#666]">Win rate</span>
+              <span className={`font-mono ${winrateColor(d.winRate)}`}>
+                {d.winRate != null ? `${d.winRate.toFixed(0)}%` : "—"}
+              </span>
+            </div>
+            <div className="flex flex-col">
+              <span className="text-[9px] uppercase text-[#666]">Trades</span>
+              <span className="font-mono text-gray-300">{d.totalTrades ?? "—"}</span>
+            </div>
           </div>
         </div>
-        <p className="text-center text-[11px] text-gray-500">
-          The copy engine mirrors trades within ~15s. Cancel anytime from the Copy Trading panel.
+
+        {d.sessionActive === false && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-300">
+            Copy trading session is not active yet. Click below — the dialog
+            will walk you through enabling it before subscribing.
+          </div>
+        )}
+
+        <p className="text-center text-[11px] text-[#888]">
+          No subscription is created until you confirm in the dialog on
+          the right. You pick allocation, leverage, max position and
+          stop-loss there.
         </p>
-        <div className="flex gap-2">
-          <button
-            onClick={() => ctx?.onSendMessage?.("Show this trader's open positions")}
-            className="flex-1 rounded-lg border border-[#262626] bg-[#141414] px-3 py-2 text-xs font-medium text-gray-300 hover:bg-[#1a1a1a]"
-          >
-            View Their Positions
-          </button>
-          <button
-            onClick={() => ctx?.onSendMessage?.("Show my active copies")}
-            className="flex-1 rounded-lg border border-[#262626] bg-[#141414] px-3 py-2 text-xs font-medium text-gray-300 hover:bg-[#1a1a1a]"
-          >
-            My Copies
-          </button>
-        </div>
+
+        <button
+          onClick={handleOpen}
+          className="w-full rounded-lg bg-gradient-to-r from-emerald-500/80 to-emerald-400/80 px-3 py-2.5 text-sm font-semibold text-black transition-opacity hover:opacity-90"
+        >
+          Open Copy Dialog
+        </button>
       </div>
     </CardShell>
   );

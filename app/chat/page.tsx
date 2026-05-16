@@ -31,7 +31,7 @@ import {
   LeaderboardCard,
   TraderProfileCard,
   CopyStatusCard,
-  FollowSuccessCard,
+  FollowConfirmCard,
   UnfollowResultCard,
   TraderPositionsCard,
   SuggestTradersCard,
@@ -1059,7 +1059,7 @@ function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, onOpen
           : toolName === "getLeaderboard" ? "Loading leaderboard..."
           : toolName === "getTraderProfile" ? "Analyzing trader..."
           : toolName === "getCopyStatus" ? "Loading copy status..."
-          : toolName === "followTrader" ? "Subscribing..."
+          : toolName === "followTrader" ? "Preparing copy preview..."
           : toolName === "unfollowTrader" ? "Unsubscribing..."
           : toolName === "getTraderPositions" ? "Fetching live positions..."
           : toolName === "suggestTrader" ? "Finding matches..."
@@ -1305,8 +1305,8 @@ function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, onOpen
   }
   if (toolName === "followTrader") {
     return (
-      <CollapsibleCard cardKey={cKey} label={`Followed ${result.leader as string ?? ""}`} beforeText={beforeText} descriptionText={descriptionText}>
-        <FollowSuccessCard data={result} ctx={copyCtx} />
+      <CollapsibleCard cardKey={cKey} label={`Copy — ${result.wallet as string ?? ""}`} beforeText={beforeText} descriptionText={descriptionText}>
+        <FollowConfirmCard data={result} ctx={copyCtx} />
       </CollapsibleCard>
     );
   }

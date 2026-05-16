@@ -8,7 +8,6 @@ import { getLeaderboard, getTraderProfile, getTopTradersByMarket, type Period } 
 import { isSessionActive } from "@/lib/copy/session-activator";
 import {
   getSubscriptions,
-  createSubscription,
   deleteSubscription,
   getRecentCopyTrades,
   getCopyStats,
@@ -92,8 +91,8 @@ USER STATE
 - getCopyHistory — paginated past copy trades (filter by leader / status).
 
 ACTIONS
-- followTrader — create a copy subscription (requires active session).
-- unfollowTrader — drop a subscription.
+- followTrader — PREPARE a copy-subscription confirm card. Does NOT write to the database. The user lands in the FollowTraderDialog (right side panel) and confirms allocation / leverage / max-pos / stop-loss there. NEVER claim you followed someone.
+- unfollowTrader — drop an existing subscription (this one DOES write — only call when user explicitly asks to stop copying a leader they currently follow).
 - closeCopyPosition — show a close-confirm card for one copy-tracked position. (Tool returns preview data only; the user clicks the modal's Close button to actually submit.)
 
 ═══════════════════════════════════════════════════════
@@ -136,7 +135,7 @@ If the user's request is ambiguous, ASK ONCE before calling tools:
 - "show me the best" → "Best by what — PnL, win rate, or volume?"
 - "copy the top trader" (no market) → "Top by overall PnL, or top on a specific market like BTC/ETH/SOL?"
 - "show top trader" (no period) → default to 7d, mention it: "Top trader this week is..." (don't ask, just default)
-- "follow #7915" (no allocation) → call followTrader with $100 / 1x defaults AND mention it: "Want to follow #7915 at $100 / 1x? Or change the allocation?"
+- "follow #7915" / "copy top BTC trader" → call followTrader (preview only) for that wallet — DO NOT ask for allocation; the user picks allocation / leverage / max-pos / stop-loss inside the dialog the card opens. Your prose: "Here's the preview — open the dialog on the right to confirm allocation and start copying."
 
 Don't over-ask. If a sensible default exists, use it and surface it.
 
@@ -194,7 +193,7 @@ Allocation / leverage:
   getLeaderboard(periodDays=3) → 3d leaderboard. Subsequent analyze chains pass periodDays=3.
 
 "copy top trader on BTC":
-  findTopTraderByMarket(BTCUSD) → call followTrader(rank1, $100, 1x) directly (engine refuses if session is off — surface that error verbatim)
+  findTopTraderByMarket(BTCUSD) → take rank 1 → followTrader(rank1) — returns a PREVIEW card with the trader's stats and an "Open Copy Dialog" button. Your prose: "Top BTC trader is #X. Open the dialog on the right to set allocation and start copying." NEVER claim you subscribed — the subscription only happens after the user confirms in the dialog.
 
 "compare top 3 ETH traders":
   findTopTraderByMarket(ETHUSD, limit=3) → compareTraders(addrs, periodDays=7)
@@ -260,11 +259,13 @@ Recommended allocation by risk:
  SESSION & FOLLOW FLOW
 ═══════════════════════════════════════════════════════
 
-Before followTrader works, the user needs an ACTIVE copy-trading session (separate from wallet auth — it's an ephemeral keypair signed by the wallet for 30 days).
+Copy trading needs an ACTIVE session (ephemeral keypair signed by the wallet for 30 days). The FollowTraderDialog handles enabling it inline when the user opens the card's dialog.
 
-If followTrader returns "session not active" → tell user clearly: "Your copy trading session isn't active. Click 'Enable Copy Trading' in the Copy Trading panel on the right." Don't retry.
+followTrader ALWAYS returns a PREVIEW — the card opens the dialog on the right. The user picks allocation / leverage / max-pos / stop-loss in that dialog and confirms. NEVER claim you subscribed someone — the subscription happens only after the user confirms in the dialog, outside your control.
 
-If session active + followTrader succeeds → say: "Now copying #XXXX at $YYY / Zx. The engine mirrors their trades within ~15s of them placing one."
+Output prose template after followTrader: "Here's the copy preview for #XXXX — open the dialog on the right to set allocation and start copying." If sessionActive=false in the result, add: "Your copy session isn't active yet, but the dialog will walk you through enabling it first."
+
+If followTrader returns "already following" → tell the user they can edit allocation/leverage in the Copy Trading panel on the right. DON'T retry.
 
 ═══════════════════════════════════════════════════════
  CLOSE FLOW (copy positions)
@@ -540,56 +541,68 @@ export async function POST(req: Request) {
       // ─── Follow Trader ────────────────────────────────
       followTrader: tool({
         description:
-          "Create a copy subscription. Requires an active copy trading session. Renders a success card with the new subscription summary. Defaults: $100 allocation, 1x leverage.",
+          "PREPARE a copy-subscription confirmation card for a trader. NEVER writes to the database — only returns preview data. The card opens the FollowTraderDialog in the right side panel, where the user picks allocation / leverage / max-position / stop-loss and confirms by clicking the dialog's button. NEVER claim you followed someone — you cannot. Always say 'review the dialog and confirm to start copying'.",
         inputSchema: zodSchema(
           z.object({
             leaderAddr: z.string().describe("Trader address (wallet or account:ID)"),
-            allocationUsdc: z.number().min(10).describe("USDC allocation, min $10"),
-            leverageMult: z.number().min(1).max(5).optional().describe("Leverage multiplier 1-5 (default 1)"),
           }),
         ),
-        execute: async ({ leaderAddr, allocationUsdc, leverageMult }) => {
+        execute: async ({ leaderAddr }) => {
           try {
-            const session = await isSessionActive(walletAddress);
-            if (!session.active) {
-              return {
-                error: "Copy trading session is not active. Click 'Enable Copy Trading' in the Copy Trading panel on the right, then try again.",
-              };
-            }
             if (leaderAddr === walletAddress) {
               return { error: "You cannot follow yourself." };
             }
+            // Already-subscribed short-circuit so the AI can tell
+            // the user to edit settings in the panel instead of
+            // popping a second confirm dialog that would duplicate.
             const existing = (await getSubscriptions(walletAddress)).find(
               (s) => s.leaderAddr === leaderAddr,
             );
             if (existing) {
               return {
-                error: `Already following ${fmtAddr(leaderAddr)}. Edit the subscription from the Copy Trading panel.`,
+                error: `Already following ${fmtAddr(leaderAddr)}. Edit the subscription from the Copy Trading panel on the right.`,
               };
             }
-            const id = await createSubscription({
-              followerAddr: walletAddress,
-              leaderAddr,
-              allocationUsdc,
-              leverageMult: leverageMult ?? 1,
-            });
+            // Session check: tool returns a non-blocking warning so
+            // the UI can prompt for activation inline. The dialog
+            // itself also checks session on open — keeping both
+            // paths defensive.
+            const session = await isSessionActive(walletAddress);
+            // Pull lightweight summary so the confirm card shows
+            // PnL / winrate / trade-count for the trader before the
+            // user opens the full dialog. Failure → card still
+            // renders with just the address.
+            let summary = null;
+            try {
+              summary = await getTraderProfile(leaderAddr, "all");
+            } catch {
+              // ignore — card falls back to bare wallet display
+            }
             return sanitize({
-              success: true,
-              subscriptionId: id,
-              leader: fmtAddr(leaderAddr),
-              fullLeaderAddr: leaderAddr,
-              allocationUsdc,
-              leverageMult: leverageMult ?? 1,
+              preview: true,
+              wallet: fmtAddr(leaderAddr),
+              fullAddress: summary?.walletAddr ?? leaderAddr,
+              sessionActive: session.active,
+              totalPnl: summary?.totalPnl ?? 0,
+              winRate: summary?.winRate ?? 0,
+              totalTrades: summary?.totalTrades ?? 0,
+              liquidations: summary?.liquidations ?? 0,
+              totalVolume: summary?.totalVolume ?? 0,
+              tradingPnl: summary?.tradingPnl ?? 0,
+              fundingPnl: summary?.fundingPnl ?? 0,
+              avgPnlPerTrade: summary?.avgPnlPerTrade ?? 0,
+              wins: summary?.wins ?? 0,
+              losses: summary?.losses ?? 0,
               nextSteps: [
                 "Show this trader's open positions",
-                "Show my active copies",
+                "Show this trader's full profile",
                 "Find another trader to copy",
               ],
             });
           } catch (err) {
-            console.error("[copytrade] followTrader failed:", err);
+            console.error("[copytrade] followTrader preview failed:", err);
             return {
-              error: `Failed to follow trader: ${err instanceof Error ? err.message : "unknown error"}`,
+              error: `Failed to prepare follow card: ${err instanceof Error ? err.message : "unknown error"}`,
             };
           }
         },
