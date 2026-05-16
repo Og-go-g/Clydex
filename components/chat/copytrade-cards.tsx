@@ -148,12 +148,17 @@ function CardShell({
 }) {
   return (
     <div className="my-2 w-full max-w-3xl overflow-hidden rounded-xl border border-[#262626] bg-[#0f0f0f]">
-      <div className="flex items-center justify-between border-b border-[#262626] px-4 py-2">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-semibold text-white">{title}</span>
+      {/* `pr-10` reserves space for CollapsibleCard's chevron at
+          (absolute top-2 right-2) — same pattern Trade-mode cards
+          use (see app/chat/page.tsx — pr-10 on Markets / Orderbook
+          / Funding headers). Without it, rightHeader text slides
+          under the chevron when the card is expanded. */}
+      <div className="flex items-center justify-between border-b border-[#262626] px-4 pr-10 py-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-sm font-semibold text-white">{title}</span>
           {badge && (
             <span
-              className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
+              className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
                 badge.tone === "neutral"
                   ? "bg-white/10 text-gray-300"
                   : "bg-emerald-500/15 text-emerald-400"
@@ -163,7 +168,9 @@ function CardShell({
             </span>
           )}
         </div>
-        {rightHeader && <div className="text-[10px] text-[#888]">{rightHeader}</div>}
+        {rightHeader && (
+          <div className="shrink-0 pl-2 text-[10px] text-[#888]">{rightHeader}</div>
+        )}
       </div>
       {children}
     </div>
