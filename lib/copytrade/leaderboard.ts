@@ -72,7 +72,11 @@ function writeCache<T>(map: Map<string, CacheEntry<T>>, key: string, data: T): v
 
 // ─── Period filter ──────────────────────────────────────────────
 
-const VALID_ALIASES = new Set(["pnl_history", "trade_history"]);
+const VALID_ALIASES = new Set([
+  "pnl_history",
+  "trade_history",
+  "liquidation_history",
+]);
 const VALID_COLS = new Set(["time"]);
 
 function periodClause(period: Period, alias: string, col: string): string {
@@ -149,11 +153,22 @@ export async function getLeaderboard(
     liqs AS (
       SELECT "walletAddr", COUNT(*)::int AS liquidations
       FROM liquidation_history
+      WHERE 1=1 ${periodClause(period, "liquidation_history", "time")}
       GROUP BY "walletAddr"
     ),
     vol AS (
+      -- volume_calendar.date is text 'YYYY-MM-DD' — cast for the period
+      -- comparison. Pre-2026-05-16 this CTE was unfiltered, so a "7d"
+      -- leaderboard mixed 7d trade counts with all-time volume → users
+      -- saw the leaderboard claim e.g. "32 trades, $138M volume" for a
+      -- recent trader whose 7d volume was actually $138K.
       SELECT "walletAddr", COALESCE(SUM(volume), 0)::numeric AS total_volume
       FROM volume_calendar
+      WHERE 1=1 ${
+        period === "all"
+          ? ""
+          : ` AND volume_calendar."date"::date >= (NOW() - INTERVAL '${period === "7d" ? 7 : 30} days')::date`
+      }
       GROUP BY "walletAddr"
     )
     SELECT

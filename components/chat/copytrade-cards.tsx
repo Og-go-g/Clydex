@@ -299,7 +299,22 @@ function MetricCell({ label, value, tone }: { label: string; value: string; tone
 export function TraderProfileCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
   const d = data as unknown as TraderProfileData;
   return (
-    <CardShell title="Trader Profile" rightHeader={<span className="font-mono">{d.wallet}</span>}>
+    <CardShell
+      title="Trader Profile"
+      rightHeader={
+        <span className="flex items-center gap-2">
+          {/* Profile aggregates are ALL-TIME (pnl_totals / per-wallet
+              SUMs without a date filter). Surface that explicitly so
+              users coming from a "7d" leaderboard row don't assume
+              the trade count / PnL / winrate match the leaderboard
+              window — they don't. */}
+          <span className="rounded bg-white/5 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-[#888]">
+            All-time
+          </span>
+          <span className="font-mono">{d.wallet}</span>
+        </span>
+      }
+    >
       <div className="space-y-3 p-3">
         {/* Headline metrics */}
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
