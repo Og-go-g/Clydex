@@ -246,7 +246,7 @@ export function LeaderboardCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
                 </td>
                 <td className="px-3 py-2 text-right">
                   <button
-                    onClick={() => ctx?.onSendMessage?.(`Analyze ${t.wallet}`)}
+                    onClick={() => ctx?.onSendMessage?.(`Analyze ${t.fullAddress}`)}
                     className="rounded bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-400 opacity-0 transition-opacity hover:bg-emerald-500/20 group-hover:opacity-100"
                   >
                     Analyze
@@ -372,16 +372,17 @@ export function TraderProfileCard({ data, ctx }: { data: Json; ctx?: CardCtx }) 
           </div>
         )}
 
-        {/* CTA row */}
+        {/* CTA row — vague references; AI resolves "this trader" from
+            the profile result that's already in conversation context */}
         <div className="flex gap-2 pt-1">
           <button
-            onClick={() => ctx?.onSendMessage?.(`Copy ${d.wallet} with $100`)}
+            onClick={() => ctx?.onSendMessage?.("Copy this trader with $100")}
             className="flex-1 rounded-lg bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-400 transition-colors hover:bg-emerald-500/25"
           >
             Copy with $100
           </button>
           <button
-            onClick={() => ctx?.onSendMessage?.(`Show ${d.wallet}'s open positions`)}
+            onClick={() => ctx?.onSendMessage?.("Show this trader's open positions")}
             className="flex-1 rounded-lg border border-[#262626] bg-[#141414] px-3 py-2 text-xs font-medium text-gray-300 transition-colors hover:bg-[#1a1a1a]"
           >
             Live Positions
@@ -479,7 +480,7 @@ export function CopyStatusCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
                     <span>·</span>
                     <span className="font-mono">{s.leverageMult}x</span>
                     <button
-                      onClick={() => ctx?.onSendMessage?.(`Stop copying ${s.leaderAddr}`)}
+                      onClick={() => ctx?.onSendMessage?.(`Stop copying ${s.fullLeaderAddr}`)}
                       className="ml-2 rounded border border-[#262626] px-1.5 py-0.5 text-[9px] font-medium text-[#888] transition-colors hover:border-red-500/40 hover:text-red-400"
                     >
                       Unfollow
@@ -542,7 +543,6 @@ export function CopyStatusCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
 
 export function FollowSuccessCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
   const leader = String(data.leader ?? "");
-  const fullAddr = String(data.fullLeaderAddr ?? leader);
   const alloc = Number(data.allocationUsdc);
   const lev = Number(data.leverageMult);
   return (
@@ -566,7 +566,7 @@ export function FollowSuccessCard({ data, ctx }: { data: Json; ctx?: CardCtx }) 
         </p>
         <div className="flex gap-2">
           <button
-            onClick={() => ctx?.onSendMessage?.(`Show ${leader}'s open positions`)}
+            onClick={() => ctx?.onSendMessage?.("Show this trader's open positions")}
             className="flex-1 rounded-lg border border-[#262626] bg-[#141414] px-3 py-2 text-xs font-medium text-gray-300 hover:bg-[#1a1a1a]"
           >
             View Their Positions
@@ -578,8 +578,6 @@ export function FollowSuccessCard({ data, ctx }: { data: Json; ctx?: CardCtx }) 
             My Copies
           </button>
         </div>
-        {/* Silence unused-var lint in builds that strip JSX */}
-        <span className="hidden" data-leader={fullAddr} />
       </div>
     </CardShell>
   );
@@ -684,7 +682,7 @@ export function TraderPositionsCard({ data, ctx }: { data: Json; ctx?: CardCtx }
       )}
       <div className="border-t border-[#1f1f1f] px-3 py-2">
         <button
-          onClick={() => ctx?.onSendMessage?.(`Copy ${d.trader} with $100`)}
+          onClick={() => ctx?.onSendMessage?.("Copy this trader with $100")}
           className="w-full rounded-lg bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-400 hover:bg-emerald-500/25"
         >
           Copy {d.trader} with $100
@@ -746,7 +744,7 @@ export function SuggestTradersCard({ data, ctx }: { data: Json; ctx?: CardCtx })
             <div className="flex flex-col items-end gap-1">
               <span className="text-[9px] text-[#888]">Suggested: {s.suggestedAllocation}</span>
               <button
-                onClick={() => ctx?.onSendMessage?.(`Copy ${s.wallet} with $100`)}
+                onClick={() => ctx?.onSendMessage?.(`Copy ${s.fullAddress} with $100`)}
                 className="rounded bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400 hover:bg-emerald-500/25"
               >
                 Copy
@@ -811,7 +809,7 @@ export function MarketTopTradersCard({ data, ctx }: { data: Json; ctx?: CardCtx 
                 <td className="px-2 py-2 text-right font-mono text-[10px] text-[#888]">{fmtVol(t.volume)}</td>
                 <td className="px-3 py-2 text-right">
                   <button
-                    onClick={() => ctx?.onSendMessage?.(`Analyze ${t.wallet}`)}
+                    onClick={() => ctx?.onSendMessage?.(`Analyze ${t.fullAddress}`)}
                     className="rounded bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-400 opacity-0 transition-opacity hover:bg-emerald-500/20 group-hover:opacity-100"
                   >
                     Analyze
@@ -916,7 +914,7 @@ export function CompareTradersCard({ data, ctx }: { data: Json; ctx?: CardCtx })
                 </div>
               )}
               <button
-                onClick={() => ctx?.onSendMessage?.(`Copy ${ft.address} with $100`)}
+                onClick={() => ctx?.onSendMessage?.(`Copy ${ft.fullAddress} with $100`)}
                 className="mt-1 rounded bg-emerald-500/15 px-2 py-1 text-[10px] font-semibold text-emerald-400 hover:bg-emerald-500/25"
               >
                 Copy

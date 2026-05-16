@@ -155,7 +155,12 @@ If a tool's output doesn't include nextSteps, fall back to inline suggestions in
 Trader references:
 - "#7915" / "trader 7915" / "account 7915" → leaderAddr = "account:7915"
 - Full wallet 8wKNpz... → use as-is
-- Partial wallet ("8wKN...") → respond: "Need the full address or account ID."
+- Partial / truncated wallet ("8wKN...4mRw") → respond: "Need the full address or account ID."
+- Contextual references — "this trader", "the top trader", "the top BTC trader", "rank 1",
+  "their positions", "compare them" → resolve from the MOST RECENT tool result in
+  conversation. The leaderboard / profile / suggestion / market-top results all carry
+  a \`fullAddress\` (or \`walletAddr\`) field — that is what you pass to the next tool.
+  NEVER pass display strings like "2rEE...4mRw" or "#" to tools — they will fail to resolve.
 
 Markets (always normalize):
 - BTC, btc, биток, бтц, bitcoin → "BTCUSD"
@@ -371,9 +376,9 @@ export async function POST(req: Request) {
               })),
               marketBreakdown: profile.marketBreakdown,
               nextSteps: [
-                `Copy ${fmtAddr(profile.walletAddr)} with $100`,
-                `Show ${fmtAddr(profile.walletAddr)}'s open positions`,
-                `Compare ${fmtAddr(profile.walletAddr)} with another trader`,
+                "Copy this trader with $100",
+                "Show this trader's open positions",
+                "Compare with another trader",
               ],
             });
           } catch (err) {
@@ -482,7 +487,7 @@ export async function POST(req: Request) {
               allocationUsdc,
               leverageMult: leverageMult ?? 1,
               nextSteps: [
-                `Show ${fmtAddr(leaderAddr)}'s open positions`,
+                "Show this trader's open positions",
                 "Show my active copies",
                 "Find another trader to copy",
               ],
@@ -576,12 +581,12 @@ export async function POST(req: Request) {
               positions,
               nextSteps: positions.length > 0
                 ? [
-                    `Copy ${fmtAddr(address)} with $100`,
-                    `Show ${fmtAddr(address)}'s full profile`,
+                    "Copy this trader with $100",
+                    "Show this trader's full profile",
                     "Show top traders this week",
                   ]
                 : [
-                    `Show ${fmtAddr(address)}'s full profile`,
+                    "Show this trader's full profile",
                     "Show top traders this week",
                     "Suggest a low-risk trader",
                   ],
@@ -636,8 +641,8 @@ export async function POST(req: Request) {
               suggestions: top,
               nextSteps: top.length > 0
                 ? [
-                    `Analyze ${top[0].wallet}`,
-                    `Copy ${top[0].wallet} with $100`,
+                    "Analyze the top suggestion",
+                    "Copy the top suggestion with $100",
                     "Compare the top 3 suggestions",
                   ]
                 : [
@@ -689,7 +694,7 @@ export async function POST(req: Request) {
                 volume: t.volume,
               })),
               nextSteps: [
-                `Analyze ${data[0] ? fmtAddr(data[0].walletAddr) : "the top trader"}`,
+                `Analyze the top ${market} trader`,
                 `Copy the top ${market} trader`,
                 `Compare the top ${Math.min(3, data.length)} on ${market}`,
               ],
@@ -737,8 +742,8 @@ export async function POST(req: Request) {
               traders: out,
               nextSteps: firstValid
                 ? [
-                    `Copy ${firstValid.address} with $100`,
-                    `Show ${firstValid.address}'s open positions`,
+                    "Copy the strongest of these with $100",
+                    "Show their open positions",
                     "Suggest a low-risk trader instead",
                   ]
                 : ["Show top traders this week", "Suggest a low-risk trader"],
