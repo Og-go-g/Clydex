@@ -57,12 +57,17 @@ export function ChatSidebar() {
             }}
             onMouseEnter={() => setHoveredId(s.id)}
             onMouseLeave={() => setHoveredId(null)}
-            className={`group relative mb-0.5 flex w-full flex-col rounded-lg px-3 py-2.5 text-left transition-colors ${
+            className={`group relative mb-0.5 flex w-full flex-col rounded-lg py-2.5 pl-3 pr-9 text-left transition-colors ${
               isActive
                 ? "bg-[#1a1a1a] text-white"
                 : "text-[#999] hover:bg-[#161616] hover:text-white"
             }`}
           >
+            {/* Right padding (`pr-9` on the button) reserves space for
+                the absolute-positioned delete icon at top-right, so
+                the mode badge and title text never end up underneath
+                it — even on long titles or when hover reveals the
+                icon. */}
             <div className="flex items-center gap-1.5">
               <span className="truncate text-sm leading-tight flex-1">{s.title}</span>
               <ModeBadge mode={s.mode} />
