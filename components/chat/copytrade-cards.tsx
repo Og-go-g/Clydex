@@ -273,6 +273,8 @@ export function LeaderboardCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
 interface TraderProfileData {
   wallet: string;
   fullAddress: string;
+  /** Window the numbers cover. Mirrored from the AI tool input. */
+  period?: "7d" | "30d" | "all";
   totalPnl: number;
   tradingPnl: number;
   fundingPnl: number;
@@ -285,6 +287,12 @@ interface TraderProfileData {
   totalVolume: number;
   topTrades: Array<{ symbol: string; side: string; closedPnl: number; time: string }>;
   marketBreakdown: Array<{ symbol: string; pnl: number; trades: number }>;
+}
+
+function periodLabel(p: "7d" | "30d" | "all" | undefined): string {
+  if (p === "7d") return "7D";
+  if (p === "30d") return "30D";
+  return "ALL-TIME";
 }
 
 function MetricCell({ label, value, tone }: { label: string; value: string; tone?: string }) {
@@ -303,13 +311,19 @@ export function TraderProfileCard({ data, ctx }: { data: Json; ctx?: CardCtx }) 
       title="Trader Profile"
       rightHeader={
         <span className="flex items-center gap-2">
-          {/* Profile aggregates are ALL-TIME (pnl_totals / per-wallet
-              SUMs without a date filter). Surface that explicitly so
-              users coming from a "7d" leaderboard row don't assume
-              the trade count / PnL / winrate match the leaderboard
-              window — they don't. */}
-          <span className="rounded bg-white/5 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-[#888]">
-            All-time
+          {/* Period badge — mirrors `data.period` from the tool result.
+              When the AI chains period from a 7d leaderboard, this
+              renders "7D"; explicit lifetime profiles render "ALL-TIME".
+              Keeps the user's mental model aligned: leaderboard row
+              numbers always match what the profile card shows. */}
+          <span
+            className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${
+              d.period === "7d" || d.period === "30d"
+                ? "bg-emerald-500/15 text-emerald-400"
+                : "bg-white/5 text-[#888]"
+            }`}
+          >
+            {periodLabel(d.period)}
           </span>
           <span className="font-mono">{d.wallet}</span>
         </span>

@@ -184,13 +184,13 @@ Allocation / leverage:
 ═══════════════════════════════════════════════════════
 
 "analyze best BTC trader":
-  findTopTraderByMarket(BTCUSD, 7d) → take rank 1 → getTraderProfile(addr) → one-sentence summary
+  findTopTraderByMarket(BTCUSD, 7d) → take rank 1 → getTraderProfile(addr, period=7d) → one-sentence summary
 
 "copy top trader on BTC":
   findTopTraderByMarket(BTCUSD) → call followTrader(rank1, $100, 1x) directly (engine refuses if session is off — surface that error verbatim)
 
 "compare top 3 ETH traders":
-  findTopTraderByMarket(ETHUSD, limit=3) → compareTraders(addrs)
+  findTopTraderByMarket(ETHUSD, limit=3) → compareTraders(addrs, period=7d)
 
 "how am I doing?":
   getCopyStatus → if session inactive say so; if subscriptions exist, summarize stats from card
@@ -199,6 +199,31 @@ Allocation / leverage:
   getCopyHistory(limit=20)
 
 You have up to 5 tool calls per turn. Chain freely.
+
+═══════════════════════════════════════════════════════
+ PERIOD CHAINING (critical for consistent numbers)
+═══════════════════════════════════════════════════════
+
+getTraderProfile and compareTraders accept a \`period\` argument that
+MUST match the period the user just asked the leaderboard / market-top
+for. Otherwise the row they clicked shows "+\$5K, 32 trades" and the
+profile pops up with "+\$1.89K, 107 trades" — same wallet, different
+windows, total confusion.
+
+Rules:
+- Track the LAST period the user asked for. The phrasings:
+    "this week" / "за неделю" / no period mentioned ⇒ 7d
+    "this month" / "за месяц" ⇒ 30d
+    "all time" / "за всё время" / "lifetime" ⇒ all
+- When the user analyzes / compares a trader after a leaderboard /
+  market-top query, pass the SAME period to getTraderProfile /
+  compareTraders.
+- If the user explicitly says "show me LIFETIME stats" / "all-time"
+  / "за всё время" while looking at a 7d row, switch to period=all
+  and call out the change in your one-sentence framing.
+- If getTraderProfile returns "no activity in the last 7d" error,
+  fall back to period=30d, then period=all, and tell the user that
+  the trader's recent window is empty.
 
 ═══════════════════════════════════════════════════════
  ANALYSIS GUIDELINES
@@ -384,19 +409,32 @@ export async function POST(req: Request) {
       // ─── Trader Profile ──────────────────────────────
       getTraderProfile: tool({
         description:
-          "Get a detailed profile of one trader: full PnL/winrate/trades, per-market breakdown, top 5 trades, liquidations. Use for 'analyze #XXXX', 'show me trader 7915', 'profile of …'.",
+          "Get a detailed profile of one trader: full PnL/winrate/trades, per-market breakdown, top 5 trades, liquidations. **CHAIN PERIOD** from whatever leaderboard/market-top query preceded this — if the user asked 'top traders this week', pass period='7d' here so the profile numbers match the row they clicked. Default 'all' is for explicit lifetime requests like 'analyze the lifetime stats of #XXXX'. If the period returns no activity for that wallet, the tool replies with an empty-window error message — you should suggest a wider period.",
         inputSchema: zodSchema(
           z.object({
             address: z.string().describe("Trader address (wallet or account:ID)"),
+            period: z
+              .enum(["7d", "30d", "all"])
+              .optional()
+              .describe("Time window — match the leaderboard's period (default: all)"),
           }),
         ),
-        execute: async ({ address }) => {
+        execute: async ({ address, period }) => {
           try {
-            const profile = await getTraderProfile(address);
-            if (!profile) return { error: `Trader ${fmtAddr(address)} not found.` };
+            const p = period ?? "all";
+            const profile = await getTraderProfile(address, p);
+            if (!profile) {
+              return {
+                error:
+                  p === "all"
+                    ? `Trader ${fmtAddr(address)} not found.`
+                    : `${fmtAddr(address)} has no activity in the last ${p}. Try period="all" or a longer window.`,
+              };
+            }
             return sanitize({
               wallet: fmtAddr(profile.walletAddr),
               fullAddress: profile.walletAddr,
+              period: profile.period,
               totalPnl: profile.totalPnl,
               tradingPnl: profile.tradingPnl,
               fundingPnl: profile.fundingPnl,
@@ -748,36 +786,42 @@ export async function POST(req: Request) {
       // ─── Compare Traders ──────────────────────────────
       compareTraders: tool({
         description:
-          "Compare 2 or 3 traders side-by-side: PnL, winrate, trades, liquidations, volume, risk score, top markets. Use for 'compare X and Y', 'which is better'.",
+          "Compare 2 or 3 traders side-by-side: PnL, winrate, trades, liquidations, volume, risk score, top markets. CHAIN PERIOD from the preceding leaderboard/market-top query (same rule as getTraderProfile).",
         inputSchema: zodSchema(
           z.object({
             addresses: z.array(z.string()).min(2).max(3).describe("2-3 trader addresses"),
+            period: z
+              .enum(["7d", "30d", "all"])
+              .optional()
+              .describe("Time window — match the leaderboard's period (default: all)"),
           }),
         ),
-        execute: async ({ addresses }) => {
+        execute: async ({ addresses, period }) => {
           try {
-            const profiles = await Promise.all(addresses.map((a) => getTraderProfile(a)));
-            const out = profiles.map((p, i) => {
-              if (!p) return { address: fmtAddr(addresses[i]), fullAddress: addresses[i], error: "Not found" };
+            const p = period ?? "all";
+            const profiles = await Promise.all(addresses.map((a) => getTraderProfile(a, p)));
+            const out = profiles.map((pr, i) => {
+              if (!pr) return { address: fmtAddr(addresses[i]), fullAddress: addresses[i], error: "Not found" };
               const riskScore = Math.min(
                 10,
-                Math.max(1, Math.round(10 - p.winRate / 10 - (p.liquidations === 0 ? 2 : 0) + p.liquidations * 2)),
+                Math.max(1, Math.round(10 - pr.winRate / 10 - (pr.liquidations === 0 ? 2 : 0) + pr.liquidations * 2)),
               );
               return {
-                address: fmtAddr(p.walletAddr),
-                fullAddress: p.walletAddr,
-                totalPnl: p.totalPnl,
-                winRate: p.winRate,
-                totalTrades: p.totalTrades,
-                liquidations: p.liquidations,
-                totalVolume: p.totalVolume,
-                avgPnlPerTrade: p.avgPnlPerTrade,
+                address: fmtAddr(pr.walletAddr),
+                fullAddress: pr.walletAddr,
+                totalPnl: pr.totalPnl,
+                winRate: pr.winRate,
+                totalTrades: pr.totalTrades,
+                liquidations: pr.liquidations,
+                totalVolume: pr.totalVolume,
+                avgPnlPerTrade: pr.avgPnlPerTrade,
                 riskScore,
-                topMarkets: p.marketBreakdown.slice(0, 3).map((m) => m.symbol),
+                topMarkets: pr.marketBreakdown.slice(0, 3).map((m) => m.symbol),
               };
             });
             const firstValid = out.find((t) => !("error" in t) || !t.error);
             return sanitize({
+              period: p,
               traders: out,
               nextSteps: firstValid
                 ? [

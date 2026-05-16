@@ -17,6 +17,9 @@ export interface LeaderboardEntry {
 }
 
 export interface TraderProfile extends LeaderboardEntry {
+  /** Time window the numbers cover — chained from whatever period
+   * the AI just queried in the leaderboard / market-top step. */
+  period: Period;
   topTrades: TraderTrade[];
   marketBreakdown: MarketStat[];
   recentTrades: TraderTrade[];
@@ -283,82 +286,141 @@ async function resolveTraderAddress(input: string): Promise<string | null> {
  * Lightweight trader summary — just the headline stats that fit in
  * the search result card (PnL, win-rate, trade count, volume, etc).
  *
- * Skips the expensive top-trades-by-closedPnL recursive CTE that
- * `getTraderProfile` does — for a high-activity trader like 96vj
- * (47k+ trades across 10+ markets) the recursive CTE alone takes
- * 20-30s. Search UI doesn't render that data, so computing it for
- * a search hit was pure waste.
+ * Period-aware. For `period="all"` we use the pre-aggregated
+ * `pnl_totals` row (fast). For `7d`/`30d` we aggregate from the
+ * raw history tables on the fly — there is no pre-aggregated bucket
+ * per period yet.
  *
- * Returns the full LeaderboardEntry shape so callers can substitute
- * this for a leaderboard row without UI changes.
- *
- * Cached 5 min in-process, so repeat searches of the same trader
- * are sub-millisecond. Cache key is the resolved walletAddr — both
- * `account:N` and base58 inputs hit the same cache slot once
- * resolved.
+ * Cache key is `walletAddr:period` so a 7d summary and an all-time
+ * summary of the same wallet don't clobber each other.
  */
-export async function getTraderSummary(input: string): Promise<LeaderboardEntry | null> {
+export async function getTraderSummary(
+  input: string,
+  period: Period = "all",
+): Promise<LeaderboardEntry | null> {
   const walletAddr = await resolveTraderAddress(input);
   if (!walletAddr) return null;
 
-  const cached = readCache(summaryCache, walletAddr);
+  const cacheKey = `${walletAddr}:${period}`;
+  const cached = readCache(summaryCache, cacheKey);
   if (cached) return cached;
 
-  // Run all four base queries in parallel — they have no dependencies
-  // on each other and pg pool has plenty of headroom (max=10 conns).
-  const [statsRows, tradeCountRows, liqRows, volRows] = await Promise.all([
-    query<{
-      total_pnl: string;
-      trading_pnl: string;
-      funding_pnl: string;
-    }>(
-      `SELECT "totalPnl"::numeric AS total_pnl,
-              "totalTradingPnl"::numeric AS trading_pnl,
-              "totalFundingPnl"::numeric AS funding_pnl
-       FROM pnl_totals WHERE "walletAddr" = $1`,
+  if (period === "all") {
+    // Fast path — pnl_totals + lightweight subqueries (no time filter).
+    const [statsRows, tradeCountRows, liqRows, volRows] = await Promise.all([
+      query<{ total_pnl: string; trading_pnl: string; funding_pnl: string }>(
+        `SELECT "totalPnl"::numeric AS total_pnl,
+                "totalTradingPnl"::numeric AS trading_pnl,
+                "totalFundingPnl"::numeric AS funding_pnl
+         FROM pnl_totals WHERE "walletAddr" = $1`,
+        [walletAddr],
+      ),
+      query<{ total_trades: number; wins: number; losses: number }>(
+        `SELECT
+           (SELECT COUNT(DISTINCT "tradeId")::int FROM trade_history WHERE "walletAddr" = $1) AS total_trades,
+           (SELECT COUNT(*)::int FROM pnl_history WHERE "walletAddr" = $1 AND "tradingPnl" > 0) AS wins,
+           (SELECT COUNT(*)::int FROM pnl_history WHERE "walletAddr" = $1 AND "tradingPnl" < 0) AS losses`,
+        [walletAddr],
+      ),
+      query<{ liquidations: number }>(
+        `SELECT COUNT(*)::int AS liquidations FROM liquidation_history WHERE "walletAddr" = $1`,
+        [walletAddr],
+      ),
+      query<{ total_volume: string }>(
+        `SELECT COALESCE(SUM(volume), 0)::numeric AS total_volume FROM volume_calendar WHERE "walletAddr" = $1`,
+        [walletAddr],
+      ),
+    ]);
+
+    if (statsRows.length === 0) return null;
+    const stats = statsRows[0];
+    const tc = tradeCountRows[0] ?? { total_trades: 0, wins: 0, losses: 0 };
+    const totalPnl = parseFloat(stats.total_pnl) || 0;
+
+    const entry: LeaderboardEntry = {
+      walletAddr,
+      totalPnl,
+      tradingPnl: parseFloat(stats.trading_pnl) || 0,
+      fundingPnl: parseFloat(stats.funding_pnl) || 0,
+      totalTrades: tc.total_trades,
+      wins: tc.wins,
+      losses: tc.losses,
+      winRate: tc.wins + tc.losses > 0 ? Math.round((tc.wins / (tc.wins + tc.losses)) * 1000) / 10 : 0,
+      avgPnlPerTrade: tc.total_trades > 0 ? Math.round((totalPnl / tc.total_trades) * 10000) / 10000 : 0,
+      liquidations: liqRows[0]?.liquidations ?? 0,
+      totalVolume: parseFloat(volRows[0]?.total_volume ?? "0") || 0,
+    };
+    writeCache(summaryCache, cacheKey, entry);
+    return entry;
+  }
+
+  // Period-filtered path — aggregate from history tables on the fly.
+  // Each query is per-table independent (no JOINs across tables, no
+  // multiplicative inflation). volume_calendar.date is text 'YYYY-MM-DD'
+  // so we cast `::date` for the period comparison.
+  const days = period === "7d" ? 7 : 30;
+  const [pnlRows, tradeCountRows, winLossRows, liqRows, volRows] = await Promise.all([
+    query<{ total_pnl: string; trading_pnl: string; funding_pnl: string }>(
+      `SELECT
+         COALESCE(SUM("tradingPnl" + "settledFundingPnl"), 0)::numeric AS total_pnl,
+         COALESCE(SUM("tradingPnl"), 0)::numeric AS trading_pnl,
+         COALESCE(SUM("settledFundingPnl"), 0)::numeric AS funding_pnl
+       FROM pnl_history
+       WHERE "walletAddr" = $1 AND "time" >= NOW() - INTERVAL '${days} days'`,
       [walletAddr],
     ),
-    query<{ total_trades: number; wins: number; losses: number }>(
+    query<{ total_trades: number }>(
+      `SELECT COUNT(DISTINCT "tradeId")::int AS total_trades
+       FROM trade_history
+       WHERE "walletAddr" = $1 AND "time" >= NOW() - INTERVAL '${days} days'`,
+      [walletAddr],
+    ),
+    query<{ wins: number; losses: number }>(
       `SELECT
-         (SELECT COUNT(DISTINCT "tradeId")::int FROM trade_history WHERE "walletAddr" = $1) AS total_trades,
-         (SELECT COUNT(*)::int FROM pnl_history WHERE "walletAddr" = $1 AND "tradingPnl" > 0) AS wins,
-         (SELECT COUNT(*)::int FROM pnl_history WHERE "walletAddr" = $1 AND "tradingPnl" < 0) AS losses`,
+         COUNT(*) FILTER (WHERE "tradingPnl" > 0)::int AS wins,
+         COUNT(*) FILTER (WHERE "tradingPnl" < 0)::int AS losses
+       FROM pnl_history
+       WHERE "walletAddr" = $1 AND "time" >= NOW() - INTERVAL '${days} days'`,
       [walletAddr],
     ),
     query<{ liquidations: number }>(
-      `SELECT COUNT(*)::int AS liquidations FROM liquidation_history WHERE "walletAddr" = $1`,
+      `SELECT COUNT(*)::int AS liquidations
+       FROM liquidation_history
+       WHERE "walletAddr" = $1 AND "time" >= NOW() - INTERVAL '${days} days'`,
       [walletAddr],
     ),
     query<{ total_volume: string }>(
-      `SELECT COALESCE(SUM(volume), 0)::numeric AS total_volume FROM volume_calendar WHERE "walletAddr" = $1`,
+      `SELECT COALESCE(SUM(volume), 0)::numeric AS total_volume
+       FROM volume_calendar
+       WHERE "walletAddr" = $1 AND "date"::date >= (NOW() - INTERVAL '${days} days')::date`,
       [walletAddr],
     ),
   ]);
 
-  if (statsRows.length === 0) return null;
-
-  const stats = statsRows[0];
-  const tc = tradeCountRows[0] ?? { total_trades: 0, wins: 0, losses: 0 };
+  // A trader with no activity in the window still exists — but treat
+  // zero trades / zero pnl as "no data for this period" to avoid
+  // showing a meaningless all-zeros card. Return null so the AI tool
+  // can explain "no activity in this window".
+  const trades = tradeCountRows[0]?.total_trades ?? 0;
+  const stats = pnlRows[0] ?? { total_pnl: "0", trading_pnl: "0", funding_pnl: "0" };
   const totalPnl = parseFloat(stats.total_pnl) || 0;
-  const totalTrades = tc.total_trades;
-  const wins = tc.wins;
-  const losses = tc.losses;
+  if (trades === 0 && totalPnl === 0) return null;
 
+  const wl = winLossRows[0] ?? { wins: 0, losses: 0 };
   const entry: LeaderboardEntry = {
     walletAddr,
     totalPnl,
     tradingPnl: parseFloat(stats.trading_pnl) || 0,
     fundingPnl: parseFloat(stats.funding_pnl) || 0,
-    totalTrades,
-    wins,
-    losses,
-    winRate: wins + losses > 0 ? Math.round((wins / (wins + losses)) * 1000) / 10 : 0,
-    avgPnlPerTrade: totalTrades > 0 ? Math.round((totalPnl / totalTrades) * 10000) / 10000 : 0,
+    totalTrades: trades,
+    wins: wl.wins,
+    losses: wl.losses,
+    winRate: wl.wins + wl.losses > 0 ? Math.round((wl.wins / (wl.wins + wl.losses)) * 1000) / 10 : 0,
+    avgPnlPerTrade: trades > 0 ? Math.round((totalPnl / trades) * 10000) / 10000 : 0,
     liquidations: liqRows[0]?.liquidations ?? 0,
     totalVolume: parseFloat(volRows[0]?.total_volume ?? "0") || 0,
   };
-
-  writeCache(summaryCache, walletAddr, entry);
+  writeCache(summaryCache, cacheKey, entry);
   return entry;
 }
 
@@ -366,23 +428,28 @@ export async function getTraderSummary(input: string): Promise<LeaderboardEntry 
  * Full trader profile — summary + top trades + market breakdown +
  * recent trades.
  *
- * Heavy because of the per-market recursive CTE in
- * `getTraderTopTrades`. Used by AI chat tools (`getTraderProfile`,
- * `compareTraders`) where the AI's own latency tolerance hides the
- * cost. Search UI uses the lighter `getTraderSummary` instead.
+ * Period-aware. Pass the same period the AI just used in the
+ * preceding leaderboard / market-top query so the profile numbers
+ * match what the user saw on the row they clicked. Default `"all"`
+ * is for explicit "show lifetime stats" requests.
  *
- * Cached separately from summary (5 min). Both caches share the
- * resolved walletAddr as key.
+ * Cached separately from summary (5 min). Cache key is
+ * `walletAddr:period` so a 7d and an all-time profile of the same
+ * wallet don't clobber each other.
  */
-export async function getTraderProfile(input: string): Promise<TraderProfile | null> {
-  const summary = await getTraderSummary(input);
+export async function getTraderProfile(
+  input: string,
+  period: Period = "all",
+): Promise<TraderProfile | null> {
+  const summary = await getTraderSummary(input, period);
   if (!summary) return null;
 
   // walletAddr is the canonical resolved address — use it for the
   // heavy queries and as the profile cache key.
   const walletAddr = summary.walletAddr;
 
-  const cached = readCache(profileCache, walletAddr);
+  const cacheKey = `${walletAddr}:${period}`;
+  const cached = readCache(profileCache, cacheKey);
   if (cached) return cached;
 
   // Three heavy parts in parallel, each guarded by a JS-side timeout.
@@ -416,9 +483,9 @@ export async function getTraderProfile(input: string): Promise<TraderProfile | n
     });
 
   const [topRes, breakdownRes, recentRes] = await Promise.allSettled([
-    withTimeout(getTraderTopTrades(walletAddr, 10), "getTraderTopTrades"),
-    withTimeout(getTraderMarketBreakdown(walletAddr), "getTraderMarketBreakdown"),
-    withTimeout(getRecentTrades(walletAddr, 5), "getRecentTrades"),
+    withTimeout(getTraderTopTrades(walletAddr, period, 10), "getTraderTopTrades"),
+    withTimeout(getTraderMarketBreakdown(walletAddr, period), "getTraderMarketBreakdown"),
+    withTimeout(getRecentTrades(walletAddr, period, 5), "getRecentTrades"),
   ]);
 
   const topTrades = topRes.status === "fulfilled" ? topRes.value : [];
@@ -435,23 +502,38 @@ export async function getTraderProfile(input: string): Promise<TraderProfile | n
     console.error("[copytrade] getRecentTrades failed for", walletAddr, recentRes.reason);
   }
 
-  const profile: TraderProfile = { ...summary, topTrades, marketBreakdown, recentTrades };
+  const profile: TraderProfile = { ...summary, period, topTrades, marketBreakdown, recentTrades };
   // Only cache if at least one heavy part succeeded; otherwise next
   // call should retry rather than serve a hollow profile from cache.
   if (topRes.status === "fulfilled" || breakdownRes.status === "fulfilled" || recentRes.status === "fulfilled") {
-    writeCache(profileCache, walletAddr, profile);
+    writeCache(profileCache, cacheKey, profile);
   }
   return profile;
 }
 
 // ─── Top Trades by Closed PnL ───────────────────────────────────
 
-async function getTraderTopTrades(walletAddr: string, limit: number): Promise<TraderTrade[]> {
-  // Get markets that have trades for this wallet
-  const marketRows = await query<{ marketId: number }>(
-    `SELECT DISTINCT "marketId" FROM trade_history WHERE "walletAddr" = $1`,
-    [walletAddr],
-  );
+async function getTraderTopTrades(
+  walletAddr: string,
+  period: Period,
+  limit: number,
+): Promise<TraderTrade[]> {
+  // Get markets that have trades for this wallet — markets-with-recent-
+  // activity if period-scoped, else all-time markets. The output filter
+  // below picks only trades inside the window, but we narrow the market
+  // list here too so we don't run a recursive CTE on a market the user
+  // hasn't touched in months.
+  const days = period === "all" ? null : period === "7d" ? 7 : 30;
+  const marketRows = days == null
+    ? await query<{ marketId: number }>(
+        `SELECT DISTINCT "marketId" FROM trade_history WHERE "walletAddr" = $1`,
+        [walletAddr],
+      )
+    : await query<{ marketId: number }>(
+        `SELECT DISTINCT "marketId" FROM trade_history
+         WHERE "walletAddr" = $1 AND "time" >= NOW() - INTERVAL '${days} days'`,
+        [walletAddr],
+      );
 
   if (marketRows.length === 0) return [];
 
@@ -511,7 +593,9 @@ async function getTraderTopTrades(walletAddr: string, limit: number): Promise<Tr
          )
          SELECT "tradeId", symbol, side, size, price,
                 closed_pnl::text AS "closedPnl", "time"
-         FROM tracker WHERE ABS(closed_pnl) > 0.0001
+         FROM tracker
+         WHERE ABS(closed_pnl) > 0.0001
+           ${days == null ? "" : `AND "time" >= NOW() - INTERVAL '${days} days'`}
          ORDER BY ABS(closed_pnl) DESC LIMIT $3`,
         [walletAddr, marketId, limit],
       );
@@ -539,7 +623,10 @@ async function getTraderTopTrades(walletAddr: string, limit: number): Promise<Tr
 
 // ─── Market Breakdown ───────────────────────────────────────────
 
-async function getTraderMarketBreakdown(walletAddr: string): Promise<MarketStat[]> {
+async function getTraderMarketBreakdown(
+  walletAddr: string,
+  period: Period,
+): Promise<MarketStat[]> {
   // PRE-2026-05-16 bug: this used a single SELECT with
   //   `FROM trade_history t LEFT JOIN pnl_history p ON (walletAddr, marketId)`
   // which produces a Cartesian product per (marketId) — N trade rows × M
@@ -550,19 +637,21 @@ async function getTraderMarketBreakdown(walletAddr: string): Promise<MarketStat[
   // Fix: aggregate trades and pnl independently, then join the
   // aggregates 1-to-1 on marketId. This gives the correct numbers and
   // is actually faster — Postgres only walks each table once.
+  const days = period === "all" ? null : period === "7d" ? 7 : 30;
+  const timeFilter = days == null ? "" : ` AND "time" >= NOW() - INTERVAL '${days} days'`;
   const rows = await query<{
     market_id: number; symbol: string; trades: number; pnl: string;
   }>(
     `WITH trade_counts AS (
        SELECT "marketId", symbol, COUNT(DISTINCT "tradeId")::int AS trades
        FROM trade_history
-       WHERE "walletAddr" = $1
+       WHERE "walletAddr" = $1${timeFilter}
        GROUP BY "marketId", symbol
      ),
      pnl_sums AS (
        SELECT "marketId", COALESCE(SUM("tradingPnl"), 0)::numeric AS pnl
        FROM pnl_history
-       WHERE "walletAddr" = $1
+       WHERE "walletAddr" = $1${timeFilter}
        GROUP BY "marketId"
      )
      SELECT tc."marketId" AS market_id,
@@ -668,14 +757,20 @@ export async function getTopTradersByMarket(
 
 // ─── Recent Trades ──────────────────────────────────────────────
 
-async function getRecentTrades(walletAddr: string, limit: number): Promise<TraderTrade[]> {
+async function getRecentTrades(
+  walletAddr: string,
+  period: Period,
+  limit: number,
+): Promise<TraderTrade[]> {
+  const days = period === "all" ? null : period === "7d" ? 7 : 30;
+  const timeFilter = days == null ? "" : ` AND "time" >= NOW() - INTERVAL '${days} days'`;
   const rows = await query<{
     tradeId: string; marketId: number; symbol: string; side: string;
     size: string; price: string; time: Date;
   }>(
     `SELECT "tradeId", "marketId", symbol, side, size::text, price::text, "time"
      FROM trade_history
-     WHERE "walletAddr" = $1
+     WHERE "walletAddr" = $1${timeFilter}
      ORDER BY "time" DESC LIMIT $2`,
     [walletAddr, limit],
   );
