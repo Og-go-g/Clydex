@@ -111,14 +111,49 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
   // user understands what they're getting.
   const [overlap, setOverlap] = useState<Array<{ marketId: number; symbol: string; owningLeaderAddr: string }> | null>(null);
 
-  // Check if copy trading session is active on open
+  // Check if copy trading session is active on open.
+  //
+  // 503 from /api/copy/activate (DB transient) is NOT treated as
+  // "inactive" — that would prompt the user to re-enable and
+  // overwrite their real 30-day session. We re-poll once, and if
+  // still 503 we leave sessionActive as null (the UI shows a
+  // loading state instead of the enable prompt).
   useEffect(() => {
     if (!isOpen || !isAuthenticated) return;
     setSessionActive(null);
-    fetch("/api/copy/activate")
-      .then((r) => r.json())
-      .then((d) => setSessionActive(d.active ?? false))
-      .catch(() => setSessionActive(false));
+    let cancelled = false;
+    const tryFetch = (attempt: number) => {
+      fetch("/api/copy/activate", { cache: "no-store" })
+        .then(async (r) => {
+          if (cancelled) return;
+          if (r.status === 503 && attempt < 2) {
+            setTimeout(() => tryFetch(attempt + 1), 2_000);
+            return;
+          }
+          if (!r.ok) {
+            // Treat 4xx as definitive: user is unauthenticated /
+            // session was DELETEd. Surface "inactive" so the UI can
+            // prompt the user.
+            setSessionActive(false);
+            return;
+          }
+          const d = await r.json();
+          setSessionActive(d.active ?? false);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          if (attempt < 2) {
+            setTimeout(() => tryFetch(attempt + 1), 2_000);
+            return;
+          }
+          // Final retry failed — assume offline. Leave as null so
+          // the dialog shows a "couldn't check" hint instead of
+          // mistakenly prompting to enable.
+          setSessionActive(null);
+        });
+    };
+    tryFetch(0);
+    return () => { cancelled = true; };
   }, [isOpen, isAuthenticated]);
 
   // Fetch market-overlap warning. Fire-and-forget; failure leaves

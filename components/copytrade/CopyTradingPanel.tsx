@@ -418,8 +418,23 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
   const fetchStatus = useCallback(async () => {
     if (!isAuthenticated) { setLoading(false); return; }
     try {
-      const res = await fetch("/api/copy/status");
-      if (!res.ok) { setLoading(false); return; }
+      const res = await fetch("/api/copy/status", { cache: "no-store" });
+      if (res.status === 503) {
+        // Transient unavailability (DB hiccup). Don't flip loading→
+        // false: if it's an initial-mount race, that would briefly
+        // show the "Enable Copy Trading" screen even though the user
+        // has a live 30-day session in the DB. Schedule one retry.
+        // For subsequent polls (status already set) we also retry —
+        // the prior status stays visible while we recheck.
+        setTimeout(() => { fetchStatus(); }, 3_000);
+        return;
+      }
+      if (!res.ok) {
+        // 4xx (auth lost, bad request) — treat as definitive: stop
+        // loading so the auth/activate UI can render.
+        setLoading(false);
+        return;
+      }
       const data = await res.json() as CopyStatus;
 
       // Detect new trades for toast notifications
@@ -440,10 +455,11 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
       prevFailedRef.current = data.stats.failedTrades;
 
       setStatus(data);
-    } catch {
-      // silently fail
-    } finally {
       setLoading(false);
+    } catch {
+      // Network error — same handling as 503: retry shortly, keep
+      // prior status (if any) visible.
+      setTimeout(() => { fetchStatus(); }, 3_000);
     }
   }, [isAuthenticated, addToast]);
 
@@ -643,23 +659,45 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
 
   const handleUnfollowConfirm = async (closePositions: boolean) => {
     if (!unfollowTarget) return;
+    const target = unfollowTarget;
     setUnfollowing(true);
     try {
-      const params = new URLSearchParams({ leader: unfollowTarget });
+      const params = new URLSearchParams({ leader: target });
       if (closePositions) params.set("closePositions", "true");
       const res = await fetch(`/api/copy/subscribe?${params}`, { method: "DELETE" });
-      const data = await res.json();
-      if (res.ok) {
-        if (closePositions && data.closeResult) {
-          const cr = data.closeResult;
-          if (cr.closed > 0) addToast({ type: "success", title: "Positions Closed", message: `${cr.closed} position(s) closed` });
-          if (cr.failed > 0) addToast({ type: "error", title: "Close Failed", message: `${cr.failed} position(s) failed to close` });
-        }
-        addToast({ type: "info", title: "Unfollowed", message: `Stopped copying ${shortenAddr(unfollowTarget)}` });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        // PRE-2026-05-16 this path silently called fetchStatus and
+        // closed the modal, leaving the subscription visible with no
+        // indication of failure. From the user's view: "I clicked
+        // unfollow but the subscription is still hanging there".
+        // Surface the real error so the user can react.
+        addToast({
+          type: "error",
+          title: "Unfollow Failed",
+          message: data.error || `Server returned ${res.status}. Try again.`,
+        });
+        return;
       }
+      if (closePositions && data.closeResult) {
+        const cr = data.closeResult;
+        if (cr.closed > 0) addToast({ type: "success", title: "Positions Closed", message: `${cr.closed} position(s) closed` });
+        if (cr.failed > 0) addToast({ type: "error", title: "Close Failed", message: `${cr.failed} position(s) failed to close` });
+      }
+      addToast({ type: "info", title: "Unfollowed", message: `Stopped copying ${shortenAddr(target)}` });
+      // Optimistic update: drop the subscription from local state
+      // immediately. fetchStatus() below confirms with the server,
+      // but the row vanishes from the UI before that request lands
+      // — guarantees no stale "still subscribed" feeling even if
+      // /api/copy/status hits a transient 503 on the next call.
+      setStatus((s) =>
+        s
+          ? { ...s, subscriptions: s.subscriptions.filter((x) => x.leaderAddr !== target) }
+          : s,
+      );
       await fetchStatus();
     } catch {
-      addToast({ type: "error", title: "Error", message: "Failed to unfollow" });
+      addToast({ type: "error", title: "Network Error", message: "Failed to reach server. Retry shortly." });
     } finally {
       setUnfollowing(false);
       setUnfollowTarget(null);

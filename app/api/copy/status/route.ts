@@ -80,18 +80,26 @@ export async function GET() {
       })),
     });
   } catch (err) {
-    // History DB may be unavailable in local dev
     const msg = err instanceof Error ? err.message : "Unknown error";
-    if (msg.includes("ECONNREFUSED") || msg.includes("connect")) {
-      return NextResponse.json({
-        sessionActive: false,
-        sessionExpires: null,
-        subscriptions: [],
-        stats: { totalTrades: 0, filledTrades: 0, failedTrades: 0, todayTrades: 0 },
-        recentTrades: [],
-      });
-    }
+    // PRE-2026-05-16 this branch returned a fake "empty session" body
+    // (sessionActive:false, subscriptions:[]) on ECONNREFUSED so local
+    // dev wouldn't crash. On PROD this masked transient DB hiccups
+    // (pool exhaustion, brief network blip) as "you lost your 30-day
+    // session and all your subscriptions" — user reloads, sees the
+    // activate UI, clicks Enable, and the active DB session gets
+    // overwritten by a fresh wallet sign. Same mask also made
+    // unfollow look broken: DELETE succeeds, the follow-up status
+    // fetch hits a transient error, fallback returns empty subs, UI
+    // shows… the stale subscription it cached before the click.
+    //
+    // Now: 503 on any DB error. Frontend keeps its previous status
+    // displayed (see CopyTradingPanel.fetchStatus) and retries on
+    // the next poll tick instead of blinking the user back to the
+    // "Enable Copy Trading" screen.
     console.error("[copy/status]", msg);
-    return NextResponse.json({ error: "An internal error occurred" }, { status: 500 });
+    return NextResponse.json(
+      { error: "Copy status temporarily unavailable. Retry in a moment." },
+      { status: 503 },
+    );
   }
 }
