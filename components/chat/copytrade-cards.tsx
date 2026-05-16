@@ -1,0 +1,1217 @@
+"use client";
+
+// Card renderers for the Copy-Trading (Analyze-mode) chat tools.
+//
+// Each card takes the raw tool `output` from /api/chat/copytrade and
+// renders it in a consistent dark/emerald visual language that
+// matches `components/copytrade/CompactLeaderboard.tsx` and
+// `components/copytrade/FollowTraderDialog.tsx`. Tool prompts in
+// the chat tell the AI "the card shows everything — keep your text
+// to one sentence", so every important number must surface here.
+//
+// All cards accept `onSendMessage` for inline CTAs (rows that
+// dispatch follow-up prompts like "copy #7915 with $100"). The
+// close-copy card additionally calls `onOpenCloseCopyModal` to
+// trigger the shared modal.
+
+import type { CloseCopyModalData } from "@/components/copytrade/CloseCopyPositionModal";
+
+// ─── Shared types ───────────────────────────────────────────────
+
+export interface CardCtx {
+  onSendMessage?: (msg: string) => void;
+  onOpenCloseCopyModal?: (data: CloseCopyModalData) => void;
+}
+
+type Json = Record<string, unknown>;
+
+// ─── Formatting helpers ─────────────────────────────────────────
+
+export function fmtAddr(addr: string | null | undefined): string {
+  if (!addr) return "—";
+  if (addr.startsWith("account:")) return "#" + addr.slice(8);
+  if (addr.length < 10) return addr;
+  return addr.slice(0, 4) + "…" + addr.slice(-4);
+}
+
+function fmtPnl(n: number | null | undefined): string {
+  if (n == null || !isFinite(n)) return "—";
+  const abs = Math.abs(n);
+  const sign = n > 0 ? "+" : n < 0 ? "-" : "";
+  if (abs >= 1_000_000) return sign + "$" + (abs / 1_000_000).toFixed(2) + "M";
+  if (abs >= 1_000) return sign + "$" + (abs / 1_000).toFixed(2) + "K";
+  if (abs >= 1) return sign + "$" + abs.toFixed(2);
+  return sign + "$" + abs.toFixed(4);
+}
+
+function fmtVol(n: number | null | undefined): string {
+  if (n == null || !isFinite(n) || n === 0) return "—";
+  if (n >= 1_000_000) return "$" + (n / 1_000_000).toFixed(2) + "M";
+  if (n >= 1_000) return "$" + (n / 1_000).toFixed(1) + "K";
+  return "$" + n.toFixed(0);
+}
+
+function fmtSize(n: number | null | undefined): string {
+  if (n == null || !isFinite(n)) return "—";
+  const abs = Math.abs(n);
+  if (abs >= 1) return abs.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+  return abs.toFixed(5).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function fmtPrice(n: number | null | undefined): string {
+  if (n == null || !isFinite(n)) return "—";
+  if (n >= 1000) return "$" + n.toLocaleString("en-US", { maximumFractionDigits: 2 });
+  if (n >= 1) return "$" + n.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+  return "$" + n.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function fmtAge(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const t = new Date(iso).getTime();
+  if (!isFinite(t)) return "—";
+  const diff = Math.max(0, Date.now() - t);
+  const m = Math.floor(diff / 60_000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
+function rankColor(rank: number): string {
+  if (rank === 1) return "text-yellow-400";
+  if (rank === 2) return "text-gray-300";
+  if (rank === 3) return "text-amber-600";
+  return "text-[#666]";
+}
+
+function pnlColor(n: number | null | undefined, neutralWhenZero = false): string {
+  if (n == null || n === 0) return neutralWhenZero ? "text-[#777]" : "text-foreground";
+  return n > 0 ? "text-emerald-400" : "text-red-400";
+}
+
+function winrateColor(n: number | null | undefined): string {
+  if (n == null) return "text-foreground";
+  if (n >= 60) return "text-emerald-400";
+  if (n >= 50) return "text-foreground";
+  return "text-red-400";
+}
+
+function riskColor(score: number): string {
+  if (score <= 3) return "text-emerald-400";
+  if (score <= 6) return "text-yellow-400";
+  return "text-red-400";
+}
+
+// ─── SuggestionChips ────────────────────────────────────────────
+//
+// Rendered ONCE per assistant message under the last tool card,
+// derived from the tool output's `nextSteps` array. Clicking a
+// chip dispatches the prompt to the chat as if the user typed it.
+
+export function SuggestionChips({
+  nextSteps,
+  onSendMessage,
+}: {
+  nextSteps: string[];
+  onSendMessage?: (msg: string) => void;
+}) {
+  if (!nextSteps || nextSteps.length === 0 || !onSendMessage) return null;
+  return (
+    <div className="mt-2 flex flex-wrap gap-1.5">
+      {nextSteps.slice(0, 4).map((step, i) => (
+        <button
+          key={i}
+          onClick={() => onSendMessage(step)}
+          className="rounded-full border border-[#262626] bg-[#141414] px-3 py-1 text-[11px] font-medium text-gray-300 transition-colors hover:border-emerald-500/40 hover:bg-emerald-500/5 hover:text-emerald-400"
+        >
+          {step}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ─── Card shell ─────────────────────────────────────────────────
+
+function CardShell({
+  title,
+  badge,
+  rightHeader,
+  children,
+}: {
+  title: string;
+  badge?: { count: number; tone?: "accent" | "neutral" };
+  rightHeader?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="my-2 w-full max-w-3xl overflow-hidden rounded-xl border border-[#262626] bg-[#0f0f0f]">
+      <div className="flex items-center justify-between border-b border-[#262626] px-4 py-2">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold text-white">{title}</span>
+          {badge && (
+            <span
+              className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
+                badge.tone === "neutral"
+                  ? "bg-white/10 text-gray-300"
+                  : "bg-emerald-500/15 text-emerald-400"
+              }`}
+            >
+              {badge.count}
+            </span>
+          )}
+        </div>
+        {rightHeader && <div className="text-[10px] text-[#888]">{rightHeader}</div>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function EmptyHint({ msg }: { msg: string }) {
+  return <div className="px-4 py-6 text-center text-xs text-gray-500">{msg}</div>;
+}
+
+// ─── 1. LeaderboardCard ─────────────────────────────────────────
+
+interface LeaderRow {
+  rank: number;
+  wallet: string;
+  fullAddress: string;
+  totalPnl: number;
+  winRate: number;
+  totalTrades: number;
+  liquidations: number;
+  totalVolume: number;
+}
+
+export function LeaderboardCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
+  const traders = (data.traders as LeaderRow[] | undefined) ?? [];
+  const period = String(data.period ?? "all");
+  const sort = String(data.sort ?? "pnl");
+  if (traders.length === 0) {
+    return (
+      <CardShell title="Leaderboard">
+        <EmptyHint msg="No traders found." />
+      </CardShell>
+    );
+  }
+  return (
+    <CardShell
+      title="Leaderboard"
+      badge={{ count: traders.length }}
+      rightHeader={
+        <span>
+          {period.toUpperCase()} · sort: {sort}
+        </span>
+      }
+    >
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-[#1f1f1f] text-[10px] text-[#888]">
+              <th className="w-8 px-3 py-2 text-left">#</th>
+              <th className="px-2 py-2 text-left">Trader</th>
+              <th className="px-2 py-2 text-right">PnL</th>
+              <th className="px-2 py-2 text-right">Win%</th>
+              <th className="px-2 py-2 text-right hidden sm:table-cell">Trades</th>
+              <th className="px-2 py-2 text-right">Vol</th>
+              <th className="px-2 py-2 text-right hidden sm:table-cell">Liq</th>
+              <th className="w-16 px-3 py-2 text-right"></th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-[#1a1a1a]">
+            {traders.map((t) => (
+              <tr key={t.fullAddress} className="group transition hover:bg-white/[0.02]">
+                <td className={`px-3 py-2 text-[11px] font-bold ${rankColor(t.rank)}`}>{t.rank}</td>
+                <td className="px-2 py-2 font-mono text-[11px] text-white">{t.wallet}</td>
+                <td className={`px-2 py-2 text-right font-mono text-[11px] font-semibold ${pnlColor(t.totalPnl)}`}>
+                  {fmtPnl(t.totalPnl)}
+                </td>
+                <td className={`px-2 py-2 text-right font-mono text-[11px] ${winrateColor(t.winRate)}`}>
+                  {t.winRate.toFixed(0)}%
+                </td>
+                <td className="px-2 py-2 text-right font-mono text-[10px] text-[#888] hidden sm:table-cell">
+                  {t.totalTrades}
+                </td>
+                <td className="px-2 py-2 text-right font-mono text-[10px] text-[#888]">{fmtVol(t.totalVolume)}</td>
+                <td
+                  className={`px-2 py-2 text-right font-mono text-[10px] hidden sm:table-cell ${
+                    t.liquidations === 0 ? "text-[#666]" : "text-red-400"
+                  }`}
+                >
+                  {t.liquidations}
+                </td>
+                <td className="px-3 py-2 text-right">
+                  <button
+                    onClick={() => ctx?.onSendMessage?.(`Analyze ${t.wallet}`)}
+                    className="rounded bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-400 opacity-0 transition-opacity hover:bg-emerald-500/20 group-hover:opacity-100"
+                  >
+                    Analyze
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </CardShell>
+  );
+}
+
+// ─── 2. TraderProfileCard ───────────────────────────────────────
+
+interface TraderProfileData {
+  wallet: string;
+  fullAddress: string;
+  totalPnl: number;
+  tradingPnl: number;
+  fundingPnl: number;
+  winRate: number;
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  avgPnlPerTrade: number;
+  liquidations: number;
+  totalVolume: number;
+  topTrades: Array<{ symbol: string; side: string; closedPnl: number; time: string }>;
+  marketBreakdown: Array<{ symbol: string; pnl: number; trades: number }>;
+}
+
+function MetricCell({ label, value, tone }: { label: string; value: string; tone?: string }) {
+  return (
+    <div className="flex flex-col gap-0.5 rounded-lg border border-[#1f1f1f] bg-[#141414] px-3 py-2">
+      <span className="text-[9px] uppercase tracking-wider text-[#666]">{label}</span>
+      <span className={`font-mono text-sm font-semibold ${tone ?? "text-white"}`}>{value}</span>
+    </div>
+  );
+}
+
+export function TraderProfileCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
+  const d = data as unknown as TraderProfileData;
+  return (
+    <CardShell title="Trader Profile" rightHeader={<span className="font-mono">{d.wallet}</span>}>
+      <div className="space-y-3 p-3">
+        {/* Headline metrics */}
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <MetricCell label="Total PnL" value={fmtPnl(d.totalPnl)} tone={pnlColor(d.totalPnl)} />
+          <MetricCell label="Win Rate" value={`${d.winRate.toFixed(1)}%`} tone={winrateColor(d.winRate)} />
+          <MetricCell label="Trades" value={String(d.totalTrades)} />
+          <MetricCell
+            label="Liquidations"
+            value={String(d.liquidations)}
+            tone={d.liquidations === 0 ? "text-emerald-400" : "text-red-400"}
+          />
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <MetricCell label="Trading PnL" value={fmtPnl(d.tradingPnl)} tone={pnlColor(d.tradingPnl)} />
+          <MetricCell label="Funding PnL" value={fmtPnl(d.fundingPnl)} tone={pnlColor(d.fundingPnl)} />
+          <MetricCell label="Avg / Trade" value={fmtPnl(d.avgPnlPerTrade)} tone={pnlColor(d.avgPnlPerTrade)} />
+          <MetricCell label="Volume" value={fmtVol(d.totalVolume)} />
+        </div>
+
+        {/* Markets breakdown */}
+        {d.marketBreakdown && d.marketBreakdown.length > 0 && (
+          <div>
+            <div className="mb-1 text-[10px] uppercase tracking-wider text-[#888]">By Market</div>
+            <div className="overflow-x-auto rounded-lg border border-[#1f1f1f] bg-[#141414]">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-[10px] text-[#888]">
+                    <th className="px-3 py-1.5 text-left">Market</th>
+                    <th className="px-3 py-1.5 text-right">PnL</th>
+                    <th className="px-3 py-1.5 text-right">Trades</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#1a1a1a]">
+                  {d.marketBreakdown.slice(0, 8).map((m) => (
+                    <tr key={m.symbol}>
+                      <td className="px-3 py-1.5 font-medium text-white">{m.symbol}</td>
+                      <td className={`px-3 py-1.5 text-right font-mono ${pnlColor(m.pnl)}`}>{fmtPnl(m.pnl)}</td>
+                      <td className="px-3 py-1.5 text-right font-mono text-[#888]">{m.trades}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* Top trades */}
+        {d.topTrades && d.topTrades.length > 0 && (
+          <div>
+            <div className="mb-1 text-[10px] uppercase tracking-wider text-[#888]">Top Trades</div>
+            <div className="space-y-1">
+              {d.topTrades.map((t, i) => (
+                <div
+                  key={i}
+                  className="flex items-center justify-between rounded-lg border border-[#1f1f1f] bg-[#141414] px-3 py-1.5"
+                >
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase ${
+                        t.side === "Long" || t.side === "long"
+                          ? "bg-emerald-500/15 text-emerald-400"
+                          : "bg-red-500/15 text-red-400"
+                      }`}
+                    >
+                      {t.side}
+                    </span>
+                    <span className="font-medium text-white">{t.symbol}</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className={`font-mono text-xs ${pnlColor(t.closedPnl)}`}>{fmtPnl(t.closedPnl)}</span>
+                    <span className="text-[10px] text-[#666]">{fmtAge(t.time)}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* CTA row */}
+        <div className="flex gap-2 pt-1">
+          <button
+            onClick={() => ctx?.onSendMessage?.(`Copy ${d.wallet} with $100`)}
+            className="flex-1 rounded-lg bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-400 transition-colors hover:bg-emerald-500/25"
+          >
+            Copy with $100
+          </button>
+          <button
+            onClick={() => ctx?.onSendMessage?.(`Show ${d.wallet}'s open positions`)}
+            className="flex-1 rounded-lg border border-[#262626] bg-[#141414] px-3 py-2 text-xs font-medium text-gray-300 transition-colors hover:bg-[#1a1a1a]"
+          >
+            Live Positions
+          </button>
+        </div>
+      </div>
+    </CardShell>
+  );
+}
+
+// ─── 3. CopyStatusCard ──────────────────────────────────────────
+
+interface CopyStatusData {
+  sessionActive: boolean;
+  sessionExpires: string | null;
+  subscriptions: Array<{
+    leaderAddr: string;
+    fullLeaderAddr: string;
+    allocationUsdc: string | number;
+    leverageMult: string | number;
+    active: boolean;
+  }>;
+  stats: Record<string, unknown> | null;
+  recentTrades: Array<{
+    symbol: string;
+    side: string;
+    size: string | number;
+    status: string;
+    error: string | null;
+    createdAt: string;
+  }>;
+}
+
+function StatusBadge({ active }: { active: boolean }) {
+  return (
+    <span
+      className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+        active
+          ? "bg-emerald-500/15 text-emerald-400"
+          : "bg-red-500/15 text-red-400"
+      }`}
+    >
+      {active ? "ACTIVE" : "INACTIVE"}
+    </span>
+  );
+}
+
+export function CopyStatusCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
+  const d = data as unknown as CopyStatusData;
+  const expiresIn = d.sessionExpires
+    ? Math.max(0, Math.floor((new Date(d.sessionExpires).getTime() - Date.now()) / 86_400_000))
+    : null;
+  return (
+    <CardShell title="Copy Trading Status" rightHeader={<StatusBadge active={d.sessionActive} />}>
+      <div className="space-y-3 p-3">
+        {/* Session */}
+        <div className="flex items-center justify-between rounded-lg border border-[#1f1f1f] bg-[#141414] px-3 py-2">
+          <span className="text-xs text-gray-400">Session</span>
+          {d.sessionActive ? (
+            <span className="font-mono text-xs text-white">
+              {expiresIn !== null ? `${expiresIn}d remaining` : "Active"}
+            </span>
+          ) : (
+            <button
+              onClick={() => ctx?.onSendMessage?.("How do I activate my copy trading session?")}
+              className="rounded bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400 hover:bg-emerald-500/25"
+            >
+              Activate
+            </button>
+          )}
+        </div>
+
+        {/* Subscriptions */}
+        <div>
+          <div className="mb-1 flex items-center justify-between">
+            <span className="text-[10px] uppercase tracking-wider text-[#888]">
+              Subscriptions ({d.subscriptions.length})
+            </span>
+          </div>
+          {d.subscriptions.length === 0 ? (
+            <EmptyHint msg="No active subscriptions yet." />
+          ) : (
+            <div className="space-y-1">
+              {d.subscriptions.map((s) => (
+                <div
+                  key={s.fullLeaderAddr}
+                  className="flex items-center justify-between rounded-lg border border-[#1f1f1f] bg-[#141414] px-3 py-2"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className={`h-1.5 w-1.5 rounded-full ${s.active ? "bg-emerald-400" : "bg-[#444]"}`} />
+                    <span className="font-mono text-xs text-white">{s.leaderAddr}</span>
+                  </div>
+                  <div className="flex items-center gap-2 text-[10px] text-[#888]">
+                    <span className="font-mono">${s.allocationUsdc}</span>
+                    <span>·</span>
+                    <span className="font-mono">{s.leverageMult}x</span>
+                    <button
+                      onClick={() => ctx?.onSendMessage?.(`Stop copying ${s.leaderAddr}`)}
+                      className="ml-2 rounded border border-[#262626] px-1.5 py-0.5 text-[9px] font-medium text-[#888] transition-colors hover:border-red-500/40 hover:text-red-400"
+                    >
+                      Unfollow
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Recent trades */}
+        {d.recentTrades && d.recentTrades.length > 0 && (
+          <div>
+            <div className="mb-1 text-[10px] uppercase tracking-wider text-[#888]">Recent Copies</div>
+            <div className="space-y-1">
+              {d.recentTrades.map((t, i) => (
+                <div
+                  key={i}
+                  className="flex items-center justify-between rounded-lg border border-[#1f1f1f] bg-[#141414] px-3 py-1.5 text-[11px]"
+                >
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`rounded px-1 py-0.5 text-[9px] font-semibold uppercase ${
+                        t.side.toLowerCase() === "long"
+                          ? "bg-emerald-500/15 text-emerald-400"
+                          : "bg-red-500/15 text-red-400"
+                      }`}
+                    >
+                      {t.side}
+                    </span>
+                    <span className="text-white">{t.symbol}</span>
+                    <span className="font-mono text-[#888]">{fmtSize(Number(t.size))}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`text-[10px] uppercase ${
+                        t.status === "filled"
+                          ? "text-emerald-400"
+                          : t.status === "failed"
+                            ? "text-red-400"
+                            : "text-[#888]"
+                      }`}
+                    >
+                      {t.status}
+                    </span>
+                    <span className="text-[10px] text-[#666]">{fmtAge(t.createdAt)}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </CardShell>
+  );
+}
+
+// ─── 4. FollowSuccessCard ───────────────────────────────────────
+
+export function FollowSuccessCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
+  const leader = String(data.leader ?? "");
+  const fullAddr = String(data.fullLeaderAddr ?? leader);
+  const alloc = Number(data.allocationUsdc);
+  const lev = Number(data.leverageMult);
+  return (
+    <CardShell title="Now Following">
+      <div className="space-y-3 p-4">
+        <div className="flex items-center justify-center gap-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-3">
+          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500/15">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#34d399" strokeWidth="3">
+              <path d="M20 6L9 17l-5-5" />
+            </svg>
+          </div>
+          <div className="flex flex-col">
+            <span className="font-mono text-sm font-semibold text-white">{leader}</span>
+            <span className="text-[10px] text-gray-400">
+              ${alloc.toFixed(0)} allocation · {lev}x leverage
+            </span>
+          </div>
+        </div>
+        <p className="text-center text-[11px] text-gray-500">
+          The copy engine mirrors trades within ~15s. Cancel anytime from the Copy Trading panel.
+        </p>
+        <div className="flex gap-2">
+          <button
+            onClick={() => ctx?.onSendMessage?.(`Show ${leader}'s open positions`)}
+            className="flex-1 rounded-lg border border-[#262626] bg-[#141414] px-3 py-2 text-xs font-medium text-gray-300 hover:bg-[#1a1a1a]"
+          >
+            View Their Positions
+          </button>
+          <button
+            onClick={() => ctx?.onSendMessage?.("Show my active copies")}
+            className="flex-1 rounded-lg border border-[#262626] bg-[#141414] px-3 py-2 text-xs font-medium text-gray-300 hover:bg-[#1a1a1a]"
+          >
+            My Copies
+          </button>
+        </div>
+        {/* Silence unused-var lint in builds that strip JSX */}
+        <span className="hidden" data-leader={fullAddr} />
+      </div>
+    </CardShell>
+  );
+}
+
+// ─── 5. UnfollowResultCard ──────────────────────────────────────
+
+export function UnfollowResultCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
+  const leader = String(data.leader ?? "");
+  return (
+    <CardShell title="Unfollowed">
+      <div className="space-y-3 p-4">
+        <div className="rounded-xl border border-[#262626] bg-[#141414] px-4 py-3 text-sm text-gray-300">
+          No more trades will be copied from{" "}
+          <span className="font-mono font-semibold text-white">{leader}</span>. Any existing
+          positions stay open until you close them manually.
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={() => ctx?.onSendMessage?.("Show my open copy positions")}
+            className="flex-1 rounded-lg border border-[#262626] bg-[#141414] px-3 py-2 text-xs font-medium text-gray-300 hover:bg-[#1a1a1a]"
+          >
+            Show My Open Copies
+          </button>
+          <button
+            onClick={() => ctx?.onSendMessage?.("Show top traders this week")}
+            className="flex-1 rounded-lg border border-[#262626] bg-[#141414] px-3 py-2 text-xs font-medium text-gray-300 hover:bg-[#1a1a1a]"
+          >
+            Top Traders
+          </button>
+        </div>
+      </div>
+    </CardShell>
+  );
+}
+
+// ─── 6. TraderPositionsCard ─────────────────────────────────────
+
+interface TraderPositionsData {
+  trader: string;
+  fullAddress: string;
+  accountId: number;
+  equity: number;
+  positionCount: number;
+  positions: Array<{
+    marketId: number;
+    symbol: string;
+    side: "Long" | "Short";
+    size: number;
+    entryPrice: number;
+    tradingPnl: number;
+  }>;
+}
+
+export function TraderPositionsCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
+  const d = data as unknown as TraderPositionsData;
+  return (
+    <CardShell
+      title={`${d.trader} Positions`}
+      badge={{ count: d.positionCount, tone: d.positionCount === 0 ? "neutral" : "accent" }}
+      rightHeader={<span>Equity: <span className="font-mono text-white">${d.equity.toFixed(2)}</span></span>}
+    >
+      {d.positions.length === 0 ? (
+        <EmptyHint msg="No open positions right now." />
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-[#1f1f1f] text-[10px] text-[#888]">
+                <th className="px-3 py-2 text-left">Market</th>
+                <th className="px-2 py-2 text-left">Side</th>
+                <th className="px-2 py-2 text-right">Size</th>
+                <th className="px-2 py-2 text-right">Entry</th>
+                <th className="px-2 py-2 text-right">PnL</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#1a1a1a]">
+              {d.positions.map((p) => (
+                <tr key={p.marketId} className="transition hover:bg-white/[0.02]">
+                  <td className="px-3 py-2 font-medium text-white">{p.symbol}</td>
+                  <td className="px-2 py-2">
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase ${
+                        p.side === "Long"
+                          ? "bg-emerald-500/15 text-emerald-400"
+                          : "bg-red-500/15 text-red-400"
+                      }`}
+                    >
+                      {p.side}
+                    </span>
+                  </td>
+                  <td className="px-2 py-2 text-right font-mono text-[11px] text-gray-300">{fmtSize(p.size)}</td>
+                  <td className="px-2 py-2 text-right font-mono text-[11px] text-gray-300">{fmtPrice(p.entryPrice)}</td>
+                  <td className={`px-2 py-2 text-right font-mono text-[11px] font-semibold ${pnlColor(p.tradingPnl)}`}>
+                    {fmtPnl(p.tradingPnl)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <div className="border-t border-[#1f1f1f] px-3 py-2">
+        <button
+          onClick={() => ctx?.onSendMessage?.(`Copy ${d.trader} with $100`)}
+          className="w-full rounded-lg bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-400 hover:bg-emerald-500/25"
+        >
+          Copy {d.trader} with $100
+        </button>
+      </div>
+    </CardShell>
+  );
+}
+
+// ─── 7. SuggestTradersCard ──────────────────────────────────────
+
+interface SuggestData {
+  criteria: { riskLevel: string; minTrades: number };
+  matchCount: number;
+  suggestions: Array<{
+    rank: number;
+    wallet: string;
+    fullAddress: string;
+    totalPnl: number;
+    winRate: number;
+    totalTrades: number;
+    liquidations: number;
+    riskScore: number;
+    suggestedAllocation: string;
+  }>;
+}
+
+export function SuggestTradersCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
+  const d = data as unknown as SuggestData;
+  if (d.suggestions.length === 0) {
+    return (
+      <CardShell title="Suggested Traders">
+        <EmptyHint msg="No matches for the chosen risk profile. Try widening the criteria." />
+      </CardShell>
+    );
+  }
+  return (
+    <CardShell
+      title="Suggested Traders"
+      badge={{ count: d.suggestions.length }}
+      rightHeader={<span>Risk: {d.criteria.riskLevel}</span>}
+    >
+      <div className="space-y-2 p-3">
+        {d.suggestions.map((s) => (
+          <div
+            key={s.fullAddress}
+            className="grid grid-cols-[auto,1fr,auto] items-center gap-3 rounded-lg border border-[#1f1f1f] bg-[#141414] px-3 py-2"
+          >
+            <span className={`text-base font-bold ${rankColor(s.rank)}`}>{s.rank}</span>
+            <div className="flex flex-col gap-0.5">
+              <span className="font-mono text-sm text-white">{s.wallet}</span>
+              <div className="flex items-center gap-3 text-[10px]">
+                <span className={pnlColor(s.totalPnl)}>{fmtPnl(s.totalPnl)}</span>
+                <span className={winrateColor(s.winRate)}>{s.winRate.toFixed(0)}% win</span>
+                <span className="text-[#666]">{s.totalTrades} trades</span>
+                <span className={`font-semibold ${riskColor(s.riskScore)}`}>Risk {s.riskScore}/10</span>
+              </div>
+            </div>
+            <div className="flex flex-col items-end gap-1">
+              <span className="text-[9px] text-[#888]">Suggested: {s.suggestedAllocation}</span>
+              <button
+                onClick={() => ctx?.onSendMessage?.(`Copy ${s.wallet} with $100`)}
+                className="rounded bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400 hover:bg-emerald-500/25"
+              >
+                Copy
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </CardShell>
+  );
+}
+
+// ─── 8. MarketTopTradersCard ────────────────────────────────────
+
+interface MarketTopData {
+  market: string;
+  period: string;
+  traders: Array<{
+    rank: number;
+    wallet: string;
+    fullAddress: string;
+    pnl: number;
+    winRate: number;
+    trades: number;
+    volume: number;
+  }>;
+}
+
+export function MarketTopTradersCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
+  const d = data as unknown as MarketTopData;
+  return (
+    <CardShell
+      title={`Top on ${d.market}`}
+      badge={{ count: d.traders.length }}
+      rightHeader={<span>{d.period.toUpperCase()}</span>}
+    >
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-[#1f1f1f] text-[10px] text-[#888]">
+              <th className="w-8 px-3 py-2 text-left">#</th>
+              <th className="px-2 py-2 text-left">Trader</th>
+              <th className="px-2 py-2 text-right">PnL</th>
+              <th className="px-2 py-2 text-right">Win%</th>
+              <th className="px-2 py-2 text-right">Trades</th>
+              <th className="px-2 py-2 text-right">Vol</th>
+              <th className="w-16 px-3 py-2 text-right"></th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-[#1a1a1a]">
+            {d.traders.map((t) => (
+              <tr key={t.fullAddress} className="group transition hover:bg-white/[0.02]">
+                <td className={`px-3 py-2 text-[11px] font-bold ${rankColor(t.rank)}`}>{t.rank}</td>
+                <td className="px-2 py-2 font-mono text-[11px] text-white">{t.wallet}</td>
+                <td className={`px-2 py-2 text-right font-mono text-[11px] font-semibold ${pnlColor(t.pnl)}`}>
+                  {fmtPnl(t.pnl)}
+                </td>
+                <td className={`px-2 py-2 text-right font-mono text-[11px] ${winrateColor(t.winRate)}`}>
+                  {t.winRate.toFixed(0)}%
+                </td>
+                <td className="px-2 py-2 text-right font-mono text-[10px] text-[#888]">{t.trades}</td>
+                <td className="px-2 py-2 text-right font-mono text-[10px] text-[#888]">{fmtVol(t.volume)}</td>
+                <td className="px-3 py-2 text-right">
+                  <button
+                    onClick={() => ctx?.onSendMessage?.(`Analyze ${t.wallet}`)}
+                    className="rounded bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-400 opacity-0 transition-opacity hover:bg-emerald-500/20 group-hover:opacity-100"
+                  >
+                    Analyze
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </CardShell>
+  );
+}
+
+// ─── 9. CompareTradersCard ──────────────────────────────────────
+
+interface CompareData {
+  traders: Array<
+    | { address: string; fullAddress: string; error: string }
+    | {
+        address: string;
+        fullAddress: string;
+        totalPnl: number;
+        winRate: number;
+        totalTrades: number;
+        liquidations: number;
+        totalVolume: number;
+        avgPnlPerTrade: number;
+        riskScore: number;
+        topMarkets: string[];
+      }
+  >;
+}
+
+export function CompareTradersCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
+  const d = data as unknown as CompareData;
+  return (
+    <CardShell title="Compare" badge={{ count: d.traders.length }}>
+      <div className={`grid gap-2 p-3 ${d.traders.length === 2 ? "grid-cols-2" : "grid-cols-3"}`}>
+        {d.traders.map((t, i) => {
+          if ("error" in t && t.error) {
+            return (
+              <div
+                key={i}
+                className="rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-2 text-xs text-red-400"
+              >
+                <div className="font-mono text-white">{t.address}</div>
+                <div className="mt-1">{t.error}</div>
+              </div>
+            );
+          }
+          const ft = t as Exclude<CompareData["traders"][number], { error: string }>;
+          return (
+            <div
+              key={i}
+              className="flex flex-col gap-1.5 rounded-lg border border-[#1f1f1f] bg-[#141414] p-3"
+            >
+              <div className="flex items-center justify-between">
+                <span className="font-mono text-sm font-semibold text-white">{ft.address}</span>
+                <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold ${riskColor(ft.riskScore)}`}>
+                  R{ft.riskScore}
+                </span>
+              </div>
+              <div className="space-y-0.5 text-[10px]">
+                <div className="flex justify-between">
+                  <span className="text-[#888]">PnL</span>
+                  <span className={`font-mono ${pnlColor(ft.totalPnl)}`}>{fmtPnl(ft.totalPnl)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#888]">Win Rate</span>
+                  <span className={`font-mono ${winrateColor(ft.winRate)}`}>{ft.winRate.toFixed(0)}%</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#888]">Trades</span>
+                  <span className="font-mono text-gray-300">{ft.totalTrades}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#888]">Liq</span>
+                  <span className={`font-mono ${ft.liquidations === 0 ? "text-emerald-400" : "text-red-400"}`}>
+                    {ft.liquidations}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#888]">Avg</span>
+                  <span className={`font-mono ${pnlColor(ft.avgPnlPerTrade)}`}>{fmtPnl(ft.avgPnlPerTrade)}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#888]">Volume</span>
+                  <span className="font-mono text-gray-300">{fmtVol(ft.totalVolume)}</span>
+                </div>
+              </div>
+              {ft.topMarkets && ft.topMarkets.length > 0 && (
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {ft.topMarkets.slice(0, 3).map((m) => (
+                    <span
+                      key={m}
+                      className="rounded bg-white/5 px-1.5 py-0.5 text-[9px] text-gray-300"
+                    >
+                      {m}
+                    </span>
+                  ))}
+                </div>
+              )}
+              <button
+                onClick={() => ctx?.onSendMessage?.(`Copy ${ft.address} with $100`)}
+                className="mt-1 rounded bg-emerald-500/15 px-2 py-1 text-[10px] font-semibold text-emerald-400 hover:bg-emerald-500/25"
+              >
+                Copy
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </CardShell>
+  );
+}
+
+// ─── 10. OpenCopyPositionsCard ──────────────────────────────────
+
+interface OpenCopyPosData {
+  count: number;
+  positions: Array<{
+    marketId: number;
+    symbol: string;
+    side: "Long" | "Short";
+    size: number;
+    entryPrice: number;
+    tradingPnl: number;
+    fundingPnl: number;
+    totalPnl: number;
+    owningLeader: string;
+    fullLeaderAddr: string;
+    openedAt: string;
+  }>;
+}
+
+export function OpenCopyPositionsCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
+  const d = data as unknown as OpenCopyPosData;
+  if (d.positions.length === 0) {
+    return (
+      <CardShell title="Open Copy Positions" badge={{ count: 0, tone: "neutral" }}>
+        <EmptyHint msg="You don't have any open copy-tracked positions right now." />
+      </CardShell>
+    );
+  }
+  return (
+    <CardShell title="Open Copy Positions" badge={{ count: d.positions.length }}>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-[#1f1f1f] text-[10px] text-[#888]">
+              <th className="px-3 py-2 text-left">Market</th>
+              <th className="px-2 py-2 text-left">Side</th>
+              <th className="px-2 py-2 text-right">Size</th>
+              <th className="px-2 py-2 text-right">Entry</th>
+              <th className="px-2 py-2 text-right">PnL</th>
+              <th className="px-2 py-2 text-left">Leader</th>
+              <th className="px-2 py-2 text-left hidden sm:table-cell">Opened</th>
+              <th className="w-20 px-3 py-2 text-right"></th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-[#1a1a1a]">
+            {d.positions.map((p) => (
+              <tr key={p.marketId} className="transition hover:bg-white/[0.02]">
+                <td className="px-3 py-2 font-medium text-white">{p.symbol}</td>
+                <td className="px-2 py-2">
+                  <span
+                    className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase ${
+                      p.side === "Long"
+                        ? "bg-emerald-500/15 text-emerald-400"
+                        : "bg-red-500/15 text-red-400"
+                    }`}
+                  >
+                    {p.side}
+                  </span>
+                </td>
+                <td className="px-2 py-2 text-right font-mono text-[11px] text-gray-300">{fmtSize(p.size)}</td>
+                <td className="px-2 py-2 text-right font-mono text-[11px] text-gray-300">{fmtPrice(p.entryPrice)}</td>
+                <td className={`px-2 py-2 text-right font-mono text-[11px] font-semibold ${pnlColor(p.totalPnl)}`}>
+                  {fmtPnl(p.totalPnl)}
+                </td>
+                <td className="px-2 py-2 font-mono text-[10px] text-[#888]">{p.owningLeader}</td>
+                <td className="px-2 py-2 text-[10px] text-[#666] hidden sm:table-cell">{fmtAge(p.openedAt)}</td>
+                <td className="px-3 py-2 text-right">
+                  <button
+                    onClick={() => ctx?.onSendMessage?.(`Close my ${p.symbol} copy`)}
+                    className="rounded bg-red-500/10 px-2 py-0.5 text-[10px] font-semibold text-red-400 hover:bg-red-500/20"
+                  >
+                    Close
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </CardShell>
+  );
+}
+
+// ─── 11. CloseCopyConfirmCard ───────────────────────────────────
+
+interface CloseCopyPreview {
+  preview: true;
+  marketId: number;
+  symbol: string;
+  side: "Long" | "Short";
+  size: number;
+  entryPrice: number;
+  tradingPnl: number;
+  fundingPnl: number;
+  totalPnl: number;
+  owningLeader: string;
+  fullLeaderAddr: string;
+}
+
+export function CloseCopyConfirmCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
+  const d = data as unknown as CloseCopyPreview;
+  const handleClick = () => {
+    ctx?.onOpenCloseCopyModal?.({
+      marketId: d.marketId,
+      symbol: d.symbol,
+      side: d.side,
+      size: d.size,
+      entryPrice: d.entryPrice,
+      tradingPnl: d.tradingPnl,
+      fundingPnl: d.fundingPnl,
+      owningLeader: d.owningLeader,
+    });
+  };
+  return (
+    <CardShell title="Close Copy Position">
+      <div className="space-y-3 p-3">
+        <div className="rounded-lg border border-[#1f1f1f] bg-[#141414] p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="font-medium text-white">{d.symbol}</span>
+            <span
+              className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${
+                d.side === "Long" ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"
+              }`}
+            >
+              {d.side}
+            </span>
+          </div>
+          <div className="grid grid-cols-3 gap-2 text-[11px]">
+            <div className="flex flex-col">
+              <span className="text-[9px] uppercase text-[#666]">Size</span>
+              <span className="font-mono text-gray-300">{fmtSize(d.size)}</span>
+            </div>
+            <div className="flex flex-col">
+              <span className="text-[9px] uppercase text-[#666]">Entry</span>
+              <span className="font-mono text-gray-300">{fmtPrice(d.entryPrice)}</span>
+            </div>
+            <div className="flex flex-col">
+              <span className="text-[9px] uppercase text-[#666]">PnL</span>
+              <span className={`font-mono font-semibold ${pnlColor(d.totalPnl)}`}>{fmtPnl(d.totalPnl)}</span>
+            </div>
+          </div>
+          <div className="mt-2 text-[10px] text-[#888]">
+            Copied from <span className="font-mono text-gray-300">{d.owningLeader}</span>
+          </div>
+        </div>
+        <button
+          onClick={handleClick}
+          className="w-full rounded-lg bg-gradient-to-r from-red-500/80 to-red-400/80 px-3 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90"
+        >
+          Open Close Dialog
+        </button>
+      </div>
+    </CardShell>
+  );
+}
+
+// ─── 12. CopyHistoryCard ────────────────────────────────────────
+
+interface CopyHistoryData {
+  total: number;
+  shown: number;
+  filter: { leaderAddr: string | null; status: string | null };
+  trades: Array<{
+    id: string;
+    symbol: string;
+    side: string;
+    size: string | number;
+    price: string | number | null;
+    status: string;
+    error: string | null;
+    leader: string;
+    fullLeaderAddr: string;
+    createdAt: string;
+    filledAt: string | null;
+  }>;
+}
+
+function statusColor(s: string): string {
+  switch (s) {
+    case "filled":
+      return "text-emerald-400";
+    case "failed":
+      return "text-red-400";
+    case "skipped":
+    case "cancelled":
+      return "text-yellow-400";
+    case "pending":
+      return "text-blue-400";
+    default:
+      return "text-[#888]";
+  }
+}
+
+export function CopyHistoryCard({ data, ctx }: { data: Json; ctx?: CardCtx }) {
+  const d = data as unknown as CopyHistoryData;
+  const filterLabel: string[] = [];
+  if (d.filter.leaderAddr) filterLabel.push(fmtAddr(d.filter.leaderAddr));
+  if (d.filter.status) filterLabel.push(d.filter.status);
+  if (d.trades.length === 0) {
+    return (
+      <CardShell title="Copy History" badge={{ count: 0, tone: "neutral" }}>
+        <EmptyHint msg="No copy trades match this filter yet." />
+      </CardShell>
+    );
+  }
+  return (
+    <CardShell
+      title="Copy History"
+      badge={{ count: d.total }}
+      rightHeader={
+        <span>
+          {d.shown} of {d.total}
+          {filterLabel.length > 0 ? ` · ${filterLabel.join(" · ")}` : ""}
+        </span>
+      }
+    >
+      <div className="max-h-[400px] overflow-y-auto">
+        <table className="w-full text-xs">
+          <thead className="sticky top-0 bg-[#0f0f0f]">
+            <tr className="border-b border-[#1f1f1f] text-[10px] text-[#888]">
+              <th className="px-3 py-2 text-left">When</th>
+              <th className="px-2 py-2 text-left">Market</th>
+              <th className="px-2 py-2 text-left">Side</th>
+              <th className="px-2 py-2 text-right">Size</th>
+              <th className="px-2 py-2 text-right">Price</th>
+              <th className="px-2 py-2 text-left">Leader</th>
+              <th className="px-2 py-2 text-left">Status</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-[#1a1a1a]">
+            {d.trades.map((t) => (
+              <tr key={t.id} className="transition hover:bg-white/[0.02]">
+                <td
+                  className="px-3 py-2 text-[10px] text-[#888]"
+                  title={t.createdAt}
+                >
+                  {fmtAge(t.createdAt)}
+                </td>
+                <td className="px-2 py-2 font-medium text-white">{t.symbol}</td>
+                <td className="px-2 py-2">
+                  <span
+                    className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase ${
+                      t.side.toLowerCase() === "long"
+                        ? "bg-emerald-500/15 text-emerald-400"
+                        : "bg-red-500/15 text-red-400"
+                    }`}
+                  >
+                    {t.side}
+                  </span>
+                </td>
+                <td className="px-2 py-2 text-right font-mono text-[11px] text-gray-300">
+                  {fmtSize(Number(t.size))}
+                </td>
+                <td className="px-2 py-2 text-right font-mono text-[10px] text-[#888]">
+                  {t.price != null ? fmtPrice(Number(t.price)) : "—"}
+                </td>
+                <td className="px-2 py-2 font-mono text-[10px] text-[#888]">{t.leader}</td>
+                <td className="px-2 py-2">
+                  <span className={`text-[10px] font-semibold uppercase ${statusColor(t.status)}`}>
+                    {t.status}
+                  </span>
+                  {t.error && (
+                    <span
+                      className="ml-1 text-[10px] text-red-400"
+                      title={t.error}
+                    >
+                      ⚠
+                    </span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="border-t border-[#1f1f1f] px-3 py-2">
+        <button
+          onClick={() => ctx?.onSendMessage?.("Show my open copy positions")}
+          className="w-full rounded-lg border border-[#262626] bg-[#141414] px-3 py-1.5 text-xs font-medium text-gray-300 hover:bg-[#1a1a1a]"
+        >
+          Show My Open Copies
+        </button>
+      </div>
+    </CardShell>
+  );
+}

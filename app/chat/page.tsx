@@ -20,10 +20,27 @@ import {
 } from "@/hooks/useLiveAccountState";
 import { isNordWsEnabledForSession } from "@/lib/feature-flags";
 import { ClosePositionModal } from "@/components/collateral/ClosePositionModal";
+import { CloseCopyPositionModal, type CloseCopyModalData } from "@/components/copytrade/CloseCopyPositionModal";
 import { useToast } from "@/components/alerts/ToastProvider";
 import { usePageActive } from "@/hooks/usePageActive";
 import { useChartPanel, useChartPanelSafe, type ChatMode } from "@/lib/chat/chart-panel-context";
 import { ChatModeToggle } from "@/components/chat/ChatModeToggle";
+import {
+  LeaderboardCard,
+  TraderProfileCard,
+  CopyStatusCard,
+  FollowSuccessCard,
+  UnfollowResultCard,
+  TraderPositionsCard,
+  SuggestTradersCard,
+  MarketTopTradersCard,
+  CompareTradersCard,
+  OpenCopyPositionsCard,
+  CloseCopyConfirmCard,
+  CopyHistoryCard,
+  SuggestionChips,
+  type CardCtx,
+} from "@/components/chat/copytrade-cards";
 
 const PriceChart = lazy(() =>
   import("@/components/charts/PriceChart").then((m) => ({ default: m.PriceChart }))
@@ -48,6 +65,10 @@ type CloseModalData = {
 /** Module-level ref for opening the close modal from any nested component */
 let openCloseModalFn: ((data: CloseModalData) => void) | null = null;
 export function openCloseModal(data: CloseModalData) { openCloseModalFn?.(data); }
+
+/** Same pattern for the copy-trading close modal (Analyze-mode chat cards). */
+let openCloseCopyModalFn: ((data: CloseCopyModalData) => void) | null = null;
+export function openCloseCopyModal(data: CloseCopyModalData) { openCloseCopyModalFn?.(data); }
 
 // ─── Constants ──────────────────────────────────────────────────
 
@@ -448,11 +469,16 @@ function ChatContent({ chatId, chatMode, onModeChange }: { chatId: string; chatM
   });
   const { closePosition: doClosePosition } = useOrderActions();
   const [closeModalData, setCloseModalData] = useState<CloseModalData | null>(null);
+  const [closeCopyModalData, setCloseCopyModalData] = useState<CloseCopyModalData | null>(null);
 
   // Register module-level opener so nested components can open the modal
   useEffect(() => {
     openCloseModalFn = setCloseModalData;
-    return () => { openCloseModalFn = null; };
+    openCloseCopyModalFn = setCloseCopyModalData;
+    return () => {
+      openCloseModalFn = null;
+      openCloseCopyModalFn = null;
+    };
   }, []);
 
   // Pick up prefill from "Trade X" button on markets page
@@ -678,6 +704,7 @@ function ChatContent({ chatId, chatMode, onModeChange }: { chatId: string; chatM
                     closedSymbols={closedSymbols}
                     onSendMessage={handleCardAction}
                     onOpenCloseModal={setCloseModalData}
+                    onOpenCloseCopyModal={setCloseCopyModalData}
                     isDismissed={isDismissed}
                     messageId={msg.id}
                   />
@@ -734,6 +761,14 @@ function ChatContent({ chatId, chatMode, onModeChange }: { chatId: string; chatM
           onClose={() => setCloseModalData(null)}
         />
       )}
+
+      {closeCopyModalData && (
+        <CloseCopyPositionModal
+          isOpen
+          data={closeCopyModalData}
+          onClose={() => setCloseCopyModalData(null)}
+        />
+      )}
     </div>
   );
 }
@@ -747,6 +782,7 @@ function MessageContent({
   closedSymbols,
   onSendMessage,
   onOpenCloseModal,
+  onOpenCloseCopyModal,
   isDismissed,
   messageId,
 }: {
@@ -756,6 +792,7 @@ function MessageContent({
   closedSymbols?: Set<string>;
   onSendMessage?: (msg: string) => void;
   onOpenCloseModal?: (data: CloseModalData) => void;
+  onOpenCloseCopyModal?: (data: CloseCopyModalData) => void;
   isDismissed?: boolean;
   messageId?: string;
 }) {
@@ -849,6 +886,7 @@ function MessageContent({
               closedSymbols={closedSymbols}
               onSendMessage={onSendMessage}
               onOpenCloseModal={onOpenCloseModal}
+              onOpenCloseCopyModal={onOpenCloseCopyModal}
               isDismissed={isDismissed}
               cardIndex={g.tools[0].idx}
               messageId={messageId}
@@ -857,6 +895,27 @@ function MessageContent({
             />
           );
         })}
+        {/*
+         * Suggestion chips: one row per message, derived from the LAST
+         * tool result that carries a `nextSteps` array. Only the Analyze
+         * mode (copytrade route) emits these today; trade-mode tools
+         * stay silent and no chips render — same component, both modes.
+         */}
+        {(() => {
+          const lastWithSteps = [...groups]
+            .reverse()
+            .flatMap((g) => g.tools)
+            .map((t) => {
+              const out = (t.part.output ?? {}) as Record<string, unknown>;
+              const steps = Array.isArray(out.nextSteps)
+                ? (out.nextSteps as unknown[]).filter((s): s is string => typeof s === "string")
+                : null;
+              return steps && steps.length > 0 ? steps : null;
+            })
+            .find(Boolean);
+          if (!lastWithSteps) return null;
+          return <SuggestionChips nextSteps={lastWithSteps} onSendMessage={onSendMessage} />;
+        })()}
       </div>
     );
   }
@@ -922,7 +981,7 @@ function SimpleMarkdown({ text }: { text: string }) {
 
 // ─── Tool Result Rendering ───────────────────────────────────────
 
-function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, onOpenCloseModal, isDismissed, cardIndex, messageId, descriptionText, beforeText }: { part: ToolMessagePart; realtimePrices?: Record<string, number>; closedSymbols?: Set<string>; onSendMessage?: (msg: string) => void; onOpenCloseModal?: (data: CloseModalData) => void; isDismissed?: boolean; cardIndex?: number; messageId?: string; descriptionText?: string; beforeText?: string }) {
+function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, onOpenCloseModal, onOpenCloseCopyModal, isDismissed, cardIndex, messageId, descriptionText, beforeText }: { part: ToolMessagePart; realtimePrices?: Record<string, number>; closedSymbols?: Set<string>; onSendMessage?: (msg: string) => void; onOpenCloseModal?: (data: CloseModalData) => void; onOpenCloseCopyModal?: (data: CloseCopyModalData) => void; isDismissed?: boolean; cardIndex?: number; messageId?: string; descriptionText?: string; beforeText?: string }) {
   const toolName = part.toolName || part.type?.replace("tool-", "");
   const state = part.state;
   const result = part.output;
@@ -942,6 +1001,18 @@ function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, onOpen
           : toolName === "setTrigger" ? "Setting trigger..."
           : toolName === "cancelOrder" ? "Looking up order..."
           : toolName === "closePosition" ? "Preparing close..."
+          : toolName === "getLeaderboard" ? "Loading leaderboard..."
+          : toolName === "getTraderProfile" ? "Analyzing trader..."
+          : toolName === "getCopyStatus" ? "Loading copy status..."
+          : toolName === "followTrader" ? "Subscribing..."
+          : toolName === "unfollowTrader" ? "Unsubscribing..."
+          : toolName === "getTraderPositions" ? "Fetching live positions..."
+          : toolName === "suggestTrader" ? "Finding matches..."
+          : toolName === "findTopTraderByMarket" ? "Searching market..."
+          : toolName === "compareTraders" ? "Comparing traders..."
+          : toolName === "getOpenCopyPositions" ? "Loading open copies..."
+          : toolName === "closeCopyPosition" ? "Preparing close..."
+          : toolName === "getCopyHistory" ? "Loading history..."
           : "Loading..."}
       </div>
     );
@@ -1144,6 +1215,99 @@ function ToolResult({ part, realtimePrices, closedSymbols, onSendMessage, onOpen
           )}
           </div>
         </div>
+      </CollapsibleCard>
+    );
+  }
+
+  // ─── Copy-Trading (Analyze-mode) cards ─────────────────────────
+  //
+  // Each copytrade tool emits a card via the dedicated module. All cards
+  // share one CardCtx, so onSendMessage drives inline CTAs (rows of
+  // [Analyze]/[Copy]/[Close] etc.) and onOpenCloseCopyModal lets the
+  // close-confirm card pop the shared CloseCopyPositionModal.
+  const copyCtx: CardCtx = { onSendMessage, onOpenCloseCopyModal };
+  if (toolName === "getLeaderboard") {
+    return (
+      <CollapsibleCard cardKey={cKey} label="Leaderboard" beforeText={beforeText} descriptionText={descriptionText}>
+        <LeaderboardCard data={result} ctx={copyCtx} />
+      </CollapsibleCard>
+    );
+  }
+  if (toolName === "getTraderProfile") {
+    const w = (result.wallet as string) ?? "";
+    return (
+      <CollapsibleCard cardKey={cKey} label={`Profile — ${w}`} beforeText={beforeText} descriptionText={descriptionText}>
+        <TraderProfileCard data={result} ctx={copyCtx} />
+      </CollapsibleCard>
+    );
+  }
+  if (toolName === "getCopyStatus") {
+    return (
+      <CollapsibleCard cardKey={cKey} label="Copy Status" beforeText={beforeText} descriptionText={descriptionText}>
+        <CopyStatusCard data={result} ctx={copyCtx} />
+      </CollapsibleCard>
+    );
+  }
+  if (toolName === "followTrader") {
+    return (
+      <CollapsibleCard cardKey={cKey} label={`Followed ${result.leader as string ?? ""}`} beforeText={beforeText} descriptionText={descriptionText}>
+        <FollowSuccessCard data={result} ctx={copyCtx} />
+      </CollapsibleCard>
+    );
+  }
+  if (toolName === "unfollowTrader") {
+    return (
+      <CollapsibleCard cardKey={cKey} label={`Unfollowed ${result.leader as string ?? ""}`} beforeText={beforeText} descriptionText={descriptionText}>
+        <UnfollowResultCard data={result} ctx={copyCtx} />
+      </CollapsibleCard>
+    );
+  }
+  if (toolName === "getTraderPositions") {
+    return (
+      <CollapsibleCard cardKey={cKey} label={`Positions — ${result.trader as string ?? ""}`} beforeText={beforeText} descriptionText={descriptionText}>
+        <TraderPositionsCard data={result} ctx={copyCtx} />
+      </CollapsibleCard>
+    );
+  }
+  if (toolName === "suggestTrader") {
+    return (
+      <CollapsibleCard cardKey={cKey} label="Suggestions" beforeText={beforeText} descriptionText={descriptionText}>
+        <SuggestTradersCard data={result} ctx={copyCtx} />
+      </CollapsibleCard>
+    );
+  }
+  if (toolName === "findTopTraderByMarket") {
+    return (
+      <CollapsibleCard cardKey={cKey} label={`Top on ${result.market as string ?? ""}`} beforeText={beforeText} descriptionText={descriptionText}>
+        <MarketTopTradersCard data={result} ctx={copyCtx} />
+      </CollapsibleCard>
+    );
+  }
+  if (toolName === "compareTraders") {
+    return (
+      <CollapsibleCard cardKey={cKey} label="Comparison" beforeText={beforeText} descriptionText={descriptionText}>
+        <CompareTradersCard data={result} ctx={copyCtx} />
+      </CollapsibleCard>
+    );
+  }
+  if (toolName === "getOpenCopyPositions") {
+    return (
+      <CollapsibleCard cardKey={cKey} label="Open Copy Positions" beforeText={beforeText} descriptionText={descriptionText}>
+        <OpenCopyPositionsCard data={result} ctx={copyCtx} />
+      </CollapsibleCard>
+    );
+  }
+  if (toolName === "closeCopyPosition") {
+    return (
+      <CollapsibleCard cardKey={cKey} label={`Close — ${result.symbol as string ?? ""}`} beforeText={beforeText} descriptionText={descriptionText}>
+        <CloseCopyConfirmCard data={result} ctx={copyCtx} />
+      </CollapsibleCard>
+    );
+  }
+  if (toolName === "getCopyHistory") {
+    return (
+      <CollapsibleCard cardKey={cKey} label="Copy History" beforeText={beforeText} descriptionText={descriptionText}>
+        <CopyHistoryCard data={result} ctx={copyCtx} />
       </CollapsibleCard>
     );
   }
