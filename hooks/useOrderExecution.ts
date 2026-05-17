@@ -160,9 +160,23 @@ export async function getOrCreateUser(params: {
     invalidateSession();
   }
 
-  // Create new session (wallet signs once here)
+  // Create new session. Pre-check whether the engine knows this wallet —
+  // if not, skip refreshSession to avoid a wasted signMessage popup
+  // (engine would reject with USER_NOT_FOUND anyway). Failing the
+  // pre-check is non-fatal: createNordUser tolerates USER_NOT_FOUND on its
+  // own as defence-in-depth.
+  let skipSession = false;
+  try {
+    const res = await fetch("/api/collateral");
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.exists === false) skipSession = true;
+    }
+  } catch {
+    // Non-critical
+  }
   const { createNordUser } = await import("@/lib/n1/user-client");
-  cachedUser = await createNordUser(params);
+  cachedUser = await createNordUser({ ...params, skipSession });
   cachedWalletAddress = address;
   sessionCreatedAtMono = performance.now();
   lastActivityMono = sessionCreatedAtMono;

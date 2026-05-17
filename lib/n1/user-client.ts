@@ -10,6 +10,16 @@ export interface CreateUserParams {
   walletPubkey: PublicKey;
   signMessageFn: (message: Uint8Array) => Promise<Uint8Array>;
   signTransactionFn: (tx: Transaction) => Promise<Transaction>;
+  /**
+   * Skip refreshSession() entirely. Set to true when the caller already knows
+   * the wallet has never deposited (engine will reject CreateSession with
+   * USER_NOT_FOUND) — avoids a pointless wallet signMessage popup that a user
+   * might accidentally reject and break their own first-deposit flow.
+   * The returned user has no sessionId; deposit() works regardless, and the
+   * next interaction that needs a session will recreate it (the user is
+   * registered by then).
+   */
+  skipSession?: boolean;
 }
 
 export interface PlaceOrderParams {
@@ -146,14 +156,16 @@ export async function createNordUser(params: CreateUserParams): Promise<NordUser
   });
 
   // refreshSession fails with USER_NOT_FOUND for wallets the engine hasn't
-  // seen yet (no prior on-chain Deposit event). That's expected for first-
-  // time users — deposit() itself doesn't need a sessionId, so we let the
-  // user proceed without one and createSession on the next interaction
-  // after the first deposit is indexed.
-  try {
-    await user.refreshSession();
-  } catch (err) {
-    if (!isUserNotFoundError(err)) throw err;
+  // seen yet (no prior on-chain Deposit event). When the caller already
+  // knows the wallet is fresh (skipSession=true), skip the call entirely
+  // to avoid a wasted wallet popup. Otherwise tolerate USER_NOT_FOUND so
+  // engine-side race conditions don't block the deposit flow.
+  if (!params.skipSession) {
+    try {
+      await user.refreshSession();
+    } catch (err) {
+      if (!isUserNotFoundError(err)) throw err;
+    }
   }
   await hydrateNordUser(user);
 
