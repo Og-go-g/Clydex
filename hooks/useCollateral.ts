@@ -109,12 +109,17 @@ export function useCollateral() {
         return { ok: true, balanceBefore };
       } catch (err: unknown) {
         const rawMsg = err instanceof Error ? err.message : "";
-        // Log full error chain to console for live diagnostics — first-deposit
-        // failures otherwise only surface in Sentry which devs can't see live.
-        console.error(`[useCollateral] ${action} error:`, rawMsg, err);
-        if (err instanceof Error && err.cause) {
-          console.error(`[useCollateral] ${action} cause:`, err.cause);
+        // Walk cause chain — SDK wraps real errors. Collect every message
+        // for diagnostics so we don't lose the on-chain reason.
+        const chain: string[] = [];
+        {
+          let cur: unknown = err;
+          for (let i = 0; i < 6 && cur; i++) {
+            if (cur instanceof Error) chain.push(cur.message);
+            cur = cur instanceof Error ? cur.cause : undefined;
+          }
         }
+        console.error(`[useCollateral] ${action} error chain:`, chain, err);
 
         const isUserReject =
           rawMsg.includes("User rejected") ||
@@ -136,10 +141,18 @@ export function useCollateral() {
         } else if (rawMsg.includes("timeout") || rawMsg.includes("Timeout")) {
           safeMsg = "Transaction timed out. Please try again.";
         } else {
-          safeMsg = "Transaction failed. Please try again.";
+          // TEMPORARY DIAGNOSTIC: surface the real on-chain reason in the UI so
+          // we can debug first-deposit failures without DevTools access.
+          // Revert to "Transaction failed. Please try again." after we identify
+          // the failure mode.
+          const debugTail = chain
+            .filter((m, i, arr) => m && arr.indexOf(m) === i)
+            .join(" ← ")
+            .slice(0, 300);
+          safeMsg = debugTail ? `Failed: ${debugTail}` : "Transaction failed. Please try again.";
           Sentry.captureException(err, {
             tags: { component: "useCollateral", action, firstDeposit: isFirstDeposit },
-            extra: { amount, walletPrefix: publicKey?.toBase58().slice(0, 8) },
+            extra: { amount, walletPrefix: publicKey?.toBase58().slice(0, 8), chain },
           });
         }
 
