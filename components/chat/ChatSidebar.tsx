@@ -5,17 +5,17 @@ import { useChatSessions } from "@/lib/chat/context";
 import type { ChatMode } from "@/lib/chat/chart-panel-context";
 
 function ModeBadge({ mode }: { mode: ChatMode }) {
-  const isAnalyze = mode === "copytrade";
+  const isCopy = mode === "copytrade";
   return (
     <span
       className={`shrink-0 rounded px-1 py-px text-[8px] font-semibold uppercase tracking-wider ${
-        isAnalyze
+        isCopy
           ? "bg-emerald-500/15 text-emerald-400"
           : "bg-blue-500/15 text-blue-400"
       }`}
-      title={isAnalyze ? "Analyze (copy trading)" : "Trade (perp trading)"}
+      title={isCopy ? "Copy Trading (discover and mirror top traders)" : "Trade (perp trading)"}
     >
-      {isAnalyze ? "Analyze" : "Trade"}
+      {isCopy ? "Copy" : "Trade"}
     </span>
   );
 }
