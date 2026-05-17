@@ -42,10 +42,18 @@ export function Header() {
     ? `${address.slice(0, 4)}...${address.slice(-4)}`
     : null;
 
-  const navItems = [
+  const navItems: Array<{
+    href: string;
+    label: string;
+    external?: boolean;
+    badge?: string;
+  }> = [
     { href: "/chat", label: "Chat" },
     { href: "/markets", label: "Markets" },
     { href: "/portfolio", label: "Portfolio" },
+    // External — friend's analytics site, still in build-out. The SOON
+    // badge tells users it's a preview link, not a polished surface.
+    { href: "https://n1stats.xyz/", label: "n1stats", external: true, badge: "SOON" },
   ];
 
   return (
@@ -64,19 +72,39 @@ export function Header() {
             <span className="text-lg font-semibold text-white">Clydex</span>
           </Link>
           <nav className="hidden items-center gap-6 md:flex">
-            {navItems.map(({ href, label }) => (
-              <Link
-                key={href}
-                href={href}
-                className={`relative text-sm transition-colors hover:text-white ${
-                  pathname === href || (href !== "/" && pathname.startsWith(href))
-                    ? "text-white after:absolute after:bottom-[-0.25rem] after:left-0 after:right-0 after:h-[2px] after:bg-gradient-to-r after:from-emerald-400 after:to-emerald-400/10 after:animate-[tab-fill_0.3s_ease-out]"
-                    : "text-gray-500"
-                }`}
-              >
-                {label}
-              </Link>
-            ))}
+            {navItems.map(({ href, label, external, badge }) => {
+              const isActive = !external && (pathname === href || (href !== "/" && pathname.startsWith(href)));
+              const className = `relative text-sm transition-colors hover:text-white ${
+                isActive
+                  ? "text-white after:absolute after:bottom-[-0.25rem] after:left-0 after:right-0 after:h-[2px] after:bg-gradient-to-r after:from-emerald-400 after:to-emerald-400/10 after:animate-[tab-fill_0.3s_ease-out]"
+                  : "text-gray-500"
+              }`;
+              const content = (
+                <span className="inline-flex items-center gap-1.5">
+                  {label}
+                  {badge && (
+                    <span className="rounded bg-emerald-500/15 px-1 py-px text-[8px] font-bold uppercase tracking-wider text-emerald-400">
+                      {badge}
+                    </span>
+                  )}
+                </span>
+              );
+              return external ? (
+                <a
+                  key={href}
+                  href={href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={className}
+                >
+                  {content}
+                </a>
+              ) : (
+                <Link key={href} href={href} className={className}>
+                  {content}
+                </Link>
+              );
+            })}
           </nav>
         </div>
 
@@ -198,18 +226,44 @@ export function Header() {
       {mobileNavOpen && (
         <div className="border-t border-[#262626] bg-[#0a0a0a]/95 md:hidden">
           <nav className="flex flex-col px-6 py-3">
-            {navItems.map(({ href, label }) => (
-              <Link
-                key={href}
-                href={href}
-                onClick={() => setMobileNavOpen(false)}
-                className={`rounded-lg px-3 py-2.5 text-sm transition-colors ${
-                  pathname === href ? "bg-[#1a1a1a] text-white" : "text-gray-400 hover:text-white"
-                }`}
-              >
-                {label}
-              </Link>
-            ))}
+            {navItems.map(({ href, label, external, badge }) => {
+              const className = `flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm transition-colors ${
+                !external && pathname === href
+                  ? "bg-[#1a1a1a] text-white"
+                  : "text-gray-400 hover:text-white"
+              }`;
+              const content = (
+                <>
+                  {label}
+                  {badge && (
+                    <span className="rounded bg-emerald-500/15 px-1 py-px text-[8px] font-bold uppercase tracking-wider text-emerald-400">
+                      {badge}
+                    </span>
+                  )}
+                </>
+              );
+              return external ? (
+                <a
+                  key={href}
+                  href={href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => setMobileNavOpen(false)}
+                  className={className}
+                >
+                  {content}
+                </a>
+              ) : (
+                <Link
+                  key={href}
+                  href={href}
+                  onClick={() => setMobileNavOpen(false)}
+                  className={className}
+                >
+                  {content}
+                </Link>
+              );
+            })}
           </nav>
         </div>
       )}
