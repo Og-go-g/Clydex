@@ -177,3 +177,23 @@ model OrderPreview {
   @@index([expiresAt], map: "idx_preview_expires")
   @@map("order_previews")
 }
+
+// ---------------------------------------------------------------------------
+//  CloseLock — short-lived per-(wallet, market, side) lock that gates the
+//  client-side close-position flow. Without it the per-tab Set in
+//  useOrderExecution can be bypassed by opening the portfolio in two tabs
+//  and clicking Close in both within ~100ms — reduce-only protects from
+//  over-closing the same direction but a race that flips the position sign
+//  between the two reads can let the second close open a fresh OPPOSITE
+//  position. The server-side lock is the authoritative serialisation.
+//  Key shape: "<walletAddr>:<marketSymbol>:<side>", e.g. "Abc…xyz:BTCUSD:Long".
+//  TTL 30s — covers a wallet sign + on-chain confirm; expired rows are
+//  cleaned by the next acquire (idempotent overwrite).
+// ---------------------------------------------------------------------------
+model CloseLock {
+  key       String   @id
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(3)
+
+  @@index([expiresAt], map: "idx_close_lock_expires")
+  @@map("close_locks")
+}

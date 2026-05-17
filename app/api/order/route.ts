@@ -5,6 +5,7 @@ import { getAuthAddress } from "@/lib/auth/session";
 import { getUser, getAccount, getMarketStats } from "@/lib/n1/client";
 import { resolveMarket, validateLeverage, ensureMarketCache, TIERS } from "@/lib/n1/constants";
 import { storePreview, consumePreview } from "@/lib/n1/preview-store";
+import { acquireCloseLock, releaseCloseLock } from "@/lib/n1/close-lock-store";
 import { RATE_LIMITS, safeRateLimit } from "@/lib/ratelimit";
 import { checkIdempotency, storeIdempotency } from "@/lib/idempotency";
 
@@ -37,10 +38,24 @@ const CancelOrderSchema = z.object({
   orderId: z.string().min(1).max(100),
 });
 
+const CloseAcquireSchema = z.object({
+  action: z.literal("close-acquire"),
+  symbol: z.string().min(1).max(20),
+  side: z.enum(["Long", "Short"]),
+});
+
+const CloseReleaseSchema = z.object({
+  action: z.literal("close-release"),
+  symbol: z.string().min(1).max(20),
+  side: z.enum(["Long", "Short"]),
+});
+
 const OrderRequestSchema = z.discriminatedUnion("action", [
   PrepareOrderSchema,
   ExecuteOrderSchema,
   CancelOrderSchema,
+  CloseAcquireSchema,
+  CloseReleaseSchema,
 ]);
 
 // ─── POST /api/order — order management endpoint ────────────────
@@ -262,6 +277,31 @@ export async function POST(req: Request) {
 
       if (idempotencyKey) await storeIdempotency(`${address}:${idempotencyKey}`, result);
       return NextResponse.json(result);
+    }
+
+    // ─── Close-position lock acquire ─────────────────────
+    //
+    // Server-side close-lock keyed on (walletAddr, market, side). Address
+    // comes from the session, NOT from the body — an attacker can't lock
+    // a victim's market. Refuses for 30s if another tab/device is already
+    // closing the same position. The wallet still has to sign the close
+    // tx, so the worst this prevents is a duplicate close, not anything
+    // exotic; but a duplicate close that flips the position sign via a
+    // reduce-only race opens an unwanted OPPOSITE position.
+    if (data.action === "close-acquire") {
+      const acquired = await acquireCloseLock(address, data.symbol, data.side);
+      if (!acquired) {
+        return NextResponse.json(
+          { error: "Close already in progress for this position" },
+          { status: 409 }
+        );
+      }
+      return NextResponse.json({ action: "close-acquire", acquired: true });
+    }
+
+    if (data.action === "close-release") {
+      await releaseCloseLock(address, data.symbol, data.side);
+      return NextResponse.json({ action: "close-release", released: true });
     }
 
     return NextResponse.json({ error: "Unknown action" }, { status: 400 });

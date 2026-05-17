@@ -518,7 +518,9 @@ export function useOrderExecution() {
         setState({ status: "error", error: "This close was already submitted", txHash: null });
         return;
       }
-      // Per-market close lock — prevents double-close when no previewId
+      // Per-tab fast-path lock — prevents racing within one tab while the
+      // server-side lock (below) is being acquired. Authoritative lock is
+      // server-side via /api/order action=close-acquire.
       const closeKey = `${data.market}:${data.side}`;
       if (!data.previewId && closingMarkets.has(closeKey)) {
         setState({ status: "error", error: "Close already in progress for this position", txHash: null });
@@ -532,6 +534,27 @@ export function useOrderExecution() {
       executingRef.current = true;
       if (!data.previewId) closingMarkets.add(closeKey);
       setState({ status: "signing", error: null, txHash: null });
+
+      // Server-side close-lock — authoritative across tabs and devices.
+      // Acquired before any wallet popup so we don't ask the user to sign
+      // a close that'll race with another tab's already-in-flight close.
+      let serverLockAcquired = false;
+      try {
+        const lockRes = await fetch("/api/order", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "close-acquire", symbol: data.market, side: data.side }),
+        });
+        if (lockRes.status === 409) {
+          setState({ status: "error", error: "Close already in progress for this position", txHash: null });
+          executingRef.current = false;
+          closingMarkets.delete(closeKey);
+          return;
+        }
+        serverLockAcquired = lockRes.ok;
+      } catch {
+        // Network/PG outage — proceed without server lock; per-tab guard still in place.
+      }
 
       try {
         // Step 1: Consume preview server-side (only if previewId exists from chat flow)
@@ -583,9 +606,18 @@ export function useOrderExecution() {
         handleError(err, "closePosition", data.market, setState);
       } finally {
         executingRef.current = false;
-        // Release per-market close lock
+        // Release per-tab + server-side close-locks. Server release is
+        // best-effort — the lock has a 30s TTL so a missed release just
+        // delays the next attempt slightly.
         const ck = `${data.market}:${data.side}`;
         closingMarkets.delete(ck);
+        if (serverLockAcquired) {
+          void fetch("/api/order", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "close-release", symbol: data.market, side: data.side }),
+          }).catch(() => {});
+        }
       }
     },
     [publicKey, signMessage, signTransaction, withUser]

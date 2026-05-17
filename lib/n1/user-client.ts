@@ -416,8 +416,24 @@ export async function depositUsdc(user: NordUser, amount: number) {
 
 /**
  * Withdraw USDC from the exchange.
+ *
+ * Always re-fetches accountIds before issuing the withdraw — the cached
+ * NordUser lives up to 4 hours and 01 Exchange supports subaccount
+ * creation; sending funds out of a stale `accountIds[0]` could route to
+ * a subaccount the user did not intend. If multiple accounts exist, we
+ * refuse rather than guess (the UI has no selection control yet).
  */
 export async function withdrawUsdc(user: NordUser, amount: number) {
+  await user.updateAccountId();
+  const ids = user.accountIds ?? [];
+  if (ids.length === 0) {
+    throw new Error("No 01 Exchange account found.");
+  }
+  if (ids.length > 1) {
+    throw new Error(
+      "Multi-account wallets are not supported for withdrawals through this UI yet."
+    );
+  }
   return user.withdraw({
     amount,
     tokenId: 0,
