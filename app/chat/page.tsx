@@ -216,6 +216,50 @@ function useIsPreviewDismissed(previewId: string | undefined): boolean {
 // When expanded, children remount fresh → hooks reconnect → data updates in real-time.
 const COLLAPSE_PREFIX = "__card_collapsed_";
 
+// Module-level reactive store for collapsed state — same pattern as
+// `dismissedPreviews`/`dismissedListeners` above. Lets components
+// OUTSIDE the card (specifically the SuggestionChips that render at
+// the message footer) react to a card collapsing. Without this the
+// chips kept showing after the card folded.
+const collapsedCards = new Set<string>(
+  (() => {
+    if (typeof window === "undefined") return [];
+    try {
+      // Pre-populate from localStorage so the initial render of the
+      // hook agrees with whatever CollapsibleCard's own useState
+      // initializer reads.
+      const acc: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(COLLAPSE_PREFIX) && localStorage.getItem(k) === "1") {
+          acc.push(k.slice(COLLAPSE_PREFIX.length));
+        }
+      }
+      return acc;
+    } catch { return []; }
+  })(),
+);
+const collapsedListeners = new Set<() => void>();
+
+function setCardCollapsed(cardKey: string, collapsed: boolean) {
+  const wasCollapsed = collapsedCards.has(cardKey);
+  if (wasCollapsed === collapsed) return;
+  if (collapsed) collapsedCards.add(cardKey);
+  else collapsedCards.delete(cardKey);
+  for (const l of collapsedListeners) l();
+}
+
+function useIsCardCollapsed(cardKey: string | undefined): boolean {
+  return useSyncExternalStore(
+    (cb) => {
+      collapsedListeners.add(cb);
+      return () => { collapsedListeners.delete(cb); };
+    },
+    () => (cardKey ? collapsedCards.has(cardKey) : false),
+    () => false,
+  );
+}
+
 function CollapsibleCard({
   cardKey,
   label,
@@ -240,13 +284,25 @@ function CollapsibleCard({
     try { return localStorage.getItem(storageKey) === "1"; } catch { return false; }
   });
 
+  // Keep module-level mirror in sync on mount so other components
+  // that read via `useIsCardCollapsed(cardKey)` see the right value
+  // before this card's first toggle. Safe to call repeatedly —
+  // setCardCollapsed bails if state already matches.
+  useEffect(() => {
+    setCardCollapsed(cardKey, collapsed);
+  }, [cardKey, collapsed]);
+
   const toggle = useCallback(() => {
     setCollapsed((prev) => {
       const next = !prev;
       try { if (next) localStorage.setItem(storageKey, "1"); else localStorage.removeItem(storageKey); } catch { /* ignore */ }
+      // Fan out to module-level listeners (the SuggestionChips
+      // rendered at message footer subscribe through this so they
+      // disappear in lockstep with the card folding).
+      setCardCollapsed(cardKey, next);
       return next;
     });
-  }, [storageKey]);
+  }, [storageKey, cardKey]);
 
   // When the inner action is dismissed, the inner card already shrinks
   // to its own compact pill. Strip everything else: no collapse chevron
@@ -827,6 +883,53 @@ function ChatContent({ chatId, chatMode, onModeChange }: { chatId: string; chatM
 
 // ─── Message Rendering ───────────────────────────────────────────
 
+/**
+ * Renders the chip row under an assistant message — derived from the
+ * LAST tool result that carries a `nextSteps` array. Subscribed to
+ * the collapse state of that tool's card via `useIsCardCollapsed` so
+ * the chips disappear in lockstep when the user folds the card.
+ *
+ * Kept as a top-level component (rather than an inline IIFE inside
+ * MessageContent) so we can legally call hooks.
+ */
+function MessageSuggestionChips({
+  groups,
+  messageId,
+  onSendMessage,
+}: {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  groups: any[];
+  messageId?: string;
+  onSendMessage?: (msg: string) => void;
+}) {
+  // Walk groups from last to first, find the most recent tool that
+  // emitted nextSteps. Also remember its toolName + idx so we can
+  // compute the same cardKey CollapsibleCard uses.
+  let lastSteps: string[] | null = null;
+  let lastCardKey: string | undefined;
+  for (let gi = groups.length - 1; gi >= 0 && !lastSteps; gi--) {
+    const g = groups[gi];
+    for (let ti = g.tools.length - 1; ti >= 0; ti--) {
+      const t = g.tools[ti];
+      const part = t.part as ToolMessagePart;
+      const out = (part.output ?? {}) as Record<string, unknown>;
+      const steps = Array.isArray(out.nextSteps)
+        ? (out.nextSteps as unknown[]).filter((s): s is string => typeof s === "string")
+        : null;
+      if (steps && steps.length > 0) {
+        lastSteps = steps;
+        const tName = part.toolName || part.type?.replace("tool-", "") || "";
+        // Same shape ToolResult uses: ${messageId ?? "m"}_${toolName}_${cardIndex}
+        lastCardKey = `${messageId ?? "m"}_${tName}_${t.idx}`;
+        break;
+      }
+    }
+  }
+  const isHidden = useIsCardCollapsed(lastCardKey);
+  if (!lastSteps || isHidden) return null;
+  return <SuggestionChips nextSteps={lastSteps} onSendMessage={onSendMessage} />;
+}
+
 function MessageContent({
   content,
   parts,
@@ -952,25 +1055,14 @@ function MessageContent({
         })}
         {/*
          * Suggestion chips: one row per message, derived from the LAST
-         * tool result that carries a `nextSteps` array. Only the Analyze
-         * mode (copytrade route) emits these today; trade-mode tools
-         * stay silent and no chips render — same component, both modes.
+         * tool result that carries a `nextSteps` array. Extracted into
+         * its own component so it can call useIsCardCollapsed() and
+         * hide the chips when the owning card is folded — otherwise
+         * the chips dangle below an empty collapsed-pill, which looked
+         * like dead UI.
          */}
-        {(() => {
-          const lastWithSteps = [...groups]
-            .reverse()
-            .flatMap((g) => g.tools)
-            .map((t) => {
-              const out = (t.part.output ?? {}) as Record<string, unknown>;
-              const steps = Array.isArray(out.nextSteps)
-                ? (out.nextSteps as unknown[]).filter((s): s is string => typeof s === "string")
-                : null;
-              return steps && steps.length > 0 ? steps : null;
-            })
-            .find(Boolean);
-          if (!lastWithSteps) return null;
-          return <SuggestionChips nextSteps={lastWithSteps} onSendMessage={onSendMessage} />;
-        })()}
+        <MessageSuggestionChips groups={groups} messageId={messageId} onSendMessage={onSendMessage} />
+
       </div>
     );
   }
