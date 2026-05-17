@@ -109,6 +109,12 @@ export function useCollateral() {
         return { ok: true, balanceBefore };
       } catch (err: unknown) {
         const rawMsg = err instanceof Error ? err.message : "";
+        // Log full error chain to console for live diagnostics — first-deposit
+        // failures otherwise only surface in Sentry which devs can't see live.
+        console.error(`[useCollateral] ${action} error:`, rawMsg, err);
+        if (err instanceof Error && err.cause) {
+          console.error(`[useCollateral] ${action} cause:`, err.cause);
+        }
 
         const isUserReject =
           rawMsg.includes("User rejected") ||
