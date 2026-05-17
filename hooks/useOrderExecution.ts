@@ -238,11 +238,14 @@ async function verifyExecution(
       // Normalize symbol: "SUIUSD" -> match against position/order symbol
       const sym = marketSymbol.replace(/\//, "").toUpperCase();
 
+      // Match strictly on the normalised symbol. A startsWith fallback would
+      // false-positive between markets that share a prefix (e.g. SOL vs SOLO,
+      // BTC vs BTCBEAR), confirming a phantom fill the user never made.
       if (kind === "position") {
         const found = (positions as AccountPosition[]).some((p) => {
-          const pSym = (p.symbol ?? "").toUpperCase();
+          const pSym = (p.symbol ?? p.marketSymbol ?? "").toUpperCase();
           const hasSize = Math.abs(p.perp?.baseSize ?? 0) > 1e-12;
-          return (pSym === sym || pSym.startsWith(sym.replace(/USD$/, ""))) && hasSize;
+          return pSym === sym && hasSize;
         });
         if (found) return true;
       } else if (kind === "order") {
@@ -253,9 +256,9 @@ async function verifyExecution(
         if (orderFound) return true;
         // Instant fill: order went straight to position (price was very close to market)
         const posFound = (positions as AccountPosition[]).some((p) => {
-          const pSym = (p.symbol ?? "").toUpperCase();
+          const pSym = (p.symbol ?? p.marketSymbol ?? "").toUpperCase();
           const hasSize = Math.abs(p.perp?.baseSize ?? 0) > 1e-12;
-          return (pSym === sym || pSym.startsWith(sym.replace(/USD$/, ""))) && hasSize;
+          return pSym === sym && hasSize;
         });
         if (posFound) return true;
       } else if (kind === "close") {
@@ -282,8 +285,8 @@ async function fetchConfirmedPosition(marketSymbol: string): Promise<PositionDat
     const data = await res.json();
     const sym = marketSymbol.replace(/\//, "").toUpperCase();
     const pos = ((data.positions ?? []) as AccountPosition[]).find((p) => {
-      const pSym = (p.symbol ?? "").toUpperCase();
-      return (pSym === sym || pSym.startsWith(sym.replace(/USD$/, ""))) && Math.abs(p.perp?.baseSize ?? 0) > 1e-12;
+      const pSym = (p.symbol ?? p.marketSymbol ?? "").toUpperCase();
+      return pSym === sym && Math.abs(p.perp?.baseSize ?? 0) > 1e-12;
     });
     if (!pos) return null;
     return {
@@ -360,8 +363,19 @@ export function useOrderExecution() {
         return await fn(user);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : "";
-        // Session expired — invalidate and retry once with fresh session
-        if (msg.includes("session") || msg.includes("Session") || msg.includes("expired") || msg.includes("invalid")) {
+        // Session-expiry retry: narrow to SDK's actual session errors. Avoid
+        // matching "invalid" alone — it also matches "Invalid market",
+        // "Invalid order size", "invalid leverage", which would tear down a
+        // good session, prompt a wallet popup, and re-submit the same bad
+        // order. Real SDK session error: "Invalid or empty session ID.
+        // Please create or refresh your session." Engine error variants:
+        // "session expired", "session not found", "Invalid session".
+        const isSessionError =
+          /invalid\s+or\s+empty\s+session\s+id/i.test(msg) ||
+          /session\s+(expired|not\s+found|invalid|revoked)/i.test(msg) ||
+          /invalid\s+session/i.test(msg) ||
+          /please\s+(create|refresh)\s+your\s+session/i.test(msg);
+        if (isSessionError) {
           invalidateSession();
           const freshUser = await getOrCreateUser({
             walletPubkey: safePubkey,
@@ -478,8 +492,13 @@ export function useOrderExecution() {
         } else if (verified) {
           setState({ status: "confirmed", error: null, txHash });
         } else {
-          // Tx was submitted but position not found after 40s — don't show "confirmed" (misleading)
-          setState({ status: "error", error: "Transaction submitted but position not yet visible. Check your Portfolio.", txHash });
+          // Verification window expired (40s) but the tx WAS submitted —
+          // engine indexing on illiquid pairs can lag. We must NOT show
+          // "error" here: the preview is already consumed server-side, and
+          // a retry would create a fresh preview that double-executes when
+          // the original lands. Treat as confirmed-pending; the Portfolio
+          // surfaces the position once the engine catches up.
+          setState({ status: "confirmed", error: null, txHash });
         }
       } catch (err: unknown) {
         if (orderData.previewId) markPreviewFailed(orderData.previewId);
