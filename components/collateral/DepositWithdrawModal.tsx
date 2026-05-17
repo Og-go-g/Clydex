@@ -282,7 +282,15 @@ export function DepositWithdrawModal({
         return;
       }
       try {
-        const acceptRes = await fetch("/api/terms/accept", { method: "POST" });
+        // Content-Type header is required — middleware rejects mutating
+        // requests without `application/json` with a 415, which would
+        // surface here as the unhelpful "Could not record acceptance"
+        // toast even though the endpoint itself works fine.
+        const acceptRes = await fetch("/api/terms/accept", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
         if (!acceptRes.ok) {
           setErrorMsg("Could not record acceptance. Please try again.");
           return;

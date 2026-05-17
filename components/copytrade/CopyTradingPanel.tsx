@@ -396,6 +396,13 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
   const [unfollowTarget, setUnfollowTarget] = useState<string | null>(null);
   const [unfollowing, setUnfollowing] = useState(false);
   const [showDisableConfirm, setShowDisableConfirm] = useState(false);
+  // Custom-modal-driven ToS acceptance for the copy-trading activation
+  // flow. Replaces a window.confirm() that was both off-brand and
+  // confusing — the native prompt rendered above the page chrome and
+  // didn't visually belong to the form the user was interacting with.
+  const [showTermsModal, setShowTermsModal] = useState(false);
+  const [termsChecked, setTermsChecked] = useState(false);
+  const [termsRecording, setTermsRecording] = useState(false);
   const [expandedLeader, setExpandedLeader] = useState<string | null>(null);
   const [engineHealth, setEngineHealth] = useState<{
     isHealthy: boolean;
@@ -571,36 +578,64 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
       setError("Wallet not connected");
       return;
     }
-
-    setActivating(true);
     setError(null);
+
+    // Pre-check ToS acceptance. If the user hasn't accepted the current
+    // version, open the in-app Terms modal — DO NOT proceed to wallet
+    // popups until they confirm. /api/copy/activate also enforces this
+    // server-side (403) as defence-in-depth.
     try {
-      // Pre-check ToS acceptance. /api/copy/activate enforces server-side
-      // (403 if not accepted), but we want a friendly inline prompt rather
-      // than a generic error. If not accepted, the user has likely never
-      // deposited either — first deposit acceptance covers both — but a
-      // user could land here via a different flow, so record acceptance
-      // up-front before the wallet popup chain begins.
       const tsRes = await fetch("/api/terms/status");
       if (tsRes.ok) {
         const ts = await tsRes.json();
         if (!ts?.accepted) {
-          const ok = window.confirm(
-            "Copy trading involves additional risks (slippage, late fills, leader liquidation cascades — see §4 of the Terms). By clicking OK you accept the current Terms of Service and Privacy Policy. Cancel to review them first."
-          );
-          if (!ok) {
-            setError("Please review the Terms before enabling copy trading.");
-            setActivating(false);
-            return;
-          }
-          const ar = await fetch("/api/terms/accept", { method: "POST" });
-          if (!ar.ok) {
-            setError("Could not record Terms acceptance. Please try again.");
-            setActivating(false);
-            return;
-          }
+          setTermsChecked(false);
+          setShowTermsModal(true);
+          return;
         }
       }
+    } catch {
+      // Status check failed (network / DB outage). Fall through to
+      // doActivate — server will reject with 403 if acceptance is
+      // genuinely needed, which surfaces a clear error.
+    }
+
+    await doActivate();
+  };
+
+  const handleTermsConfirmed = async () => {
+    if (!termsChecked || termsRecording) return;
+    setTermsRecording(true);
+    setError(null);
+    try {
+      const ar = await fetch("/api/terms/accept", {
+        method: "POST",
+        // Content-Type header is required by middleware on every mutating
+        // request — without it the response is 415 and the user sees an
+        // unhelpful "Could not record acceptance" toast even though the
+        // endpoint itself is fine. Was the original bug on this flow.
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      if (!ar.ok) {
+        setError("Could not record Terms acceptance. Please try again.");
+        return;
+      }
+      setShowTermsModal(false);
+      await doActivate();
+    } finally {
+      setTermsRecording(false);
+    }
+  };
+
+  const doActivate = async () => {
+    if (!publicKey || !signMessage || !signTransaction) {
+      setError("Wallet not connected");
+      return;
+    }
+    setActivating(true);
+    setError(null);
+    try {
       const { createNordUserWithSessionKey } = await import("@/lib/n1/user-client");
       const { sessionSecretKey, sessionPublicKey, sessionId } = await createNordUserWithSessionKey({
         walletPubkey: publicKey,
@@ -1046,6 +1081,74 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
             </div>
           )}
         </>
+      )}
+
+      {/* Terms acceptance modal — gates first-time copy-trading
+          activation. Same visual language as the other Copy panel
+          modals (Disable / Unfollow) so the user never falls out of
+          the in-app aesthetic into a native browser confirm. */}
+      {showTermsModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          onClick={() => !termsRecording && setShowTermsModal(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-[#262626] bg-[#0f0f0f] p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="mb-3 text-sm font-semibold text-white">
+              Enable Copy Trading — accept the additional risks
+            </h3>
+            <p className="mb-4 text-xs leading-relaxed text-[#888]">
+              Copy trading mirrors a leader&apos;s positions into your
+              account on a polling cadence. You can hit worse fills than
+              the leader, get caught in their liquidation cascade, or
+              experience silent skips on slippage / margin / rate limits.
+              See <a href="/terms#4" target="_blank" rel="noopener noreferrer" className="text-emerald-400 underline hover:text-emerald-300">§4 of the Terms</a> for the full list.
+            </p>
+            <label className="mb-4 flex cursor-pointer items-start gap-3 rounded-xl border border-[#262626] bg-[#141414] p-3 text-xs text-gray-300 transition-colors hover:border-emerald-500/30">
+              <input
+                type="checkbox"
+                checked={termsChecked}
+                onChange={(e) => setTermsChecked(e.target.checked)}
+                disabled={termsRecording}
+                className="mt-0.5 h-4 w-4 cursor-pointer accent-emerald-500"
+              />
+              <span className="leading-relaxed">
+                I have read and agree to the{" "}
+                <a href="/terms" target="_blank" rel="noopener noreferrer" className="text-emerald-400 underline hover:text-emerald-300">Terms of Service</a>
+                {" "}and{" "}
+                <a href="/privacy" target="_blank" rel="noopener noreferrer" className="text-emerald-400 underline hover:text-emerald-300">Privacy Policy</a>
+                , and I understand the additional risks of copy trading.
+              </span>
+            </label>
+            {error && (
+              <div className="mb-3 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-400">
+                {error}
+              </div>
+            )}
+            <div className="space-y-2">
+              <button
+                onClick={handleTermsConfirmed}
+                disabled={!termsChecked || termsRecording}
+                className="w-full rounded-xl border border-emerald-500/30 bg-emerald-500/15 py-2.5 text-xs font-semibold text-emerald-400 transition-colors hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {termsRecording ? "Saving…" : "Agree and enable copy trading"}
+              </button>
+              <button
+                onClick={() => {
+                  if (termsRecording) return;
+                  setShowTermsModal(false);
+                  setError("Please review the Terms before enabling copy trading.");
+                }}
+                disabled={termsRecording}
+                className="w-full py-2 text-xs text-[#666] transition-colors hover:text-white disabled:opacity-50"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Disable confirmation dialog */}
