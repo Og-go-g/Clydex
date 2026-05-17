@@ -107,8 +107,16 @@ export default function TermsPage() {
             can become a leader; statistics shown may be misleading.
           </li>
           <li>
-            Disabling copy trading does not retroactively close already-
-            mirrored positions; you must close them yourself if desired.
+            When you unfollow a specific leader you are offered an
+            &ldquo;Unfollow &amp; Close Positions&rdquo; option that attempts to
+            close the positions that came from that leader, and an
+            &ldquo;Unfollow Only&rdquo; option that leaves them open. Disabling
+            copy trading entirely (the &ldquo;Disable&rdquo; switch in the copy-
+            trading panel) does NOT trigger any closes — your open
+            positions remain on the exchange and are then unmanaged.
+            Closes are best-effort: a transient exchange error during
+            the close pass means a position may still be open after the
+            call returns successfully — always verify in your portfolio.
           </li>
         </ul>
       </Section>
