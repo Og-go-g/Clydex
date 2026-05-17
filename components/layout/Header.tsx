@@ -44,7 +44,6 @@ export function Header() {
 
   const navItems = [
     { href: "/chat", label: "Chat" },
-    { href: "/copy", label: "Copy" },
     { href: "/markets", label: "Markets" },
     { href: "/portfolio", label: "Portfolio" },
   ];
