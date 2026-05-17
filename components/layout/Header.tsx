@@ -53,7 +53,7 @@ export function Header() {
     { href: "/portfolio", label: "Portfolio" },
     // External — friend's analytics site, still in build-out. The SOON
     // badge tells users it's a preview link, not a polished surface.
-    { href: "https://n1stats.xyz/", label: "n1stats", external: true, badge: "SOON" },
+    { href: "https://n1stats.xyz/", label: "N1stats", external: true, badge: "SOON" },
   ];
 
   return (
@@ -83,7 +83,7 @@ export function Header() {
                 <span className="inline-flex items-center gap-1.5">
                   {label}
                   {badge && (
-                    <span className="rounded bg-emerald-500/15 px-1 py-px text-[8px] font-bold uppercase tracking-wider text-emerald-400">
+                    <span className="rounded bg-emerald-500/15 px-0.5 py-0 text-[6px] font-bold uppercase tracking-wide leading-tight text-emerald-400">
                       {badge}
                     </span>
                   )}
@@ -236,7 +236,7 @@ export function Header() {
                 <>
                   {label}
                   {badge && (
-                    <span className="rounded bg-emerald-500/15 px-1 py-px text-[8px] font-bold uppercase tracking-wider text-emerald-400">
+                    <span className="rounded bg-emerald-500/15 px-0.5 py-0 text-[6px] font-bold uppercase tracking-wide leading-tight text-emerald-400">
                       {badge}
                     </span>
                   )}
