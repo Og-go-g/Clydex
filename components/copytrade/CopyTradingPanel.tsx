@@ -576,11 +576,33 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
     setError(null);
     try {
       const { createNordUserWithSessionKey } = await import("@/lib/n1/user-client");
-      const { sessionSecretKey, sessionId } = await createNordUserWithSessionKey({
+      const { sessionSecretKey, sessionPublicKey, sessionId } = await createNordUserWithSessionKey({
         walletPubkey: publicKey,
         signMessageFn: signMessage,
         signTransactionFn: signTransaction as (tx: import("@solana/web3.js").Transaction) => Promise<import("@solana/web3.js").Transaction>,
       });
+
+      // Proof-of-ownership: get a server nonce, then have the wallet sign a
+      // canonical message that includes (walletAddr, sessionPubkey, nonce).
+      // Server verifies before storing — prevents XSS / malicious code from
+      // POSTing an attacker-owned keypair under the victim's address.
+      const challengeRes = await fetch("/api/copy/activate-challenge");
+      if (!challengeRes.ok) {
+        const cdata = await challengeRes.json().catch(() => ({}));
+        setError(cdata.error ?? "Failed to start activation");
+        return;
+      }
+      const { nonce, walletAddr } = await challengeRes.json();
+      const sessionPubkeyBase58 = bs58.encode(sessionPublicKey);
+      const activationMessage = [
+        "Clydex N1 — Enable copy trading",
+        "",
+        `Wallet: ${walletAddr}`,
+        `Session: ${sessionPubkeyBase58}`,
+        `Nonce: ${nonce}`,
+      ].join("\n");
+      const messageBytes = new TextEncoder().encode(activationMessage);
+      const walletSig = await signMessage(messageBytes);
 
       const res = await fetch("/api/copy/activate", {
         method: "POST",
@@ -588,6 +610,8 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
         body: JSON.stringify({
           sessionSecretKey: bs58.encode(sessionSecretKey),
           sessionId,
+          nonce,
+          walletSignature: bs58.encode(walletSig),
         }),
       });
       const data = await res.json();

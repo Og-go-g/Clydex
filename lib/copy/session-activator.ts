@@ -2,21 +2,33 @@ import nacl from "tweetnacl";
 import bs58 from "bs58";
 import { encryptSessionKey } from "./session-crypto";
 import { upsertSession, deleteSession, getSession } from "./queries";
+import { consumeNonce } from "@/lib/auth/nonce-store";
+import { buildActivationMessage } from "@/app/api/copy/activate-challenge/route";
 
 const SESSION_TTL_DAYS = 30;
 
 /**
  * Activate copy trading: encrypt and store the user's session keypair.
  *
- * Flow:
- * 1. Browser creates NordUser (wallet signs session) → gets sessionSecretKey
- * 2. Browser sends sessionSecretKey (base58) to this function
- * 3. We verify the keypair is valid, encrypt it, and store in DB
+ * Proof-of-ownership flow (added 2026-05-17):
+ *  1. Browser calls GET /api/copy/activate-challenge → receives `nonce`.
+ *  2. Browser creates NordUser (wallet signs session) → gets sessionSecretKey.
+ *  3. Browser signs the canonical activation message with the WALLET (not
+ *     the session key) — wallet's signMessage must approve "bind this
+ *     specific session pubkey to my wallet, with this nonce".
+ *  4. Browser POSTs { sessionSecretKey, sessionId, nonce, walletSignature }.
+ *  5. Server verifies the wallet signature against walletAddr, atomically
+ *     consumes the nonce (single-use), and stores the encrypted key.
+ *
+ * Without the signature step an XSS or malicious dependency could POST an
+ * attacker-controlled keypair to /api/copy/activate, hijacking the
+ * victim's copy-trading session.
  */
 export async function activateSession(
   walletAddr: string,
   sessionSecretKeyBase58: string,
-  sessionId?: string,
+  sessionId: string | undefined,
+  proof: { nonce: string; walletSignatureBase58: string },
 ): Promise<{ sessionPubkey: string; expiresAt: Date }> {
   // Decode the secret key
   const secretKey = bs58.decode(sessionSecretKeyBase58);
@@ -42,6 +54,43 @@ export async function activateSession(
   const sig = nacl.sign.detached(challenge, keypair.secretKey);
   if (!nacl.sign.detached.verify(challenge, sig, keypair.publicKey)) {
     throw new Error("Session key verification failed");
+  }
+
+  // Verify the wallet's proof-of-ownership signature over the canonical
+  // activation message. The signature must cover (walletAddr, sessionPubkey,
+  // nonce) so that a replay can't substitute a different session key.
+  const message = buildActivationMessage({
+    walletAddr,
+    sessionPubkey,
+    nonce: proof.nonce,
+  });
+  const messageBytes = new TextEncoder().encode(message);
+  let signatureBytes: Uint8Array;
+  let walletPubkeyBytes: Uint8Array;
+  try {
+    signatureBytes = bs58.decode(proof.walletSignatureBase58);
+    walletPubkeyBytes = bs58.decode(walletAddr);
+  } catch {
+    throw new Error("Invalid signature or wallet encoding");
+  }
+  if (signatureBytes.length !== 64 || walletPubkeyBytes.length !== 32) {
+    throw new Error("Invalid signature or wallet length");
+  }
+  const sigValid = nacl.sign.detached.verify(
+    messageBytes,
+    signatureBytes,
+    walletPubkeyBytes,
+  );
+  if (!sigValid) {
+    throw new Error("Wallet signature does not match activation message");
+  }
+
+  // Atomically consume the nonce (single-use). Must happen AFTER the
+  // signature check passes — if we burn the nonce on a failed verify, a
+  // legitimate retry would have to request a new challenge unnecessarily.
+  const nonceOk = await consumeNonce(proof.nonce);
+  if (!nonceOk) {
+    throw new Error("Activation nonce expired or already used");
   }
 
   // Encrypt and store

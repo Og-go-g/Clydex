@@ -15,13 +15,22 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json();
-    const { sessionSecretKey, sessionId } = body;
+    const { sessionSecretKey, sessionId, nonce, walletSignature } = body;
 
     if (!sessionSecretKey || typeof sessionSecretKey !== "string") {
       return NextResponse.json({ error: "sessionSecretKey is required (base58 string)" }, { status: 400 });
     }
+    if (!nonce || typeof nonce !== "string" || nonce.length < 32 || nonce.length > 128) {
+      return NextResponse.json({ error: "nonce is required (hex string from /api/copy/activate-challenge)" }, { status: 400 });
+    }
+    if (!walletSignature || typeof walletSignature !== "string" || walletSignature.length < 64) {
+      return NextResponse.json({ error: "walletSignature is required (base58 string)" }, { status: 400 });
+    }
 
-    const result = await activateSession(addr, sessionSecretKey, sessionId);
+    const result = await activateSession(addr, sessionSecretKey, sessionId, {
+      nonce,
+      walletSignatureBase58: walletSignature,
+    });
 
     return NextResponse.json({
       success: true,
