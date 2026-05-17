@@ -58,22 +58,23 @@ function toTriggerKind(kind: "StopLoss" | "TakeProfit"): TriggerKind {
 import nacl from "tweetnacl";
 
 /**
- * Hydrate accountIds and balances after refreshSession.
+ * A wallet unknown to the engine fails BOTH `refreshSession` (server returns
+ * `USER_NOT_FOUND`) and `updateAccountId` (HTTP 404 on `/user/{pubkey}`).
+ * Both happen because the user only enters the engine's users table after
+ * its first on-chain Deposit event is indexed.
  *
- * Tolerant to "User not found" (HTTP 404 on /user/{pubkey}): a wallet that
- * has never made an on-chain deposit is unknown to the engine until its
- * first Deposit event is indexed. The deposit() call itself does not
- * require accountIds or a session, so first-time users can still proceed
- * — accountIds are populated by hydrateAccountIds() once the deposit confirms.
+ * `NordUser.deposit()` does not require `sessionId` or `accountIds`, so the
+ * fix is to let those two hydration steps fail silently for first-time
+ * wallets — the deposit still goes through, and on the next interaction
+ * (lazy hydrate) the session/accountIds are populated normally.
  *
- * Any other failure mode (network, auth, schema) is re-thrown.
- *
- * The "not found" needle is checked in both the outer message and the cause
- * chain because the SDK wraps it: outer = "Failed to update account ID",
- * cause = "User <pubkey> not found".
+ * The "not found" needle is matched across the cause chain because the SDK
+ * wraps the original message at each layer (`Failed to update account ID`
+ * → `User <pubkey> not found`; `Could not execute createSession, reason:
+ * USER_NOT_FOUND` from the engine response).
  */
 function isUserNotFoundError(err: unknown): boolean {
-  const NEEDLE = /not found/i;
+  const NEEDLE = /not[ _-]?found/i;
   let current: unknown = err;
   for (let depth = 0; depth < 4 && current; depth++) {
     if (current instanceof Error && NEEDLE.test(current.message)) return true;
@@ -144,7 +145,16 @@ export async function createNordUser(params: CreateUserParams): Promise<NordUser
     },
   });
 
-  await user.refreshSession();
+  // refreshSession fails with USER_NOT_FOUND for wallets the engine hasn't
+  // seen yet (no prior on-chain Deposit event). That's expected for first-
+  // time users — deposit() itself doesn't need a sessionId, so we let the
+  // user proceed without one and createSession on the next interaction
+  // after the first deposit is indexed.
+  try {
+    await user.refreshSession();
+  } catch (err) {
+    if (!isUserNotFoundError(err)) throw err;
+  }
   await hydrateNordUser(user);
 
   return user;
@@ -174,7 +184,16 @@ export async function createNordUserWithSessionKey(params: CreateUserParams): Pr
     },
   });
 
-  await user.refreshSession();
+  // refreshSession fails with USER_NOT_FOUND for wallets the engine hasn't
+  // seen yet (no prior on-chain Deposit event). That's expected for first-
+  // time users — deposit() itself doesn't need a sessionId, so we let the
+  // user proceed without one and createSession on the next interaction
+  // after the first deposit is indexed.
+  try {
+    await user.refreshSession();
+  } catch (err) {
+    if (!isUserNotFoundError(err)) throw err;
+  }
   await hydrateNordUser(user);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
