@@ -132,18 +132,44 @@ export default function TermsPage() {
 
       <Section title="5. Eligibility and prohibited jurisdictions">
         <p>
-          You may not use Clydex if you are: under 18 years old; a resident
-          of, or accessing the service from, a jurisdiction that prohibits
-          trading cryptocurrency derivatives (this includes, but is not
-          limited to, the United States, the United Kingdom, Canada, China,
-          and any country subject to comprehensive sanctions); or any
-          person or entity listed on a sanctions list maintained by OFAC,
-          the EU, the UK, or the UN.
+          Because Clydex is a frontend to 01 Exchange, the eligibility
+          rules of 01 Exchange apply in full. As of the date of this
+          document 01 Exchange&apos;s public FAQ states that its frontend is
+          not accessible to, and may not be used by, any individual or
+          entity that is a resident, citizen, incorporated in, located
+          in, or otherwise operating from any jurisdiction that is
+          subject to sanctions or other legal restrictions, including
+          but not limited to:
+        </p>
+        <ul className="mb-2 ml-6 list-disc space-y-1">
+          <li>the United States</li>
+          <li>Canada</li>
+          <li>Cuba</li>
+          <li>Iran</li>
+          <li>North Korea</li>
+          <li>Syria</li>
+          <li>Myanmar</li>
+          <li>Russia (including regions occupied or controlled by Russia)</li>
+        </ul>
+        <p>
+          In addition, you may not use Clydex if you are under 18 years
+          old, or if you are a person or entity listed on a sanctions
+          list maintained by OFAC, the EU, the UK, or the UN.
         </p>
         <p>
-          You are responsible for determining the legality of using Clydex
-          in your jurisdiction. We may block access from specific countries
-          at our discretion without notice.
+          <strong className="text-white">Representation and warranty.</strong>{" "}
+          By accessing or using Clydex you represent and warrant that you
+          are not a person or entity described above, and that your access
+          to and use of Clydex and the underlying 01 Exchange complies with
+          all applicable laws and regulations of your jurisdiction —
+          including those based on citizenship, place of incorporation, or
+          jurisdiction of operations, not just current physical location.
+        </p>
+        <p>
+          You are solely responsible for determining the legality of using
+          Clydex in your jurisdiction. We may block access from specific
+          countries at our discretion, with or without notice, and will
+          update this list to track 01 Exchange&apos;s own restrictions.
         </p>
       </Section>
 
