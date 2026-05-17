@@ -99,8 +99,17 @@ export default function TermsPage() {
           </li>
           <li>
             If a leader is liquidated, copy followers do not necessarily
-            close cleanly — your account may also liquidate, sometimes worse
-            than the leader.
+            close cleanly. The copy-trading dialog lets you set an optional
+            stop-loss percent per leader; when configured we ask the exchange
+            to attach a stop-loss trigger to each copied position. If the
+            trigger fires normally your position closes before liquidation —
+            but the protection is best-effort: a fast gap move can blow
+            through the trigger, an exchange-side error can leave the
+            trigger unset (we log such failures but the trade still goes
+            through), and a leader rug pulling could still drag your account
+            into liquidation, sometimes at a worse price than the leader. If
+            you don&apos;t configure a stop-loss percent, no protection is
+            attached at all.
           </li>
           <li>
             Leaders are not vetted by Clydex. Anyone trading on 01 Exchange
