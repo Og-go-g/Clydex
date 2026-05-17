@@ -25,13 +25,13 @@ export function Footer() {
         )}
         <Link
           href="/terms"
-          className="text-[11px] text-gray-600 transition-colors hover:text-gray-400"
+          className="text-[11px] text-gray-500 transition-colors hover:text-emerald-400"
         >
           Terms
         </Link>
         <Link
           href="/privacy"
-          className="text-[11px] text-gray-600 transition-colors hover:text-gray-400"
+          className="text-[11px] text-gray-500 transition-colors hover:text-emerald-400"
         >
           Privacy
         </Link>

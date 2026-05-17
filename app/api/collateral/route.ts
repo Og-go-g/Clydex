@@ -5,6 +5,7 @@ import { getAuthAddress } from "@/lib/auth/session";
 import { getUser, getAccount } from "@/lib/n1/client";
 import { checkLiquidationRisk } from "@/lib/n1/alerts";
 import { RATE_LIMITS, safeRateLimit } from "@/lib/ratelimit";
+import { CURRENT_TERMS_VERSION, hasAcceptedCurrentTerms } from "@/lib/legal";
 
 // ─── Zod Schemas ──────────────────────────────────────────────────
 
@@ -113,6 +114,24 @@ export async function POST(req: Request) {
 
     // ─── Deposit validation ──────────────────────────────
     if (action === "deposit") {
+      // Enforce ToS acceptance before any deposit. Withdrawals are NOT
+      // blocked even without acceptance — a user must always be able to
+      // pull their funds out, regardless of legal-flow state.
+      const accepted = await hasAcceptedCurrentTerms(address);
+      if (!accepted) {
+        return NextResponse.json(
+          {
+            approved: false,
+            action: "deposit",
+            requiresTermsAcceptance: true,
+            currentVersion: CURRENT_TERMS_VERSION,
+            message:
+              "Please review and accept the Terms of Service and Privacy Policy before depositing.",
+          },
+          { status: 403 },
+        );
+      }
+
       if (!user || !user.accountIds?.length) {
         // First deposit — account will be created
         return NextResponse.json({

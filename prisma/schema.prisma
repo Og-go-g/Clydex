@@ -197,3 +197,23 @@ model CloseLock {
   @@index([expiresAt], map: "idx_close_lock_expires")
   @@map("close_locks")
 }
+
+// ---------------------------------------------------------------------------
+//  TermsAcceptance — records that a wallet accepted a specific version of
+//  the Terms of Service and Privacy Policy. Per-wallet single row,
+//  upserted on every accept; `version` is the human-facing semver string
+//  (e.g. "1.0") and matches CURRENT_TERMS_VERSION in lib/legal.ts.
+//
+//  Enforcement is server-side: /api/collateral (deposit only — withdrawals
+//  intentionally never blocked, so users can always pull funds) and
+//  /api/copy/activate check the row before proceeding. If the user has no
+//  row or an older version, they're prompted in the UI to accept before
+//  the action goes through.
+// ---------------------------------------------------------------------------
+model TermsAcceptance {
+  walletAddr String   @id @map("wallet_addr")
+  version    String
+  acceptedAt DateTime @default(now()) @map("accepted_at") @db.Timestamptz(3)
+
+  @@map("terms_acceptance")
+}

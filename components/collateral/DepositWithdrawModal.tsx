@@ -63,6 +63,10 @@ export function DepositWithdrawModal({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [walletUsdcBalance, setWalletUsdcBalance] = useState<number | null>(null);
   const [confirmedAmount, setConfirmedAmount] = useState<number>(0);
+  // ToS acceptance: null while loading, true if already accepted (skip
+  // checkbox), false if checkbox must be shown and checked before deposit.
+  const [termsAccepted, setTermsAccepted] = useState<boolean | null>(null);
+  const [termsChecked, setTermsChecked] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const fallbackTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
@@ -139,14 +143,31 @@ export function DepositWithdrawModal({
     }
   }, [collateralError, step]);
 
+  // Fetch ToS acceptance status — drives whether we render the checkbox
+  // on the deposit confirm step. Loaded once when modal opens.
+  const fetchTermsStatus = useCallback(async (signal?: AbortSignal) => {
+    if (!isAuthenticated) return;
+    try {
+      const res = await fetch("/api/terms/status", { signal });
+      if (res.ok) {
+        const data = await res.json();
+        setTermsAccepted(Boolean(data?.accepted));
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      // Non-critical — leave as null; UI will defer to server's 403 if any.
+    }
+  }, [isAuthenticated]);
+
   // Fetch both balances when modal opens; abort in-flight requests on close
   useEffect(() => {
     if (!isOpen) return;
     const controller = new AbortController();
     fetchCollateralInfo(controller.signal);
     fetchWalletUsdc(controller.signal);
+    fetchTermsStatus(controller.signal);
     return () => controller.abort();
-  }, [isOpen, fetchCollateralInfo, fetchWalletUsdc]);
+  }, [isOpen, fetchCollateralInfo, fetchWalletUsdc, fetchTermsStatus]);
 
   // Reset state on tab change or modal open
   useEffect(() => {
@@ -154,6 +175,7 @@ export function DepositWithdrawModal({
     setStep("input");
     setValidation(null);
     setErrorMsg(null);
+    setTermsChecked(false);
     resetCollateral();
   }, [tab, isOpen, resetCollateral]);
 
@@ -207,6 +229,25 @@ export function DepositWithdrawModal({
 
       const data = await res.json();
 
+      // Server enforces ToS acceptance for deposits via 403. Fall through to
+      // the confirm step so the user can tick the checkbox and re-submit —
+      // the actual recording happens in handleExecute before the wallet sign.
+      if (res.status === 403 && data?.requiresTermsAcceptance) {
+        setTermsAccepted(false);
+        setConfirmedAmount(parsedAmount);
+        setValidation({
+          approved: true,
+          action: tab,
+          amount: parsedAmount,
+          warnings: [],
+          message: data.message ?? "",
+          requiresConfirmation: true,
+        });
+        setStep("confirm");
+        setLoading(false);
+        return;
+      }
+
       if (!res.ok) {
         setErrorMsg(data.error || "Validation failed");
         setLoading(false);
@@ -230,6 +271,29 @@ export function DepositWithdrawModal({
 
   // Step 2: Execute via useCollateral hook (wallet signing)
   const handleExecute = useCallback(async () => {
+    // Record ToS acceptance BEFORE the wallet popup. If we recorded after,
+    // a user who signed the tx but lost network before /api/terms/accept
+    // committed would have an unrecorded acceptance against a real deposit.
+    // Recording first means at worst we have an acceptance with no deposit
+    // (harmless — recoverable on next attempt).
+    if (tab === "deposit" && termsAccepted === false) {
+      if (!termsChecked) {
+        setErrorMsg("Please confirm you have read the Terms and Privacy Policy.");
+        return;
+      }
+      try {
+        const acceptRes = await fetch("/api/terms/accept", { method: "POST" });
+        if (!acceptRes.ok) {
+          setErrorMsg("Could not record acceptance. Please try again.");
+          return;
+        }
+        setTermsAccepted(true);
+      } catch {
+        setErrorMsg("Network error recording acceptance. Please try again.");
+        return;
+      }
+    }
+
     setStep("signing");
     setErrorMsg(null);
 
@@ -260,7 +324,7 @@ export function DepositWithdrawModal({
         });
       }, 500);
     }
-  }, [tab, confirmedAmount, execute, onClose, startVerification, onSuccess]);
+  }, [tab, confirmedAmount, execute, onClose, startVerification, onSuccess, termsAccepted, termsChecked]);
 
   // Close handler — always closeable
   const handleClose = useCallback(() => {
@@ -435,6 +499,41 @@ export function DepositWithdrawModal({
                 </div>
               )}
 
+              {/* ToS acceptance — required only on the very first deposit
+                  this wallet ever makes through Clydex. After acceptance is
+                  recorded server-side, this checkbox doesn't reappear. */}
+              {tab === "deposit" && termsAccepted === false && (
+                <label className="mb-4 flex cursor-pointer items-start gap-3 rounded-xl border border-[#262626] bg-[#141414] p-3 text-xs text-gray-300 transition-colors hover:border-emerald-500/30">
+                  <input
+                    type="checkbox"
+                    checked={termsChecked}
+                    onChange={(e) => setTermsChecked(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 cursor-pointer accent-emerald-500"
+                  />
+                  <span className="leading-relaxed">
+                    I have read and agree to the{" "}
+                    <a
+                      href="/terms"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-emerald-400 underline hover:text-emerald-300"
+                    >
+                      Terms of Service
+                    </a>{" "}
+                    and{" "}
+                    <a
+                      href="/privacy"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-emerald-400 underline hover:text-emerald-300"
+                    >
+                      Privacy Policy
+                    </a>
+                    . I understand perpetuals trading is high-risk and I can lose my entire deposit.
+                  </span>
+                </label>
+              )}
+
               {/* Warnings */}
               {validation.warnings.length > 0 && (
                 <div className="mb-4 space-y-2">
@@ -462,7 +561,10 @@ export function DepositWithdrawModal({
                 </button>
                 <button
                   onClick={handleExecute}
-                  disabled={executing}
+                  disabled={
+                    executing ||
+                    (tab === "deposit" && termsAccepted === false && !termsChecked)
+                  }
                   className={`flex-1 rounded-xl border py-3 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
                     tab === "withdraw"
                       ? "border-orange-500/30 bg-orange-500/15 text-orange-400 hover:bg-orange-500/25"

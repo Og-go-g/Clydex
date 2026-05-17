@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAuthAddress } from "@/lib/auth/session";
 import { activateSession, deactivateSession, isSessionActive } from "@/lib/copy/session-activator";
+import { CURRENT_TERMS_VERSION, hasAcceptedCurrentTerms } from "@/lib/legal";
 
 /**
  * POST /api/copy/activate
@@ -11,6 +12,22 @@ export async function POST(req: NextRequest) {
   const addr = await getAuthAddress();
   if (!addr) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  }
+
+  // Enforce ToS acceptance — copy trading involves additional risks (see §4
+  // of Terms). User must have accepted current version before we'll store
+  // their signing key. Deactivate path is intentionally not blocked so a
+  // non-accepting user can still pull the plug.
+  const accepted = await hasAcceptedCurrentTerms(addr);
+  if (!accepted) {
+    return NextResponse.json(
+      {
+        error: "Please accept the Terms of Service before enabling copy trading.",
+        requiresTermsAcceptance: true,
+        currentVersion: CURRENT_TERMS_VERSION,
+      },
+      { status: 403 },
+    );
   }
 
   try {

@@ -575,6 +575,32 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
     setActivating(true);
     setError(null);
     try {
+      // Pre-check ToS acceptance. /api/copy/activate enforces server-side
+      // (403 if not accepted), but we want a friendly inline prompt rather
+      // than a generic error. If not accepted, the user has likely never
+      // deposited either — first deposit acceptance covers both — but a
+      // user could land here via a different flow, so record acceptance
+      // up-front before the wallet popup chain begins.
+      const tsRes = await fetch("/api/terms/status");
+      if (tsRes.ok) {
+        const ts = await tsRes.json();
+        if (!ts?.accepted) {
+          const ok = window.confirm(
+            "Copy trading involves additional risks (slippage, late fills, leader liquidation cascades — see §4 of the Terms). By clicking OK you accept the current Terms of Service and Privacy Policy. Cancel to review them first."
+          );
+          if (!ok) {
+            setError("Please review the Terms before enabling copy trading.");
+            setActivating(false);
+            return;
+          }
+          const ar = await fetch("/api/terms/accept", { method: "POST" });
+          if (!ar.ok) {
+            setError("Could not record Terms acceptance. Please try again.");
+            setActivating(false);
+            return;
+          }
+        }
+      }
       const { createNordUserWithSessionKey } = await import("@/lib/n1/user-client");
       const { sessionSecretKey, sessionPublicKey, sessionId } = await createNordUserWithSessionKey({
         walletPubkey: publicKey,
