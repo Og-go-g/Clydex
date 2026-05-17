@@ -53,12 +53,24 @@ export function useBackgroundVerification() {
       const startTime = Date.now();
       let stopped = false;
 
-      // Threshold: confirm if balance moved at least 50% of tx amount in the right direction.
-      // This accounts for PnL fluctuations on open positions.
-      const threshold = txAmount * 0.5;
+      // Threshold: require balance to have moved by at least 95% of the tx
+      // amount in the correct direction. The previous 50% allowed a single
+      // PnL swing (e.g. +$51 on a leveraged position) to false-confirm a
+      // $100 deposit before the on-chain deposit had actually landed —
+      // and the opposite for withdrawals. 95% means PnL would need to
+      // exceed 5% × txAmount in the correct direction, which is much rarer
+      // and far less likely to coincide with an actual confirmation.
+      const threshold = txAmount * 0.95;
       const targetBalance = action === "deposit"
         ? balanceBefore + threshold
         : balanceBefore - threshold;
+      // Require two consecutive confirming polls. Deposits/withdrawals are
+      // monotonic at the engine level — once they land, balance stays put
+      // (modulo small PnL ticks well under the 5% buffer). PnL alone is
+      // oscillatory: a single +$51 swing can revert to -$10 on the next
+      // poll. Two-in-a-row collapses that false-positive surface.
+      let consecutiveConfirms = 0;
+      const REQUIRED_CONFIRMS = 2;
 
       const getInterval = (elapsed: number): number | null => {
         for (const phase of VERIFY_SCHEDULE) {
@@ -84,14 +96,21 @@ export function useBackgroundVerification() {
             // Skip if account doesn't exist yet (first deposit still processing)
             if (data.exists === false) {
               // Don't confirm, don't fail — just keep polling
+              consecutiveConfirms = 0;
             } else {
               const balanceAfter: number = data.collateral ?? 0;
 
-              const confirmed = action === "deposit"
+              const polledConfirm = action === "deposit"
                 ? balanceAfter >= targetBalance
                 : balanceAfter <= targetBalance;
 
-              if (confirmed) {
+              if (polledConfirm) {
+                consecutiveConfirms++;
+              } else {
+                consecutiveConfirms = 0;
+              }
+
+              if (consecutiveConfirms >= REQUIRED_CONFIRMS) {
                 finish();
                 addToast({
                   type: "success",
@@ -105,7 +124,9 @@ export function useBackgroundVerification() {
             }
           }
         } catch {
-          // Network hiccup — retry
+          // Network hiccup — retry. Don't reset consecutiveConfirms — a
+          // transient network blip between two real confirmations
+          // shouldn't force us back to zero.
         }
 
         const elapsed = Date.now() - startTime;
