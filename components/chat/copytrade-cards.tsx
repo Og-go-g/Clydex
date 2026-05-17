@@ -179,7 +179,7 @@ function CardShell({
   children: React.ReactNode;
 }) {
   return (
-    <div className="my-2 w-full max-w-3xl overflow-hidden rounded-xl border border-[#262626] bg-[#0f0f0f]">
+    <div className="my-1 w-full max-w-3xl overflow-hidden rounded-xl border border-[#262626] bg-[#0f0f0f]">
       {/* `pr-10` reserves space for CollapsibleCard's chevron at
           (absolute top-2 right-2) — same pattern Trade-mode cards
           use (see app/chat/page.tsx — pr-10 on Markets / Orderbook

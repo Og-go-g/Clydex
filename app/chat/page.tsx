@@ -1523,7 +1523,7 @@ function FundingRatesCard({ data }: {
   if (sorted.length === 0) return null;
 
   return (
-    <div className="my-2 w-full max-w-3xl overflow-hidden rounded-xl border border-border bg-background">
+    <div className="my-1 w-full max-w-3xl overflow-hidden rounded-xl border border-border bg-background">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-border px-4 pr-10 py-2">
         <div className="flex items-center gap-2">
@@ -1753,7 +1753,7 @@ function PositionsCard({
   // Show loader while first refresh is in-flight (prevents flash of stale snapshot)
   if (refreshing) {
     return (
-      <div className="my-2 w-full max-w-3xl overflow-hidden rounded-xl border border-border bg-background">
+      <div className="my-1 w-full max-w-3xl overflow-hidden rounded-xl border border-border bg-background">
         <div className="px-4 py-3 flex items-center gap-2">
           <svg className="h-4 w-4 animate-spin text-muted" viewBox="0 0 24 24" fill="none">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
@@ -1773,7 +1773,7 @@ function PositionsCard({
   // If no positions after refresh — show empty state
   if (positions.length === 0) {
     return (
-      <div className="my-2 w-full max-w-3xl overflow-hidden rounded-xl border border-border bg-background">
+      <div className="my-1 w-full max-w-3xl overflow-hidden rounded-xl border border-border bg-background">
         <div className="px-4 pr-8 py-3 text-center text-sm text-muted">No open positions</div>
       </div>
     );
@@ -2166,7 +2166,7 @@ function OpenOrdersCard({
   const activeCount = liveOrders.filter(o => o.status === "active").length;
 
   return (
-    <div className="my-2 w-full max-w-3xl overflow-hidden rounded-xl border border-border bg-background">
+    <div className="my-1 w-full max-w-3xl overflow-hidden rounded-xl border border-border bg-background">
       <div className="border-b border-border px-4 py-2 flex items-center gap-2">
         {!verified ? (
           <span className="h-2 w-2 animate-spin rounded-full border border-muted border-t-accent" />
@@ -2377,7 +2377,7 @@ function MarketPriceCard({ data, livePrice }: { data: Record<string, unknown>; l
   };
 
   return (
-    <div className="my-2 w-full max-w-3xl overflow-hidden rounded-xl border border-border bg-background">
+    <div className="my-1 w-full max-w-3xl overflow-hidden rounded-xl border border-border bg-background">
       {/* Header + Price — pr-10 keeps the right-side price clear of the
           CollapsibleCard wrapper's collapse chevron (top-2 right-2). */}
       <div className="flex items-center justify-between px-4 pr-10 pt-3 pb-1">
@@ -2675,7 +2675,7 @@ function LivePositionCard({ initialPos, txHash, realtimePrices, onSendMessage }:
   // Superseded by a newer card for the same symbol+side (add-to-position)
   if (superseded) {
     return (
-      <div className="my-2 w-full max-w-lg overflow-hidden rounded-xl border border-[#262626] bg-background opacity-60">
+      <div className="my-1 w-full max-w-lg overflow-hidden rounded-xl border border-[#262626] bg-background opacity-60">
         <div className="border-b border-border px-4 py-2 flex items-center gap-2">
           <span className="text-muted">↗</span>
           <span className="text-sm font-semibold text-muted">Position Updated</span>
@@ -2756,7 +2756,7 @@ function LivePositionCard({ initialPos, txHash, realtimePrices, onSendMessage }:
   }
 
   return (
-    <div className="my-2 w-full max-w-lg overflow-hidden rounded-xl border border-green-500/30 bg-background">
+    <div className="my-1 w-full max-w-lg overflow-hidden rounded-xl border border-green-500/30 bg-background">
       <div className="border-b border-border px-4 pr-10 py-2 flex items-center gap-2">
         <span className="text-green-400">✓</span>
         <span className="text-sm font-semibold text-green-400">Position Opened</span>
@@ -3229,7 +3229,7 @@ function LiveOrderCard({ market, side, size, limitPrice, leverage, txHash, realt
   // ── Cancelled ──
   if (orderState === "cancelled") {
     return (
-      <div className="my-2 w-full max-w-lg overflow-hidden rounded-xl border border-white/10 bg-background opacity-50">
+      <div className="my-1 w-full max-w-lg overflow-hidden rounded-xl border border-white/10 bg-background opacity-50">
         <div className="border-b border-border px-4 py-2 flex items-center gap-2">
           <span className="text-muted">✗</span>
           <span className="text-sm font-semibold text-muted">Limit Order Cancelled</span>
@@ -3585,7 +3585,7 @@ function OrderPreviewCard({ data, realtimePrices, onSendMessage, isDismissed: pr
     const isVerifyError = errorLower.includes("not found") || errorLower.includes("still appears");
     const isMarket = (orderType ?? "market") === "market";
     return (
-      <div className="my-2 w-full max-w-lg overflow-hidden rounded-xl border border-red-500/30 bg-red-500/5 p-4">
+      <div className="my-1 w-full max-w-lg overflow-hidden rounded-xl border border-red-500/30 bg-red-500/5 p-4">
         <div className="flex items-center gap-2">
           <span className="text-red-400">✗</span>
           <span className="text-sm font-medium text-red-400">Order Failed</span>
@@ -4036,7 +4036,7 @@ function ClosePositionCard({ data, isDismissed: propDismissed, realtimePrices, o
     const stepIndex = status === "signing" ? 0 : status === "submitting" ? 1 : 2;
 
     return (
-      <div className="my-2 w-full max-w-lg overflow-hidden rounded-xl border border-orange-500/30 bg-background">
+      <div className="my-1 w-full max-w-lg overflow-hidden rounded-xl border border-orange-500/30 bg-background">
         <div className="border-b border-border px-4 py-2.5 flex items-center gap-2.5">
           <svg className="h-4 w-4 animate-spin text-orange-400" viewBox="0 0 24 24" fill="none">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
@@ -4156,7 +4156,7 @@ function ClosePositionCard({ data, isDismissed: propDismissed, realtimePrices, o
 
   const closeBaseAssetName = baseAssetFrom(market);
   return (
-    <div className="my-2 rounded-xl border border-orange-500/30 bg-background p-4">
+    <div className="my-1 rounded-xl border border-orange-500/30 bg-background p-4">
       <div className="mb-2 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="text-xs font-bold text-orange-400">CLOSE</span>
@@ -4297,7 +4297,7 @@ function CancelOrderCard({ data }: { data: Record<string, unknown> }) {
   // Loading — driven by useOrderActions.cancellingIds, not local state.
   if (isCancelling) {
     return (
-      <div className="my-2 rounded-xl border border-orange-500/30 bg-background p-4">
+      <div className="my-1 rounded-xl border border-orange-500/30 bg-background p-4">
         <div className="flex items-center gap-2">
           <svg className="h-4 w-4 animate-spin text-orange-400" viewBox="0 0 24 24" fill="none">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
@@ -4356,7 +4356,7 @@ function CancelOrderCard({ data }: { data: Record<string, unknown> }) {
   }
 
   return (
-    <div className="my-2 rounded-xl border border-orange-500/30 bg-background p-4">
+    <div className="my-1 rounded-xl border border-orange-500/30 bg-background p-4">
       <div className="flex items-center gap-2 mb-2">
         <span className="text-xs font-bold text-orange-400">CANCEL</span>
         <span className="text-sm font-semibold text-foreground">{market}</span>
