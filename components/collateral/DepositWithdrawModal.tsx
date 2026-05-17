@@ -426,6 +426,15 @@ export function DepositWithdrawModal({
                 </div>
               </div>
 
+              {/* First-deposit notice — engine creates the account from the
+                  on-chain Deposit event, so the balance appears ~10-20s after
+                  confirmation rather than instantly. */}
+              {tab === "deposit" && info && !info.exists && (
+                <div className="mb-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-300">
+                  Your 01 Exchange account will be created automatically with this deposit. Balance typically appears within 10-20 seconds after confirmation.
+                </div>
+              )}
+
               {/* Warnings */}
               {validation.warnings.length > 0 && (
                 <div className="mb-4 space-y-2">

@@ -145,6 +145,15 @@ export async function getOrCreateUser(params: {
       // Reset inactivity timeout on activity
       lastActivityMono = now;
       resetSessionTimeout();
+
+      // Lazy hydrate: if the session was created before the first deposit
+      // was indexed by the engine, accountIds is still empty. Re-fetch
+      // before returning so trading actions don't trip "Account ID is
+      // undefined". No wallet popup — pure GET /user/{pubkey}.
+      if (!cachedUser.accountIds || cachedUser.accountIds.length === 0) {
+        const { hydrateAccountIds } = await import("@/lib/n1/user-client");
+        try { await hydrateAccountIds(cachedUser); } catch { /* keep cached user */ }
+      }
       return cachedUser;
     }
     // Session expired (idle or max lifetime) — invalidate
@@ -663,6 +672,12 @@ function handleError(
     safeMsg = "Transaction cancelled by user";
   } else if (isSlippageError) {
     safeMsg = "Order failed due to slippage. Try again with higher slippage tolerance.";
+  } else if (rawMsg.includes("Account ID is undefined")) {
+    // Trade attempted before the engine indexed the first deposit. The
+    // on-chain Deposit normally takes 10-20s to be picked up. Once the
+    // verification toast confirms the deposit, accountIds will hydrate
+    // on the next trade attempt.
+    safeMsg = "Your 01 Exchange account is being activated after your first deposit. Please wait ~10-20 seconds and try again.";
   } else if (rawMsg.includes("insufficient") || rawMsg.includes("Insufficient")) {
     safeMsg = "Insufficient margin for this order";
   } else if (rawMsg.includes("timeout") || rawMsg.includes("Timeout")) {

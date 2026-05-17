@@ -46,6 +46,9 @@ export function useCollateral() {
       if (executingRef.current) return { ok: false, balanceBefore: null };
       executingRef.current = true;
 
+      // Hoisted so it survives into the catch block for Sentry tagging.
+      let isFirstDeposit = false;
+
       try {
         if (!publicKey || !signMessage || !signTransaction) {
           setState({ executing: false, error: "Wallet not connected or does not support signing", success: false });
@@ -75,13 +78,16 @@ export function useCollateral() {
           return { ok: false, balanceBefore: null };
         }
 
-        // Snapshot collateral balance before tx for background verification
+        // Snapshot collateral balance before tx for background verification.
+        // Also capture whether this is a first-time deposit (no account yet
+        // on the engine) so Sentry tags can isolate first-deposit failures.
         let balanceBefore: number | null = null;
         try {
           const preRes = await fetch("/api/collateral");
           if (preRes.ok) {
             const preData = await preRes.json();
             balanceBefore = preData.collateral ?? null;
+            isFirstDeposit = preData.exists === false && action === "deposit";
           }
         } catch {
           // Non-critical
@@ -126,7 +132,7 @@ export function useCollateral() {
         } else {
           safeMsg = "Transaction failed. Please try again.";
           Sentry.captureException(err, {
-            tags: { component: "useCollateral", action },
+            tags: { component: "useCollateral", action, firstDeposit: isFirstDeposit },
             extra: { amount, walletPrefix: publicKey?.toBase58().slice(0, 8) },
           });
         }

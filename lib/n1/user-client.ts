@@ -58,6 +58,72 @@ function toTriggerKind(kind: "StopLoss" | "TakeProfit"): TriggerKind {
 import nacl from "tweetnacl";
 
 /**
+ * Hydrate accountIds and balances after refreshSession.
+ *
+ * Tolerant to "User not found" (HTTP 404 on /user/{pubkey}): a wallet that
+ * has never made an on-chain deposit is unknown to the engine until its
+ * first Deposit event is indexed. The deposit() call itself does not
+ * require accountIds or a session, so first-time users can still proceed
+ * — accountIds are populated by hydrateAccountIds() once the deposit confirms.
+ *
+ * Any other failure mode (network, auth, schema) is re-thrown.
+ *
+ * The "not found" needle is checked in both the outer message and the cause
+ * chain because the SDK wraps it: outer = "Failed to update account ID",
+ * cause = "User <pubkey> not found".
+ */
+function isUserNotFoundError(err: unknown): boolean {
+  const NEEDLE = /not found/i;
+  let current: unknown = err;
+  for (let depth = 0; depth < 4 && current; depth++) {
+    if (current instanceof Error && NEEDLE.test(current.message)) return true;
+    current = current instanceof Error ? current.cause : undefined;
+  }
+  return false;
+}
+
+async function hydrateNordUser(user: NordUser): Promise<void> {
+  try {
+    await user.updateAccountId();
+  } catch (err) {
+    if (!isUserNotFoundError(err)) throw err;
+    user.accountIds = [];
+  }
+  if (user.accountIds && user.accountIds.length > 0) {
+    await user.fetchInfo();
+  }
+}
+
+/**
+ * Re-fetch accountIds on an existing NordUser. Safe to call after a first
+ * deposit confirms — turns an `accountIds: []` user into a fully-functional
+ * one without a wallet popup. Returns true if accountIds is non-empty after
+ * the call (i.e. user is ready to trade).
+ *
+ * Non-destructive: a transient 404 from the engine will NOT overwrite a
+ * previously-known accountIds list. We only initialise to [] when there was
+ * no prior list — never clobber existing state on a temporary blip.
+ */
+export async function hydrateAccountIds(user: NordUser): Promise<boolean> {
+  const hadIds = !!user.accountIds && user.accountIds.length > 0;
+  try {
+    await user.updateAccountId();
+  } catch (err) {
+    if (!isUserNotFoundError(err)) throw err;
+    if (!hadIds) user.accountIds = [];
+  }
+  const ready = !!user.accountIds && user.accountIds.length > 0;
+  if (ready) {
+    try {
+      await user.fetchInfo();
+    } catch {
+      // Non-fatal — balances/positions will load on next refresh.
+    }
+  }
+  return ready;
+}
+
+/**
  * Create a NordUser with a fresh ephemeral session keypair.
  * The session keypair is generated in-memory and never persisted.
  * The wallet signs the session creation message, then the session key
@@ -78,11 +144,8 @@ export async function createNordUser(params: CreateUserParams): Promise<NordUser
     },
   });
 
-  // Create a session on the exchange
   await user.refreshSession();
-  // Fetch account IDs and balances
-  await user.updateAccountId();
-  await user.fetchInfo();
+  await hydrateNordUser(user);
 
   return user;
 }
@@ -112,8 +175,7 @@ export async function createNordUserWithSessionKey(params: CreateUserParams): Pr
   });
 
   await user.refreshSession();
-  await user.updateAccountId();
-  await user.fetchInfo();
+  await hydrateNordUser(user);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const sessionId = String((user as any).sessionId ?? "0");
