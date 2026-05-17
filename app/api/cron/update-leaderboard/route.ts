@@ -25,15 +25,23 @@ import { refreshAllPnlTotals } from "@/lib/copytrade/refresh";
 export async function GET(request: NextRequest) {
   const cronSecret = process.env.CRON_SECRET;
   if (!cronSecret) {
-    return NextResponse.json({ error: "CRON_SECRET not configured" }, { status: 500 });
+    // Generic 401 — never reveal in the response that the server is
+    // misconfigured; a 500 here would let an attacker probe whether
+    // CRON_SECRET is set as a side-channel.
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  // Constant-time check on a fixed-length padding so the response time
+  // doesn't leak `auth.length` (the prior `auth.length !== expected.length`
+  // short-circuit gave an instant 401 on length mismatch, which is a
+  // length oracle for the bearer token).
   const auth = request.headers.get("authorization") ?? "";
   const expected = `Bearer ${cronSecret}`;
-  const maxLen = Math.max(auth.length, expected.length);
-  const authBuf = Buffer.from(auth.padEnd(maxLen));
-  const expectedBuf = Buffer.from(expected.padEnd(maxLen));
-  if (auth.length !== expected.length || !timingSafeEqual(authBuf, expectedBuf)) {
+  const maxLen = Math.max(auth.length, expected.length, 64);
+  const authBuf = Buffer.from(auth.padEnd(maxLen, "\0"));
+  const expectedBuf = Buffer.from(expected.padEnd(maxLen, "\0"));
+  const eq = timingSafeEqual(authBuf, expectedBuf);
+  if (!eq || auth.length !== expected.length) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

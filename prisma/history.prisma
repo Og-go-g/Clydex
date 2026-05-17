@@ -41,6 +41,13 @@ model TradeHistory {
   @@index([accountId, time])
   @@index([accountId, orderId]) // supports GROUP BY orderId for /api/history/orders
   @@map("trade_history")
+  // Hypertable in production (sql/2026-04-19_timescale_hypertables.sql)
+  // has no primary key — TimescaleDB does not allow one on a hypertable.
+  // The `id @id` column above exists in the schema for Prisma model
+  // validity but is NOT a PRIMARY KEY in the database. @@ignore tells
+  // Prisma not to manage this table — DDL is owned by the raw SQL
+  // migrations under sql/. All reads/writes use lib/db-history.ts.
+  @@ignore
 }
 
 // ---------------------------------------------------------------------------
@@ -65,6 +72,8 @@ model PnlHistory {
   @@index([walletAddr, time])
   @@index([accountId, time])
   @@map("pnl_history")
+  // Hypertable — see comment on TradeHistory. Raw SQL only.
+  @@ignore
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +95,8 @@ model FundingHistory {
   @@index([walletAddr, time])
   @@index([accountId, time])
   @@map("funding_history")
+  // Hypertable — see comment on TradeHistory. Raw SQL only.
+  @@ignore
 }
 
 // ---------------------------------------------------------------------------
@@ -100,7 +111,7 @@ model DepositHistory {
   tokenId    Int
   time       DateTime
 
-  @@unique([walletAddr, time, amount])
+  @@unique([accountId, time, amount])
   @@index([walletAddr, time])
   @@map("deposit_history")
 }
@@ -118,7 +129,7 @@ model WithdrawalHistory {
   destPubkey String // destination wallet
   time       DateTime
 
-  @@unique([walletAddr, time, amount])
+  @@unique([accountId, time, amount])
   @@index([walletAddr, time])
   @@map("withdrawal_history")
 }
@@ -135,7 +146,7 @@ model LiquidationHistory {
   margins         Json? // raw margins snapshot
   time            DateTime
 
-  @@unique([walletAddr, time, fee])
+  @@unique([accountId, time, fee])
   @@index([walletAddr, time])
   @@map("liquidation_history")
 }
@@ -173,10 +184,13 @@ model SyncCursor {
 //  VolumeCalendar — daily volume and fee breakdown from 01.xyz frontend API
 // ---------------------------------------------------------------------------
 model VolumeCalendar {
-  id          String  @id @default(cuid())
+  id          String   @id @default(cuid())
   accountId   Int
   walletAddr  String
-  date        String // "2026-03-29"
+  // Stored as DATE (was TEXT in the original schema). String form was
+  // unsafe — a missing zero-pad (e.g. "2026-3-7") would silently sort
+  // wrong, and every period query paid a per-row cast to ::date in SQL.
+  date        DateTime @db.Date
   volume      Decimal @db.Decimal(30, 18)
   makerVolume Decimal @db.Decimal(30, 18)
   takerVolume Decimal @db.Decimal(30, 18)
@@ -217,7 +231,11 @@ model AccountPubkey {
   accountId      Int       @id
   pubkey         String? // NULL when notFound or transient failure
   notFound       Boolean   @default(false) // 404 from /account/{id}/pubkey
-  failedAttempts Int       @default(0) @db.SmallInt
+  // Widened from SmallInt to Int — the resolver cron runs every 15 min and
+  // increments on each 404, so a permanently-deleted accountId would hit
+  // 32767 in ~340 days and crash the whole batch transaction with a
+  // "smallint out of range" error.
+  failedAttempts Int       @default(0)
   resolvedAt     DateTime?
   lastCheckedAt  DateTime  @default(now())
 

@@ -118,6 +118,13 @@ export async function createSubscription(params: {
   stopLossPct?: number;
 }): Promise<string> {
   const id = uuid();
+  // ON CONFLICT path also re-activates (active = TRUE) — previously this
+  // silently resurrected subscriptions a user had explicitly paused via
+  // toggleSubscription(id, false). Now we only flip `active` to TRUE when
+  // the existing row is ALREADY active; a paused row stays paused even
+  // if the same (follower, leader) pair gets a new createSubscription
+  // call from the dialog. To re-enable, the user has to explicitly
+  // toggle it back via the existing toggle endpoint.
   await execute(
     `INSERT INTO copy_subscriptions (id, follower_addr, leader_addr, allocation_usdc, leverage_mult, max_position_usdc, max_total_position_usdc, stop_loss_pct)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -127,7 +134,6 @@ export async function createSubscription(params: {
        max_position_usdc = EXCLUDED.max_position_usdc,
        max_total_position_usdc = EXCLUDED.max_total_position_usdc,
        stop_loss_pct = EXCLUDED.stop_loss_pct,
-       active = TRUE,
        updated_at = NOW()`,
     [
       id,
@@ -470,6 +476,27 @@ export async function getCopiedMarketIds(
     `SELECT DISTINCT market_id AS "marketId"
      FROM copy_trades
      WHERE follower_addr = $1 AND leader_addr = $2 AND status = 'filled'`,
+    [followerAddr, leaderAddr],
+  );
+  return rows.map((r) => r.marketId);
+}
+
+/**
+ * Markets currently OWNED by (follower, leader) per copy_position_ownership.
+ * This is the authoritative "what should we close on bulk unfollow" list —
+ * unlike getCopiedMarketIds which reads from copy_trades history and
+ * therefore includes markets the user already closed manually (which we
+ * must NOT touch again, since the position there is now either gone or
+ * a fresh manual position).
+ */
+export async function getOwnedMarketIdsForLeader(
+  followerAddr: string,
+  leaderAddr: string,
+): Promise<number[]> {
+  const rows = await query<{ marketId: number }>(
+    `SELECT market_id AS "marketId"
+     FROM copy_position_ownership
+     WHERE follower_addr = $1 AND owning_leader_addr = $2`,
     [followerAddr, leaderAddr],
   );
   return rows.map((r) => r.marketId);

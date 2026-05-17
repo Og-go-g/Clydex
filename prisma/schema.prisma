@@ -217,3 +217,20 @@ model TermsAcceptance {
 
   @@map("terms_acceptance")
 }
+
+// ---------------------------------------------------------------------------
+//  SessionRevocation — per-wallet "minimum valid session createdAt".
+//  Iron-session stores all session state in an encrypted cookie, so an
+//  attacker who steals a cookie can keep using it even after the user
+//  logs out. On logout we bump `revokedAt` to NOW(); any session whose
+//  `createdAt` is older than `revokedAt` is treated as invalid. Lookup
+//  is cached in-process for 60s to avoid a DB hit on every authenticated
+//  request — the small window of "revoked but still works" is an
+//  acceptable trade for the avoided per-request query.
+// ---------------------------------------------------------------------------
+model SessionRevocation {
+  walletAddr String   @id @map("wallet_addr")
+  revokedAt  DateTime @default(now()) @map("revoked_at") @db.Timestamptz(3)
+
+  @@map("session_revocations")
+}

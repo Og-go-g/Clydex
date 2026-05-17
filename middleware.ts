@@ -157,9 +157,23 @@ export async function middleware(request: NextRequest) {
   // Self-hosted behind nginx: trust X-Real-IP set by the nginx config,
   // fallback to first entry of X-Forwarded-For (real client IP),
   // last resort: "unknown" (shared bucket — aggressive limiting).
+  //
+  // In production: if NEITHER header is present we are NOT being reached
+  // through nginx (someone hit the app port directly), which means rate
+  // limiting becomes trivially bypassable — every request hits the
+  // shared "unknown" bucket and a single attacker uses an entire
+  // tier's budget for everyone. Refuse the request rather than degrade
+  // silently. NODE_ENV=development bypasses this so local `next dev`
+  // continues to work.
   const realIp = request.headers.get("x-real-ip");
   const xff = request.headers.get("x-forwarded-for");
   const firstHop = xff?.split(",")[0]?.trim();
+  if (!realIp && !firstHop && process.env.NODE_ENV === "production") {
+    return NextResponse.json(
+      { error: "Forbidden" },
+      { status: 403 },
+    );
+  }
   const ip = realIp || firstHop || "unknown";
 
   const tierKey = getTierKey(pathname);

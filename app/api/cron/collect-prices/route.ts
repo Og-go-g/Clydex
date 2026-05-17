@@ -13,18 +13,24 @@ import { getMarketsInfo, getMarketStats } from "@/lib/n1/client";
  * Called by crontab every 15 minutes.
  */
 export async function GET(request: NextRequest) {
-  // Auth: always require cron secret
+  // Auth: always require cron secret. 401 on every failure mode so a
+  // misconfigured server doesn't leak the difference between
+  // "unset secret" (500) and "wrong bearer" (401) — both look identical
+  // from the outside.
   const cronSecret = process.env.CRON_SECRET;
   if (!cronSecret) {
-    return NextResponse.json({ error: "CRON_SECRET not configured" }, { status: 500 });
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   const auth = request.headers.get("authorization") ?? "";
   const expected = `Bearer ${cronSecret}`;
-  // Timing-safe comparison — pad both to the SAME length (max of the two)
-  const maxLen = Math.max(auth.length, expected.length);
-  const authBuf = Buffer.from(auth.padEnd(maxLen));
-  const expectedBuf = Buffer.from(expected.padEnd(maxLen));
-  if (auth.length !== expected.length || !timingSafeEqual(authBuf, expectedBuf)) {
+  // Pad to a fixed minimum length so the time-to-401 is independent of
+  // the supplied header's length (the pre-fix length check
+  // short-circuited on mismatch, giving a length oracle for the bearer).
+  const maxLen = Math.max(auth.length, expected.length, 64);
+  const authBuf = Buffer.from(auth.padEnd(maxLen, "\0"));
+  const expectedBuf = Buffer.from(expected.padEnd(maxLen, "\0"));
+  const eq = timingSafeEqual(authBuf, expectedBuf);
+  if (!eq || auth.length !== expected.length) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

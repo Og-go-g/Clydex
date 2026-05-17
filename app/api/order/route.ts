@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import * as Sentry from "@sentry/nextjs";
 import { z } from "zod/v4";
 import { getAuthAddress } from "@/lib/auth/session";
-import { getUser, getAccount, getMarketStats } from "@/lib/n1/client";
+import { getUser, getAccount, getMarketStats, getNord } from "@/lib/n1/client";
 import { resolveMarket, validateLeverage, ensureMarketCache, TIERS } from "@/lib/n1/constants";
 import { storePreview, consumePreview } from "@/lib/n1/preview-store";
 import { acquireCloseLock, releaseCloseLock } from "@/lib/n1/close-lock-store";
@@ -150,7 +150,32 @@ export async function POST(req: Request) {
       const imf = market.initialMarginFraction;
       const mmf = imf / 2; // maintenance margin fraction = IMF / 2
       const maintenanceMargin = notionalValue * mmf;
-      const estimatedFee = notionalValue * 0.0005;
+      // Real per-account taker fee from the SDK when available, falling
+      // back to a conservative 5 bps estimate. The hardcode disagreed
+      // with the user's actual fee tier and bled trust on the preview
+      // economics ("Why is my actual fee different from the preview?").
+      let estimatedFee = notionalValue * 0.0005;
+      try {
+        const userForFee = await getUser(address);
+        const accountIdForFee = userForFee?.accountIds?.[0];
+        if (typeof accountIdForFee === "number") {
+          const nord = await getNord();
+          const feePerUnit = await nord.getMarketFee({
+            marketId: market.id,
+            feeKind: "taker",
+            accountId: accountIdForFee,
+          });
+          // SDK returns a NEGATIVE per-unit-quote rate when a fee is
+          // charged. abs() gives a positive fee fraction; clamp [0, 1%]
+          // to defend against unexpected SDK behaviour.
+          if (typeof feePerUnit === "number" && isFinite(feePerUnit)) {
+            const rate = Math.min(Math.abs(feePerUnit), 0.01);
+            estimatedFee = notionalValue * rate;
+          }
+        }
+      } catch {
+        // Fall back to the 5bps estimate above on any SDK / network error.
+      }
       const priceImpact = notionalValue > 100_000 ? 0.1 : notionalValue > 10_000 ? 0.05 : 0.02;
 
       // Warnings

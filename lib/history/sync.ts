@@ -146,20 +146,45 @@ function marketSymbol(marketId: number): string {
 // ─── Sync Cursor Helpers ──────────────────────────────────────────
 // Prisma-created columns are camelCase (no @map in schema)
 
-async function getCursor(walletAddr: string, type: HistoryType): Promise<string | null> {
+// Sync cursors are keyed by (accountId, type). Earlier the key was the
+// walletAddr — but propagateWallet rewrites placeholder `account:NN`
+// rows to the real pubkey and deletes the matching sync_cursors row,
+// forcing the next sync to re-paginate full history from the API.
+// accountId is stable across that rewrite, so we now use it as the
+// authoritative key. The walletAddr column is still populated for
+// readability but it's no longer load-bearing.
+async function getCursor(accountId: number, type: HistoryType): Promise<string | null> {
   const rows = await query<{ cursor: string | null }>(
-    `SELECT cursor FROM sync_cursors WHERE "walletAddr" = $1 AND type = $2`,
-    [walletAddr, type],
+    `SELECT cursor FROM sync_cursors WHERE "accountId" = $1 AND type = $2 ORDER BY "lastSyncAt" DESC LIMIT 1`,
+    [accountId, type],
   );
   return rows[0]?.cursor ?? null;
 }
 
-async function setCursor(walletAddr: string, type: HistoryType, cursor: string): Promise<void> {
+async function setCursor(
+  accountId: number,
+  walletAddr: string,
+  type: HistoryType,
+  cursor: string,
+): Promise<void> {
+  // Two-step upsert keyed on (accountId, type). The schema's unique
+  // constraint is still (walletAddr, type) for backwards-compat, so we
+  // first try to find an existing row by accountId+type and update it,
+  // otherwise insert. Inside a single statement via CTE for atomicity.
   await execute(
-    `INSERT INTO sync_cursors (id, "walletAddr", type, cursor, "lastSyncAt")
-     VALUES (gen_random_uuid(), $1, $2, $3, NOW())
-     ON CONFLICT ("walletAddr", type) DO UPDATE SET cursor = $3, "lastSyncAt" = NOW()`,
-    [walletAddr, type, cursor],
+    `WITH existing AS (
+       SELECT id FROM sync_cursors WHERE "accountId" = $1 AND type = $3 LIMIT 1
+     ),
+     upd AS (
+       UPDATE sync_cursors SET cursor = $4, "lastSyncAt" = NOW(), "walletAddr" = $2
+       WHERE id = (SELECT id FROM existing)
+       RETURNING id
+     )
+     INSERT INTO sync_cursors (id, "walletAddr", "accountId", type, cursor, "lastSyncAt")
+     SELECT gen_random_uuid(), $2, $1, $3, $4, NOW()
+     WHERE NOT EXISTS (SELECT 1 FROM upd)
+     ON CONFLICT ("walletAddr", type) DO UPDATE SET cursor = $4, "lastSyncAt" = NOW(), "accountId" = $1`,
+    [accountId, walletAddr, type, cursor],
   );
 }
 
@@ -546,14 +571,14 @@ export async function syncAllHistory(
   const results: SyncResult[] = [];
 
   for (const type of types) {
-    const since = await getCursor(walletAddr, type);
+    const since = await getCursor(accountId, type);
     const syncFn = SYNC_FNS[type];
     const t0 = Date.now();
 
     try {
       const result = await syncFn(accountId, walletAddr, since ?? undefined, ctx);
       results.push(result);
-      await setCursor(walletAddr, type, new Date().toISOString());
+      await setCursor(accountId, walletAddr, type, new Date().toISOString());
       syncBreadcrumb(type, accountId, { inserted: result.inserted, durationMs: Date.now() - t0 });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -585,13 +610,13 @@ export async function syncHistoryType(
 ): Promise<SyncResult> {
   await ensureMarketCache();
 
-  const since = await getCursor(walletAddr, type);
+  const since = await getCursor(accountId, type);
   const syncFn = SYNC_FNS[type];
   const t0 = Date.now();
 
   try {
     const result = await syncFn(accountId, walletAddr, since ?? undefined, ctx);
-    await setCursor(walletAddr, type, new Date().toISOString());
+    await setCursor(accountId, walletAddr, type, new Date().toISOString());
     syncBreadcrumb(type, accountId, { inserted: result.inserted, durationMs: Date.now() - t0 });
     return result;
   } catch (err) {

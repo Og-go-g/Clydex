@@ -260,14 +260,20 @@ export async function propagateWallet(accountId: number, realWallet: string): Pr
       updated.volume_calendar = u.rowCount ?? 0;
     }
 
-    // 7. sync_cursors — placeholder entries are dead weight after schema fix
-    //    (cursors are keyed by accountId now). Drop them.
+    // 7. sync_cursors — cursors are keyed by accountId; the walletAddr
+    //    column is informational. Rewrite the placeholder string to the
+    //    real wallet so future audits show the right owner — DO NOT
+    //    delete, because deletion forces a full re-paginate from the
+    //    upstream API the next time we sync this user (wastes quota
+    //    and writes thousands of duplicate ON-CONFLICT rows).
     {
-      const d = await client.query(
-        `DELETE FROM sync_cursors WHERE "walletAddr" = $1`,
-        [placeholder],
+      const u = await client.query(
+        `UPDATE sync_cursors SET "walletAddr" = $1, "accountId" = $2
+         WHERE ("accountId" = $2 OR "walletAddr" = $3)
+           AND "walletAddr" <> $1`,
+        [realWallet, accountId, placeholder],
       );
-      cleaned.sync_cursors = d.rowCount ?? 0;
+      updated.sync_cursors = u.rowCount ?? 0;
     }
 
     // 8. leaderboard_tiers — walletAddr is not part of the key, just refresh it.

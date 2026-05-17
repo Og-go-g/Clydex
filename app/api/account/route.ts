@@ -58,13 +58,21 @@ export async function GET() {
     const marketPriceDecimals: Record<number, number> = {};
     for (const m of marketsInfo.markets) {
       marketSymbols[m.marketId] = m.symbol;
-      // SDK per-market imf is half the actual trading IMF (empirically verified)
-      marketImfs[m.marketId] = m.imf * 2;
+      // PRE-FIX: this route was doubling SDK per-market imf, comment claimed
+      // "empirically verified". That disagrees with lib/n1/constants.ts
+      // (used by validateLeverage + market preview) which uses the API
+      // value as-is and notes "only account-level margins.imf needs *2".
+      // Trading/preview-flow imf used as-is silently worked for users for
+      // months, so the constants.ts side is the authoritative one. The
+      // doubled version here under-reported available margin in the
+      // Portfolio (showed roughly half of real available) — fixed by
+      // mirroring constants.ts's interpretation.
+      marketImfs[m.marketId] = m.imf;
       // SDK per-market mmf — exact maintenance margin fraction from API
       marketMmfs[m.marketId] = m.mmf;
-      // cmf — closing/cancel margin fraction (used for liquidation price calculation)
-      // SDK cmf is halved like imf — multiply by 2 for actual value
-      marketCmfs[m.marketId] = (m.cmf ?? m.mmf) * 2;
+      // cmf — closing/cancel margin fraction (used for liquidation price
+      // calculation). Same interpretation as imf (per-market = correct).
+      marketCmfs[m.marketId] = m.cmf ?? m.mmf;
       // Max leverage from per-market IMF (NOT doubled — per-market imf is correct)
       marketMaxLev[m.marketId] = Math.max(1, Math.floor(1 / m.imf));
       // priceDecimals — needed to descale trigger prices from API (returned as scaled integers)

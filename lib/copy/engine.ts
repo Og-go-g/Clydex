@@ -1,6 +1,6 @@
 import "./polyfill";
 import * as Sentry from "@sentry/nextjs";
-import { query as dbQuery } from "../db-history";
+import { query as dbQuery, acquireAdvisoryLock } from "../db-history";
 import { withRetry } from "../util/retry";
 import { getAccount, getUser, getMarketStats } from "../n1/client";
 import { placeOrder, closePosition, setTrigger } from "../n1/user-client";
@@ -60,9 +60,19 @@ const ORDER_RETRY_COUNT = 2;
 const ORDER_RETRY_DELAY_MS = 1000;
 
 // ─── Concurrency Lock ───────────────────────────────────────────
-// Prevents overlapping engine cycles (curl fires every 15s, engine may take longer)
+// Per-process flag prevents overlapping cycles inside one Node process.
+// The DB advisory lock (acquired inside runCopyEngine) prevents two
+// processes — different containers, an accidental second worker, the
+// cron tick racing a manual /api/copy/engine call — from running in
+// parallel. Without the DB lock, a deploy with 2 replicas would double-
+// trade every leader.
 
 let engineRunning = false;
+
+// Stable, arbitrary 32-bit integer used as the global advisory-lock key
+// for the copy engine. Must not collide with the per-leader lock keys
+// which are accountIds (1..millions). 0x636F7079 = 'copy' in ASCII.
+const GLOBAL_ENGINE_LOCK_KEY = 0x636f7079;
 
 // ─── Account ID Cache ───────────────────────────────────────────
 
@@ -477,6 +487,40 @@ async function executeCopyForFollower(
     size: roundedSize.toString(),
   });
 
+  // Claim ownership BEFORE sending the order to the exchange. Without
+  // this, two cycles for different leaders on the same follower-market
+  // both pass the pre-check (no existing ownership), both placeOrder,
+  // both fire on chain — and only one wins the post-place acquire row.
+  // The loser's on-chain position is orphaned: it has no ownership row,
+  // never gets re-detected as "owned", and will never be closed by us
+  // when its leader closes. By claiming first we serialize on the
+  // ownership row; the loser bails out before any wallet/exchange call.
+  // Only relevant for open/increase/flip — close/decrease leaves
+  // ownership as-is (released later on full close).
+  const isOpening = diff.action === "open" || diff.action === "increase" || diff.action === "flip";
+  if (isOpening) {
+    const claimed = await acquireOwnership(
+      follower.followerAddr,
+      diff.marketId,
+      follower.leaderAddr,
+      follower.id,
+    );
+    if (!claimed) {
+      await insertCopyTrade({
+        subscriptionId: follower.id,
+        followerAddr: follower.followerAddr,
+        leaderAddr: follower.leaderAddr,
+        marketId: diff.marketId,
+        symbol: diff.symbol,
+        side: diff.side,
+        size: "0",
+        status: "skipped",
+        error: `claim-race: ${diff.symbol} claimed by another leader`,
+      });
+      return { success: false, skipped: true, error: `Market ${diff.symbol} claimed by another cycle` };
+    }
+  }
+  let exchangeOrderResult: { fills?: { price: number; size: number }[] } | undefined;
   try {
     if (diff.action === "close" || diff.action === "decrease") {
       await withRetry(
@@ -530,8 +574,8 @@ async function executeCopyForFollower(
         `flip-open ${diff.symbol}`,
       );
     } else {
-      // open or increase
-      await withRetry(
+      // open or increase — capture result to extract fill price for SL
+      exchangeOrderResult = await withRetry(
         () => placeOrder(nordUser, {
           symbol: diff.symbol,
           side: diff.side,
@@ -546,43 +590,23 @@ async function executeCopyForFollower(
       );
     }
 
-    await updateCopyTradeStatus(tradeId, "filled", { price: markPrice.toString() });
+    // Prefer the actual fill price for downstream display + SL anchor.
+    // Falls back to markPrice when fills are unavailable (e.g. close
+    // path doesn't capture result).
+    const fillPrice = computeAverageFillPrice(exchangeOrderResult?.fills) ?? markPrice;
+    await updateCopyTradeStatus(tradeId, "filled", { price: fillPrice.toString() });
 
-    // Update ownership: claim on open/increase/flip, release on full
-    // close. For decrease the position is still open from this leader,
-    // so ownership stays.
+    // Release ownership on full close. For open/increase/flip we already
+    // claimed ownership BEFORE the order (see top of try block) — nothing
+    // more to do here. Decrease leaves both position and ownership.
     if (diff.action === "close") {
       await releaseOwnership(follower.followerAddr, diff.marketId);
-    } else if (diff.action !== "decrease") {
-      const acquired = await acquireOwnership(
-        follower.followerAddr,
-        diff.marketId,
-        follower.leaderAddr,
-        follower.id,
-      );
-      if (!acquired) {
-        // Another concurrent cycle claimed this market for a different
-        // leader between our pre-check and now. Order already filled
-        // on the exchange — log a warning. This race is bounded by the
-        // per-leader advisory lock; only happens if two engine workers
-        // race on different leaders for the same follower simultaneously.
-        Sentry.captureMessage(
-          "[copy-engine] ownership lost-race after order filled",
-          {
-            level: "warning",
-            tags: { component: "copy-engine", event: "ownership-race" },
-            extra: {
-              tradeId,
-              followerAddr: follower.followerAddr,
-              leaderAddr: follower.leaderAddr,
-              marketId: diff.marketId,
-            },
-          },
-        );
-      }
     }
 
-    // Set stop-loss trigger on exchange if configured (only for open/increase/flip-open)
+    // Set stop-loss trigger on exchange if configured (only for open/increase/flip-open).
+    // Anchored to the actual fill price, not the pre-trade markPrice — the
+    // cycle's cached markPrice can be seconds-old, and on volatile pairs
+    // even small drift puts the SL on the wrong side of the entry.
     const stopLossPct = follower.stopLossPct ? parseFloat(follower.stopLossPct) : null;
     if (stopLossPct && isFinite(stopLossPct) && stopLossPct > 0 && stopLossPct <= 100 &&
         diff.action !== "close" && diff.action !== "decrease") {
@@ -593,10 +617,16 @@ async function executeCopyForFollower(
           // sub-account to attach the trigger to. Skip rather than
           // pass undefined and risk attaching it to the wrong place.
           console.warn(`[copy-engine] stop-loss skipped (no accountId) for ${follower.followerAddr} ${diff.symbol}`);
+          Sentry.captureMessage("[copy-engine] SL skipped: no accountId", {
+            level: "warning",
+            tags: { component: "copy-engine", event: "sl-no-account" },
+            extra: { tradeId, followerAddr: follower.followerAddr, symbol: diff.symbol },
+          });
         } else {
+          const slAnchor = fillPrice;
           const stopPrice = diff.side === "Long"
-            ? markPrice * (1 - stopLossPct / 100)
-            : markPrice * (1 + stopLossPct / 100);
+            ? slAnchor * (1 - stopLossPct / 100)
+            : slAnchor * (1 + stopLossPct / 100);
 
           if (stopPrice > 0 && isFinite(stopPrice)) {
             await setTrigger(nordUser, {
@@ -609,13 +639,34 @@ async function executeCopyForFollower(
           }
         }
       } catch (err) {
-        // Stop-loss is best-effort — don't fail the trade if trigger fails
+        // Stop-loss is best-effort — don't fail the trade if trigger fails,
+        // but DO ship a Sentry event so we can see if SL failures are
+        // chronic for any follower (they were previously console-only).
         console.warn(`[copy-engine] stop-loss trigger failed for ${follower.followerAddr} ${diff.symbol}:`, err);
+        Sentry.captureException(err, {
+          level: "warning",
+          tags: { component: "copy-engine", event: "sl-set-failed" },
+          extra: {
+            tradeId, followerAddr: follower.followerAddr, symbol: diff.symbol,
+            stopLossPct, fillPrice, markPrice,
+          },
+        });
       }
     }
 
     return { success: true };
   } catch (err) {
+    // Order itself failed (network, exchange rejection, etc). Release
+    // the ownership we optimistically claimed BEFORE the order — the
+    // exchange has no record of the trade, so leaving ownership claimed
+    // would block all future copies on this market from this follower.
+    if (isOpening) {
+      try {
+        await releaseOwnership(follower.followerAddr, diff.marketId);
+      } catch (releaseErr) {
+        console.warn("[copy-engine] failed to release ownership after order error:", releaseErr);
+      }
+    }
     let errorMsg: string;
     if (err instanceof Error) {
       errorMsg = err.message;
@@ -650,11 +701,38 @@ async function executeCopyForFollower(
 // ─── Main Engine Cycle ───────────────────────────────────────────
 
 export async function runCopyEngine(): Promise<EngineResult> {
-  // Concurrency lock — skip if previous cycle still running
+  // In-process lock — skip if previous cycle still running in THIS process.
   if (engineRunning) {
     return {
       leadersProcessed: 0, diffsDetected: 0, ordersPlaced: 0,
       ordersFailed: 0, skipped: 0, errors: ["Skipped: previous cycle still running"],
+      durationMs: 0,
+    };
+  }
+
+  // Cross-process global lock — refuses if another container, an
+  // accidental second worker, or a manual /api/copy/engine call is
+  // running the engine right now. Without this, scaling out to 2+
+  // app replicas double-trades every leader. acquireAdvisoryLock pins
+  // a dedicated client for the whole cycle so the lock is reliably
+  // released even across multiple unrelated PG queries during the run.
+  let releaseGlobalLock: (() => Promise<void>) | null = null;
+  try {
+    releaseGlobalLock = await acquireAdvisoryLock(GLOBAL_ENGINE_LOCK_KEY);
+  } catch (lockErr) {
+    // PG outage — refuse to run rather than risk double-trading. The
+    // engine resumes on the next tick when PG is back.
+    console.warn("[copy-engine] could not acquire global lock:", lockErr);
+    return {
+      leadersProcessed: 0, diffsDetected: 0, ordersPlaced: 0,
+      ordersFailed: 0, skipped: 0, errors: ["Skipped: global lock unavailable (DB error)"],
+      durationMs: 0,
+    };
+  }
+  if (!releaseGlobalLock) {
+    return {
+      leadersProcessed: 0, diffsDetected: 0, ordersPlaced: 0,
+      ordersFailed: 0, skipped: 0, errors: ["Skipped: another instance is running the engine"],
       durationMs: 0,
     };
   }
@@ -793,12 +871,19 @@ export async function runCopyEngine(): Promise<EngineResult> {
             for (const diff of diffs) {
               const res = await executeCopyForFollower(diff, follower, leaderEquity, session);
 
-              // Snapshot advances on both success AND deliberate skips
-              // (collision/manual). Deliberate skips are NOT failures —
-              // re-applying the same diff next cycle would loop forever.
-              // Real failures (success=false, skipped=undefined) leave
-              // snapshot untouched so the diff re-fires for retry.
-              if (res.success || res.skipped) {
+              // Snapshot advances on real success only. Earlier the
+              // condition included res.skipped, which collapsed two
+              // distinct cases into one bad outcome: a collision-skip
+              // (another leader currently owns this market) marked the
+              // diff "done" — even though when the other leader later
+              // releases the market, we'd still skip because our
+              // snapshot says we already caught up. Leader's open never
+              // got mirrored. Now skips re-fire each cycle (one cheap
+              // DB read for the ownership check) until either the
+              // collision clears or the leader's own state changes
+              // again. Real failures (success=false, !skipped) also
+              // leave snapshot untouched so the next cycle retries.
+              if (res.success) {
                 if (diff.action === "close") {
                   await deleteSnapshot(follower.followerAddr, leaderAddr, diff.marketId);
                 } else {
@@ -841,6 +926,15 @@ export async function runCopyEngine(): Promise<EngineResult> {
     engineRunning = false;
     nordUserCache.clear(); // clean up restored sessions
     markPriceCache.clear();
+    // Release the global cross-process lock — also returns the dedicated
+    // client back to the pool.
+    if (releaseGlobalLock) {
+      try {
+        await releaseGlobalLock();
+      } catch (releaseErr) {
+        console.warn("[copy-engine] could not release global lock:", releaseErr);
+      }
+    }
     result.durationMs = Date.now() - start;
   }
 
@@ -851,4 +945,26 @@ export async function runCopyEngine(): Promise<EngineResult> {
 
 function addError(result: EngineResult, msg: string): void {
   if (result.errors.length < MAX_ERRORS) result.errors.push(msg);
+}
+
+/**
+ * Size-weighted average fill price across the exchange's reported fills
+ * for a single placeOrder call. Returns null when fills is missing or
+ * empty so callers can fall back to markPrice.
+ */
+function computeAverageFillPrice(
+  fills: { price: number; size: number }[] | undefined,
+): number | null {
+  if (!fills || fills.length === 0) return null;
+  let weightSum = 0;
+  let valueSum = 0;
+  for (const f of fills) {
+    const p = Number(f.price);
+    const s = Number(f.size);
+    if (!isFinite(p) || !isFinite(s) || s <= 0) continue;
+    valueSum += p * s;
+    weightSum += s;
+  }
+  if (weightSum === 0) return null;
+  return valueSum / weightSum;
 }
