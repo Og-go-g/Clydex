@@ -810,6 +810,14 @@ interface TraderPositionsData {
     side: "Long" | "Short";
     size: number;
     entryPrice: number;
+    /** Current mark price — fallback to entryPrice if API omitted. */
+    markPrice?: number;
+    /** Position value in USD (size × markPrice). */
+    notional?: number;
+    /** Effective leverage (1 / marketImf rounded down — what 01 UI shows). */
+    leverage?: number;
+    /** Liquidation price computed from cross-margin cushion. */
+    liqPrice?: number;
     tradingPnl: number;
   }>;
 }
@@ -832,7 +840,10 @@ export function TraderPositionsCard({ data, ctx }: { data: Json; ctx?: CardCtx }
                 <th className="px-3 py-2 text-left">Market</th>
                 <th className="px-2 py-2 text-left">Side</th>
                 <th className="px-2 py-2 text-right">Size</th>
+                <th className="px-2 py-2 text-right">Value</th>
                 <th className="px-2 py-2 text-right">Entry</th>
+                <th className="px-2 py-2 text-right">Liq</th>
+                <th className="px-2 py-2 text-right">Lev</th>
                 <th className="px-2 py-2 text-right">PnL</th>
               </tr>
             </thead>
@@ -852,7 +863,21 @@ export function TraderPositionsCard({ data, ctx }: { data: Json; ctx?: CardCtx }
                     </span>
                   </td>
                   <td className="px-2 py-2 text-right font-mono text-[11px] text-gray-300">{fmtSize(p.size)}</td>
+                  <td className="px-2 py-2 text-right font-mono text-[11px] text-gray-300">
+                    {p.notional != null ? fmtVol(p.notional) : "—"}
+                  </td>
                   <td className="px-2 py-2 text-right font-mono text-[11px] text-gray-300">{fmtPrice(p.entryPrice)}</td>
+                  <td
+                    className={`px-2 py-2 text-right font-mono text-[11px] ${
+                      p.liqPrice && p.liqPrice > 0 ? "text-red-400" : "text-[#555]"
+                    }`}
+                    title={p.liqPrice && p.liqPrice > 0 ? "Liquidation price (cross-margin)" : "Liquidation price not available"}
+                  >
+                    {p.liqPrice && p.liqPrice > 0 ? fmtPrice(p.liqPrice) : "—"}
+                  </td>
+                  <td className="px-2 py-2 text-right font-mono text-[11px] text-gray-300">
+                    {p.leverage && p.leverage > 0 ? `${p.leverage}x` : "—"}
+                  </td>
                   <td className={`px-2 py-2 text-right font-mono text-[11px] font-semibold ${pnlColor(p.tradingPnl)}`}>
                     {fmtPnl(p.tradingPnl)}
                   </td>

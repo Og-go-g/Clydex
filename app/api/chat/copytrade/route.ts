@@ -707,18 +707,60 @@ export async function POST(req: Request) {
             await ensureMarketCache();
             const symbolByMarket = new Map<number, string>();
             for (const m of getCachedMarkets()) symbolByMarket.set(m.id, m.symbol);
+
+            // Liquidation price uses the 01 Exchange / zo-client formula:
+            //   Long:  liqPrice = mark - (mf - mmf) / (size * (1 - pmmf))
+            //   Short: liqPrice = mark + (mf - mmf) / (size * (1 + pmmf))
+            // mf / mmf are account-wide (cross margin). pmmf is per-market.
+            const accountMf = account?.margins?.mf ?? account?.margins?.omf ?? 0;
+            const accountMmf = account?.margins?.mmf ?? 0;
+            const marginCushion = accountMf - accountMmf;
+
             const positions = (account?.positions ?? [])
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               .filter((p: any) => p.perp?.baseSize !== 0)
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              .map((p: any) => ({
-                marketId: p.marketId,
-                symbol: symbolByMarket.get(p.marketId) ?? `M${p.marketId}`,
-                side: p.perp.baseSize > 0 ? "Long" : "Short",
-                size: Math.abs(p.perp.baseSize),
-                entryPrice: p.perp.price ?? 0,
-                tradingPnl: p.perp?.tradingPnl ?? 0,
-              }));
+              .map((p: any) => {
+                const isLong = p.perp.baseSize > 0;
+                const absSize = Math.abs(p.perp.baseSize);
+                const entryPrice = p.perp.price ?? 0;
+                const markPrice = p.markPrice ?? entryPrice;
+                const marketImf = p.marketImf ?? 0.1;
+                const pmmf = p.marketMmf ?? marketImf / 2;
+
+                // Notional value (current USD exposure) — what 01 UI
+                // calls "Position Value" / "Volume" per row.
+                const notional = absSize * markPrice;
+                // Max leverage allowed by the market tier (1/imf).
+                // For cross-margin accounts this is also the effective
+                // leverage of the position relative to the margin it
+                // consumes, which is the number 01 Exchange shows in
+                // the row's leverage badge.
+                const leverage = marketImf > 0 ? Math.floor(1 / marketImf) : 0;
+
+                // Liq price — same closed-form as portfolio/page.tsx.
+                let liqPrice = 0;
+                const divisor = absSize * (isLong ? 1 - pmmf : 1 + pmmf);
+                if (Math.abs(divisor) > 1e-12) {
+                  const raw = isLong
+                    ? markPrice - marginCushion / divisor
+                    : markPrice + marginCushion / divisor;
+                  if (isFinite(raw) && raw > 0) liqPrice = raw;
+                }
+
+                return {
+                  marketId: p.marketId,
+                  symbol: symbolByMarket.get(p.marketId) ?? `M${p.marketId}`,
+                  side: isLong ? "Long" : "Short",
+                  size: absSize,
+                  entryPrice,
+                  markPrice,
+                  notional,
+                  leverage,
+                  liqPrice,
+                  tradingPnl: p.perp?.tradingPnl ?? 0,
+                };
+              });
             const equity = account?.margins?.omf ?? 0;
             return sanitize({
               trader: fmtAddr(address),
