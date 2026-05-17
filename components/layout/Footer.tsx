@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import Link from "next/link";
 
 export function Footer() {
   const [users, setUsers] = useState<number | null>(null);
@@ -16,13 +17,25 @@ export function Footer() {
 
   return (
     <footer id="site-footer" className="flex items-center justify-between px-6 py-4 bg-[#0a0a0a]/[0.08] backdrop-blur-sm">
-      {users !== null ? (
-        <span className="text-[11px] text-gray-600">
-          <span className="text-gray-400">{users.toLocaleString()}</span> users
-        </span>
-      ) : (
-        <span />
-      )}
+      <div className="flex items-center gap-4">
+        {users !== null && (
+          <span className="text-[11px] text-gray-600">
+            <span className="text-gray-400">{users.toLocaleString()}</span> users
+          </span>
+        )}
+        <Link
+          href="/terms"
+          className="text-[11px] text-gray-600 transition-colors hover:text-gray-400"
+        >
+          Terms
+        </Link>
+        <Link
+          href="/privacy"
+          className="text-[11px] text-gray-600 transition-colors hover:text-gray-400"
+        >
+          Privacy
+        </Link>
+      </div>
       <a
         href="https://x.com/ClydexAi"
         target="_blank"
