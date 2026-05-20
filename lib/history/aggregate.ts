@@ -52,11 +52,18 @@ export function getFundingModel(): FundingModel {
 /**
  * Rebuild pnl_totals row for a single account from pnl_history + funding_history.
  *
- * The aggregation always filters by accountId (stable across wallet linking),
- * but writes the row keyed on the wallet address supplied by the caller.
- * That matches the upstream schema where pnl_totals."walletAddr" is UNIQUE.
+ * Aggregation filters by accountId (stable across wallet linking). The row
+ * is keyed on accountId post-migration sql/2026-05-20_pnl_totals_accountid_unique.sql
+ * — twin rows (placeholder + real walletAddr for the same accountId) used
+ * to double-count a trader in the leaderboard until propagateWallet
+ * collapsed them. UNIQUE("accountId") closes the gap at the schema level.
  *
- * Idempotent: ON CONFLICT ("walletAddr") DO UPDATE.
+ * Idempotent: ON CONFLICT ("accountId") DO UPDATE.
+ *
+ * Wallet preference: if the existing row has a real wallet and the new
+ * INSERT brings a placeholder (re-aggregation from a code path that
+ * hasn't resolved the wallet yet), keep the existing real wallet — never
+ * downgrade to placeholder. Pure CASE in the UPSERT, no trigger needed.
  */
 export async function recomputePnlTotals(
   accountId: number,
@@ -127,8 +134,12 @@ export async function recomputePnlTotals(
      -- zero-PnL ghosts in the tail. See session 2026-04-19.
      WHERE EXISTS (SELECT 1 FROM pnl_history     WHERE "accountId" = $1)
         OR EXISTS (SELECT 1 FROM funding_history WHERE "accountId" = $1)
-     ON CONFLICT ("walletAddr") DO UPDATE SET
-       "accountId"       = EXCLUDED."accountId",
+     ON CONFLICT ("accountId") DO UPDATE SET
+       "walletAddr"      = CASE
+                             WHEN EXCLUDED."walletAddr" LIKE 'account:%'
+                               THEN pnl_totals."walletAddr"
+                             ELSE EXCLUDED."walletAddr"
+                           END,
        "totalPnl"        = EXCLUDED."totalPnl",
        "totalTradingPnl" = EXCLUDED."totalTradingPnl",
        "totalFundingPnl" = EXCLUDED."totalFundingPnl",

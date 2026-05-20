@@ -219,18 +219,13 @@ export async function propagateWallet(accountId: number, realWallet: string): Pr
       updated.liquidation_history = u.rowCount ?? 0;
     }
 
-    // 5. pnl_totals — walletAddr is unique. Drop placeholder if real twin exists.
+    // 5. pnl_totals — now UNIQUE on accountId (see
+    //    sql/2026-05-20_pnl_totals_accountid_unique.sql). Twin rows are
+    //    structurally impossible at the schema level, so the DELETE-twin
+    //    pre-step that earlier wallet-resolver runs needed collapses to
+    //    a single UPDATE. Zero rows changed when the resolver has nothing
+    //    to do; one row changed when there was a placeholder to rewrite.
     {
-      const d = await client.query(
-        `DELETE FROM pnl_totals p
-         USING pnl_totals r
-         WHERE p."walletAddr" = $1 AND p."accountId" = $2
-           AND r."accountId" = p."accountId"
-           AND r."walletAddr" = $3`,
-        [placeholder, accountId, realWallet],
-      );
-      cleaned.pnl_totals = d.rowCount ?? 0;
-
       const u = await client.query(
         `UPDATE pnl_totals SET "walletAddr" = $1
          WHERE "accountId" = $2 AND "walletAddr" = $3`,

@@ -209,8 +209,13 @@ model VolumeCalendar {
 // ---------------------------------------------------------------------------
 model PnlTotals {
   id              String   @id @default(cuid())
-  accountId       Int
-  walletAddr      String   @unique
+  // Unique on accountId (not walletAddr). accountId is stable; walletAddr
+  // flips from 'account:<id>' placeholder to the real Solana pubkey when
+  // the resolver runs. The old wallet-keyed UNIQUE used to hold both a
+  // placeholder twin AND the real row at once, doubling leaderboard
+  // entries. Migration: sql/2026-05-20_pnl_totals_accountid_unique.sql.
+  accountId       Int      @unique
+  walletAddr      String
   totalPnl        Decimal  @db.Decimal(30, 18)
   totalTradingPnl Decimal  @db.Decimal(30, 18)
   totalFundingPnl Decimal  @db.Decimal(30, 18)
