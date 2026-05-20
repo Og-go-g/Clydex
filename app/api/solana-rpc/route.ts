@@ -46,17 +46,127 @@ const WRITE_METHODS = new Set([
   "simulateTransaction",
 ]);
 
+/**
+ * Bulk/fan-out reads. One client call here amplifies into many underlying
+ * RPC lookups upstream, so we (a) cap the input size and (b) bucket them
+ * against a tighter rate-limit tier (`rpc:h`) than ordinary reads.
+ */
+const BULK_METHODS = new Set([
+  "getMultipleAccounts",
+  "getTokenAccountsByOwner",
+]);
+
+/**
+ * SPL Token program ID. Used as the only whitelisted `programId` filter
+ * for getTokenAccountsByOwner — anything else would let a caller scan
+ * arbitrary program ownership and explode the upstream cost.
+ */
+const TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+
+/** Hard cap on how many pubkeys getMultipleAccounts may fan out to. */
+const GMA_MAX_KEYS = 25;
+
 const ALL_ALLOWED = new Set([...READ_METHODS, ...WRITE_METHODS]);
 
 // ─── Rate Limit Helper ─────────────────────────────────────────
 
+type RateTier = "read" | "heavy" | "write";
+
+function tierForMethod(method: string): RateTier {
+  if (WRITE_METHODS.has(method)) return "write";
+  if (BULK_METHODS.has(method)) return "heavy";
+  return "read";
+}
+
 async function checkRate(
   userKey: string,
-  isWrite: boolean
+  tier: RateTier,
 ): Promise<{ success: boolean; remaining: number }> {
-  const prefix = isWrite ? "rpc:w:" : "rpc:r:";
-  const max = isWrite ? RATE_LIMITS.rpcWrite : RATE_LIMITS.rpcRead;
+  const prefix =
+    tier === "write" ? "rpc:w:" : tier === "heavy" ? "rpc:h:" : "rpc:r:";
+  const max =
+    tier === "write"
+      ? RATE_LIMITS.rpcWrite
+      : tier === "heavy"
+        ? RATE_LIMITS.rpcHeavy
+        : RATE_LIMITS.rpcRead;
   return safeRateLimit(userKey, prefix, max);
+}
+
+// ─── Param validation for bulk fan-out methods ─────────────────
+
+interface ParamCheck {
+  ok: boolean;
+  reason?: string;
+}
+
+/**
+ * Reject calls that would cause unbounded upstream amplification.
+ *
+ * - getMultipleAccounts: client passes `params[0]` as an array of base58
+ *   pubkeys; each one becomes a real account lookup at the RPC layer. We
+ *   cap the array length so a logged-in attacker can't blast a single
+ *   request that fans out to thousands of paid lookups.
+ *
+ * - getTokenAccountsByOwner: the upstream RPC accepts either
+ *   `{ mint }` (cheap — single mint scoping) or `{ programId }` (can be
+ *   expensive — wildcard scan over a program's accounts). We allow
+ *   `{ mint: <string> }` and `{ programId: TOKEN_PROGRAM_ID }` only; any
+ *   other filter shape (open scan, custom program, multi-key object) is
+ *   rejected. Existing app callers use `{ mint: USDC_MINT }`.
+ */
+function validateBulkParams(method: string, params: unknown): ParamCheck {
+  if (!Array.isArray(params)) {
+    return { ok: false, reason: "params must be a positional array" };
+  }
+
+  if (method === "getMultipleAccounts") {
+    const pubkeys = params[0];
+    if (!Array.isArray(pubkeys)) {
+      return { ok: false, reason: "getMultipleAccounts requires params[0] to be an array" };
+    }
+    if (pubkeys.length === 0) {
+      return { ok: false, reason: "getMultipleAccounts requires at least 1 pubkey" };
+    }
+    if (pubkeys.length > GMA_MAX_KEYS) {
+      return {
+        ok: false,
+        reason: `getMultipleAccounts allows at most ${GMA_MAX_KEYS} pubkeys per call`,
+      };
+    }
+    if (!pubkeys.every((k) => typeof k === "string")) {
+      return { ok: false, reason: "getMultipleAccounts pubkeys must be strings" };
+    }
+    return { ok: true };
+  }
+
+  if (method === "getTokenAccountsByOwner") {
+    const owner = params[0];
+    const filter = params[1];
+    if (typeof owner !== "string") {
+      return { ok: false, reason: "getTokenAccountsByOwner requires params[0] owner (string)" };
+    }
+    if (!filter || typeof filter !== "object" || Array.isArray(filter)) {
+      return { ok: false, reason: "getTokenAccountsByOwner requires a filter object as params[1]" };
+    }
+    const keys = Object.keys(filter as Record<string, unknown>);
+    if (keys.length !== 1) {
+      return { ok: false, reason: "filter must have exactly one of { mint } or { programId }" };
+    }
+    const filterObj = filter as { mint?: unknown; programId?: unknown };
+    if ("mint" in filterObj && typeof filterObj.mint === "string") {
+      return { ok: true };
+    }
+    if ("programId" in filterObj && filterObj.programId === TOKEN_PROGRAM_ID) {
+      return { ok: true };
+    }
+    return {
+      ok: false,
+      reason: "filter must be { mint: <string> } or { programId: TOKEN_PROGRAM_ID }",
+    };
+  }
+
+  return { ok: true };
 }
 
 // ─── Route Handler ──────────────────────────────────────────────
@@ -113,9 +223,32 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 4. Rate limit per user (wallet address)
-    const isWrite = WRITE_METHODS.has(method);
-    const { success: allowed, remaining } = await checkRate(address, isWrite);
+    // 4. Param validation for amplification-prone bulk methods. Must run
+    // before the rate-limit check so a malformed bulk request gets a
+    // clean 400 and doesn't burn the user's budget.
+    if (BULK_METHODS.has(method)) {
+      const check = validateBulkParams(method, body.params);
+      if (!check.ok) {
+        Sentry.captureMessage(`Blocked bulk RPC params: ${method}`, {
+          level: "warning",
+          extra: { user: address.slice(0, 8), method, reason: check.reason },
+        });
+        return NextResponse.json(
+          {
+            jsonrpc: "2.0",
+            error: { code: -32602, message: check.reason ?? "Invalid params" },
+            id: requestId,
+          },
+          { status: 400 },
+        );
+      }
+    }
+
+    // 5. Rate limit per user (wallet address). Bulk methods go in a
+    // tighter `rpc:h:` bucket — see RATE_LIMITS.rpcHeavy.
+    const tier = tierForMethod(method);
+    const { success: allowed, remaining } = await checkRate(address, tier);
+    const isWrite = tier === "write";
 
     if (!allowed) {
       Sentry.captureMessage("RPC rate limit exceeded", {
@@ -131,7 +264,7 @@ export async function POST(request: NextRequest) {
       return res;
     }
 
-    // 5. Forward to Solana RPC
+    // 6. Forward to Solana RPC
     const rpcRes = await fetch(SOLANA_RPC_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -164,7 +297,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 6. Return with rate limit headers
+    // 7. Return with rate limit headers
     const res = NextResponse.json(data);
     res.headers.set("X-RateLimit-Remaining", String(remaining));
     return res;

@@ -48,6 +48,12 @@ import { prisma } from "./db";
 export const RATE_LIMITS = {
   /** Solana RPC reads — getAccountInfo, getBalance, etc. */
   rpcRead: 120,
+  /**
+   * Solana RPC bulk/fan-out reads — getMultipleAccounts,
+   * getTokenAccountsByOwner. Each call amplifies into many underlying RPC
+   * lookups, so we bucket them separately at roughly half the read tier.
+   */
+  rpcHeavy: 60,
   /** Solana RPC writes — sendTransaction, simulateTransaction. */
   rpcWrite: 10,
   /** Deposit/withdraw API. */
