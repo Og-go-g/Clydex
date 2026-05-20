@@ -15,10 +15,36 @@ import type { HistoryType, SyncResult, SyncProgress } from "./types";
 // container (where sentry.server.config.ts isn't auto-loaded by
 // Next.js) just costs a function call. No try/catch needed; the SDK
 // handles uninitialized state internally.
+/**
+ * Cursor-advance gate. The sync_cursors row jumps to NOW() ONLY when the
+ * sync function reports that it consumed every page (`hasMore: false`)
+ * AND surfaced no soft error in the SyncResult. Any partial-success path
+ * (mid-pagination network blip that the sync function caught and surfaced
+ * via `result.error`, or a soft "ran out of budget" return with
+ * `hasMore: true`) leaves the cursor where it was so the next cycle
+ * retries from the prior position.
+ *
+ * Throwing errors are handled by the dispatcher's catch block — that
+ * path also doesn't advance. This helper covers the non-throwing path
+ * which the dispatcher used to advance unconditionally.
+ *
+ * Exported for unit testing; the dispatcher inlines the same condition.
+ */
+export function shouldAdvanceCursor(result: SyncResult): boolean {
+  return result.hasMore === false && !result.error;
+}
+
 function syncBreadcrumb(
   type: HistoryType,
   accountId: number,
-  data: { fetched?: number; inserted?: number; error?: string; durationMs?: number },
+  data: {
+    fetched?: number;
+    inserted?: number;
+    error?: string;
+    softError?: string;
+    durationMs?: number;
+    cursorAdvanced?: boolean;
+  },
 ): void {
   Sentry.addBreadcrumb({
     category: "history-sync",
@@ -585,13 +611,40 @@ export async function syncAllHistory(
     try {
       const result = await syncFn(accountId, walletAddr, since ?? undefined, ctx);
       results.push(result);
-      await setCursor(accountId, walletAddr, type, new Date().toISOString());
-      syncBreadcrumb(type, accountId, { inserted: result.inserted, durationMs: Date.now() - t0 });
+
+      // Cursor advances ONLY when the sync completed cleanly — no soft
+      // error, AND the API confirmed no further pages. Previously we
+      // advanced to NOW() unconditionally inside the try block, so a
+      // mid-pagination failure (page 5 of 10 then network hiccup) would
+      // jump the cursor forward and permanently skip the window between
+      // the last-good page and NOW. Affected leaderboard PnL accuracy
+      // for any wallet whose sync ever blew up partway.
+      //
+      // Trade-off chosen: on partial failure leave the cursor unchanged
+      // and let the next cycle re-paginate from the prior cursor. Dedup
+      // is cheap (ON CONFLICT DO NOTHING on the two-sided unique keys)
+      // so re-inserting earlier-page rows costs nothing.
+      if (shouldAdvanceCursor(result)) {
+        await setCursor(accountId, walletAddr, type, new Date().toISOString());
+      }
+      syncBreadcrumb(type, accountId, {
+        inserted: result.inserted,
+        durationMs: Date.now() - t0,
+        cursorAdvanced: shouldAdvanceCursor(result),
+        ...(result.error ? { softError: result.error } : {}),
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[history/sync] ${type} sync failed for ${walletAddr}:`, msg);
       results.push({ type, inserted: 0, hasMore: false, error: msg });
-      syncBreadcrumb(type, accountId, { error: msg, durationMs: Date.now() - t0 });
+      // Thrown error path: cursor explicitly NOT advanced. Next cycle
+      // retries from the prior cursor — duplicate-page inserts dedup
+      // against the unique indexes.
+      syncBreadcrumb(type, accountId, {
+        error: msg,
+        durationMs: Date.now() - t0,
+        cursorAdvanced: false,
+      });
     }
 
     onProgress?.({ total: types.length, completed: results.length, results });
@@ -623,13 +676,26 @@ export async function syncHistoryType(
 
   try {
     const result = await syncFn(accountId, walletAddr, since ?? undefined, ctx);
-    await setCursor(accountId, walletAddr, type, new Date().toISOString());
-    syncBreadcrumb(type, accountId, { inserted: result.inserted, durationMs: Date.now() - t0 });
+    // Same cursor-advance contract as syncAllHistory — see the long
+    // comment there. Advance only on a fully clean sync.
+    if (shouldAdvanceCursor(result)) {
+      await setCursor(accountId, walletAddr, type, new Date().toISOString());
+    }
+    syncBreadcrumb(type, accountId, {
+      inserted: result.inserted,
+      durationMs: Date.now() - t0,
+      cursorAdvanced: shouldAdvanceCursor(result),
+      ...(result.error ? { softError: result.error } : {}),
+    });
     return result;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[history/sync] ${type} sync failed for ${walletAddr}:`, msg);
-    syncBreadcrumb(type, accountId, { error: msg, durationMs: Date.now() - t0 });
+    syncBreadcrumb(type, accountId, {
+      error: msg,
+      durationMs: Date.now() - t0,
+      cursorAdvanced: false,
+    });
     return { type, inserted: 0, hasMore: false, error: msg };
   }
 }
