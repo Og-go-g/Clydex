@@ -1,7 +1,9 @@
 import { NordUser, Side, FillMode, TriggerKind } from "@n1xyz/nord-ts";
 import type { PublicKey, Transaction } from "@solana/web3.js";
+import * as Sentry from "@sentry/nextjs";
 import { getNord } from "./client";
 import { resolveMarket, validateLeverage } from "./constants";
+import { computeWorstPrice, fetchBestQuotes } from "./slippage";
 import type { OrderSide } from "./types";
 
 // ─── Types ───────────────────────────────────────────────────────
@@ -251,17 +253,29 @@ export async function placeOrder(user: NordUser, params: PlaceOrderParams) {
   }
 
   // For market orders with slippage: calculate worst acceptable fill price
-  // This acts as a price ceiling (long) or floor (short) — IOC cancels unfilled remainder
+  // anchored on the best opposite quote (not mark) so the user's slippage
+  // budget is "true slippage past the touch" — works correctly on wide-
+  // spread Tier 3-5 markets. See lib/n1/slippage.ts for the full
+  // rationale + the ±5% safety clamp around mark.
   let effectivePrice = params.price;
+  let slippageMark: number | undefined;
+  let slippageBestOpposite: number | undefined;
   if (fillMode === FillMode.ImmediateOrCancel && !params.price && params.slippage) {
     const { getMarketStats } = await import("./client");
-    const stats = await getMarketStats(market.id);
+    const [stats, quotes] = await Promise.all([
+      getMarketStats(market.id),
+      fetchBestQuotes(market.id),
+    ]);
     const markPrice = stats.perpStats?.mark_price ?? stats.indexPrice ?? 0;
-    if (markPrice > 0) {
-      effectivePrice = side === Side.Bid
-        ? markPrice * (1 + params.slippage) // Long: max price
-        : markPrice * (1 - params.slippage); // Short: min price
-    }
+    slippageMark = markPrice;
+    slippageBestOpposite = side === Side.Bid ? quotes.bestAsk ?? undefined : quotes.bestBid ?? undefined;
+    effectivePrice = computeWorstPrice({
+      side,
+      bestAsk: quotes.bestAsk,
+      bestBid: quotes.bestBid,
+      markPrice,
+      slippage: params.slippage,
+    });
   }
 
   // Round to 6 decimal places to prevent floating-point drift.
@@ -272,7 +286,7 @@ export async function placeOrder(user: NordUser, params: PlaceOrderParams) {
     throw new Error(`Order size too small (${params.size.toFixed(6)} base units). Try a larger dollar amount.`);
   }
 
-  return user.placeOrder({
+  const result = await user.placeOrder({
     marketId: market.id,
     side,
     fillMode,
@@ -281,6 +295,33 @@ export async function placeOrder(user: NordUser, params: PlaceOrderParams) {
     price: effectivePrice,
     accountId: params.accountId,
   });
+
+  // Slippage instrumentation: compare actual fill vs expected so we can
+  // audit whether the new best-opposite anchoring (+ ±5% mark clamp)
+  // matches reality on prod. Audit C4 acceptance asks for one week of
+  // post-deploy data to validate the formula on illiquid pairs.
+  if (slippageMark != null && result.fills.length > 0) {
+    const avgFill =
+      result.fills.reduce((sum, f) => sum + f.price * f.size, 0) /
+      result.fills.reduce((sum, f) => sum + f.size, 0);
+    Sentry.addBreadcrumb({
+      category: "order-fill-slippage",
+      level: "info",
+      message: `${params.symbol} ${params.side} fill`,
+      data: {
+        symbol: params.symbol,
+        side: params.side,
+        slippageBudget: params.slippage,
+        markPrice: slippageMark,
+        bestOpposite: slippageBestOpposite,
+        worstPrice: effectivePrice,
+        avgFill,
+        markDeviation: (avgFill - slippageMark) / slippageMark,
+      },
+    });
+  }
+
+  return result;
 }
 
 /**
@@ -473,8 +514,13 @@ export async function closePosition(
   const closeSide = params.side === "Long" ? Side.Ask : Side.Bid;
   const closeSize = Math.abs(params.size);
 
-  // Slippage protection for close orders
+  // Slippage protection for close orders — same best-opposite anchoring
+  // as placeOrder above, with the ±5% mark clamp as a stale-book guard.
+  // Copy engine routes through here, so the wide-spread fix benefits
+  // every mirrored close too.
   let closePrice: number | undefined;
+  let closeMark: number | undefined;
+  let closeBestOpposite: number | undefined;
   if (params.slippage) {
     let markPrice = params.markPrice ?? 0;
     if (markPrice <= 0) {
@@ -483,15 +529,20 @@ export async function closePosition(
       markPrice = stats.perpStats?.mark_price ?? stats.indexPrice ?? 0;
     }
     if (markPrice > 0) {
-      // Close long = sell (ask) → min acceptable price
-      // Close short = buy (bid) → max acceptable price
-      closePrice = closeSide === Side.Ask
-        ? markPrice * (1 - params.slippage)
-        : markPrice * (1 + params.slippage);
+      const quotes = await fetchBestQuotes(market.id);
+      closeMark = markPrice;
+      closeBestOpposite = closeSide === Side.Bid ? quotes.bestAsk ?? undefined : quotes.bestBid ?? undefined;
+      closePrice = computeWorstPrice({
+        side: closeSide,
+        bestAsk: quotes.bestAsk,
+        bestBid: quotes.bestBid,
+        markPrice,
+        slippage: params.slippage,
+      });
     }
   }
 
-  return user.placeOrder({
+  const result = await user.placeOrder({
     marketId: market.id,
     side: closeSide,
     fillMode: FillMode.ImmediateOrCancel,
@@ -500,6 +551,31 @@ export async function closePosition(
     price: closePrice,
     accountId: params.accountId,
   });
+
+  // Same slippage instrumentation as placeOrder — see comment there.
+  if (closeMark != null && result.fills.length > 0) {
+    const avgFill =
+      result.fills.reduce((sum, f) => sum + f.price * f.size, 0) /
+      result.fills.reduce((sum, f) => sum + f.size, 0);
+    Sentry.addBreadcrumb({
+      category: "order-fill-slippage",
+      level: "info",
+      message: `${params.symbol} close ${params.side} fill`,
+      data: {
+        symbol: params.symbol,
+        side: params.side,
+        kind: "close",
+        slippageBudget: params.slippage,
+        markPrice: closeMark,
+        bestOpposite: closeBestOpposite,
+        worstPrice: closePrice,
+        avgFill,
+        markDeviation: (avgFill - closeMark) / closeMark,
+      },
+    });
+  }
+
+  return result;
 }
 
 /**
