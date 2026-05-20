@@ -1,6 +1,6 @@
 import "./polyfill";
 import * as Sentry from "@sentry/nextjs";
-import { query as dbQuery, acquireAdvisoryLock } from "../db-history";
+import { acquireAdvisoryLock } from "../db-history";
 import { withRetry } from "../util/retry";
 import { getAccount, getUser, getMarketStats } from "../n1/client";
 import { placeOrder, closePosition, setTrigger } from "../n1/user-client";
@@ -790,11 +790,27 @@ export async function runCopyEngine(): Promise<EngineResult> {
         // racing on the SAME leader's snapshot/order processing. Uses
         // the leader's accountId (already an int) instead of a 32-bit
         // string-hash to eliminate collision risk.
-        const lockKey = accountId;
-        const lockResult = await dbQuery<{ locked: boolean }>(
-          `SELECT pg_try_advisory_lock($1) AS locked`, [lockKey],
-        );
-        if (!lockResult[0]?.locked) {
+        //
+        // Goes through acquireAdvisoryLock so lock + unlock run on the
+        // same dedicated PG client. The previous version used
+        // pool.query() for both, which checks out a different client
+        // each call — pg advisory locks are session-scoped, so the
+        // unlock could land on a connection that never held the lock
+        // and leave the original session holding it until idle-timeout
+        // (~10 minutes). Mirrors the global-lock pattern above.
+        let releasePerLeaderLock: (() => Promise<void>) | null = null;
+        try {
+          releasePerLeaderLock = await acquireAdvisoryLock(accountId);
+        } catch (lockErr) {
+          addError(
+            result,
+            `${leaderAddr}: skipped (DB error acquiring lock: ${
+              lockErr instanceof Error ? lockErr.message : "unknown"
+            })`,
+          );
+          continue;
+        }
+        if (!releasePerLeaderLock) {
           addError(result, `${leaderAddr}: skipped (locked by another cycle)`);
           continue;
         }
@@ -910,7 +926,17 @@ export async function runCopyEngine(): Promise<EngineResult> {
             }
           }
         } finally {
-          await dbQuery(`SELECT pg_advisory_unlock($1)`, [lockKey]);
+          // Same-client release, returns the dedicated PG client to the
+          // pool. Swallow release errors — the lock will time out on
+          // idle anyway and the next cycle re-tries via the same gate.
+          try {
+            await releasePerLeaderLock();
+          } catch (releaseErr) {
+            console.warn(
+              `[copy-engine] per-leader unlock failed for ${leaderAddr}:`,
+              releaseErr,
+            );
+          }
         }
       } catch (err) {
         addError(result, `${leaderAddr}: ${err instanceof Error ? err.message : "Unknown"}`);
