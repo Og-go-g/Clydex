@@ -4,6 +4,7 @@ import { z } from "zod/v4";
 import { getAuthAddress } from "@/lib/auth/session";
 import { getUser, getAccount } from "@/lib/n1/client";
 import { checkLiquidationRisk } from "@/lib/n1/alerts";
+import { computeMaxWithdraw, POST_WITHDRAW_MARGIN_FLOOR } from "@/lib/n1/margin";
 import { RATE_LIMITS, safeRateLimit } from "@/lib/ratelimit";
 import { CURRENT_TERMS_VERSION, hasAcceptedCurrentTerms } from "@/lib/legal";
 
@@ -47,11 +48,18 @@ export async function GET() {
       (p) => p.perp && p.perp.baseSize !== 0
     ) ?? [];
 
+    // availableMargin = max safe withdraw amount (USD). Computed via the
+    // shared margin helper so the UI display matches the server-side
+    // approval check on POST. See lib/n1/margin.ts for the formula and
+    // its alignment with the protocol's withdraw constraint
+    // (https://docs.01.xyz/margins/n1).
+    const availableMargin = margins ? computeMaxWithdraw(margins) : 0;
+
     return NextResponse.json({
       exists: true,
       accountId,
       collateral: usdcBalance,
-      availableMargin: margins?.omf ?? 0,
+      availableMargin,
       maintenanceMargin: margins?.mmf ?? 0,
       marginRatio: margins?.pon && margins.pon > 0.001 ? (isFinite(margins.omf / margins.pon) ? Math.min(margins.omf / margins.pon, 100) : null) : null,
       hasPositions: positions.length > 0,
@@ -185,29 +193,35 @@ export async function POST(req: Request) {
       });
     }
 
-    // Check: will this liquidate positions?
+    // Check: will this withdraw breach the safety floor?
+    //
+    // Replaces the previous `omf − imf` heuristic, which let users
+    // withdraw "free margin" derived from omf that included unrealized
+    // PnL. A user with +PnL could withdraw paper profit and then get
+    // insta-liquidated by a 1% adverse tick.
+    //
+    // New formula (lib/n1/margin.ts) takes the tightest of:
+    //   - protocol bound (omf − imf): what the protocol itself would
+    //     accept based on min(AV, TV) ≥ Σ(PON × IMF_base)
+    //   - safety bound (mf − 0.15 × pon): keeps post-withdraw margin
+    //     ratio above the audit-mandated 15% floor
+    // Hard-rejects beyond that. Above the floor is unsafe per audit C1
+    // acceptance — no "warn and confirm" middle band.
     if (positions.length > 0 && margins) {
-      const availableForWithdrawal = margins.omf - margins.imf;
+      const maxSafe = computeMaxWithdraw(margins);
 
-      if (amount > availableForWithdrawal) {
+      if (amount > maxSafe) {
+        const floorPct = (POST_WITHDRAW_MARGIN_FLOOR * 100).toFixed(0);
         warnings.push(
-          `This withdrawal may put your positions at risk. Available for safe withdrawal: $${Math.max(0, availableForWithdrawal).toFixed(2)}.`
+          `Withdrawal would push margin ratio below ${floorPct}%. ` +
+            `Max safe withdrawal: $${maxSafe.toFixed(2)}. ` +
+            `Reduce positions to free up more collateral.`,
         );
+        approved = false;
       }
 
-      // Simulate post-withdrawal margin ratio
-      const newOmf = margins.omf - amount;
-      if (margins.pon > 0) {
-        const newRatio = newOmf / margins.pon;
-        if (newRatio < 0.10) {
-          warnings.push("CRITICAL: After this withdrawal, your margin ratio will be below 10%. Liquidation risk is very high.");
-          approved = false;
-        } else if (newRatio < 0.15) {
-          warnings.push("WARNING: After this withdrawal, your margin ratio will be below 15%. Consider reducing positions first.");
-        }
-      }
-
-      // Check current liquidation risk
+      // Already-unhealthy account: critical/emergency state means any
+      // withdraw is reckless even if the math allows a small one.
       const alert = checkLiquidationRisk(margins);
       if (alert && alert.level !== "warning") {
         warnings.push(`Your account is already in ${alert.level} state. Withdrawing now is extremely risky.`);
