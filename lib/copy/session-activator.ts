@@ -5,7 +5,25 @@ import { upsertSession, deleteSession, getSession } from "./queries";
 import { consumeNonce } from "@/lib/auth/nonce-store";
 import { buildActivationMessage } from "@/app/api/copy/activate-challenge/route";
 
-const SESSION_TTL_DAYS = 30;
+/**
+ * Copy-trading session TTL.
+ *
+ * Reduced 2026-05-20 from 30d to 7d per the Week-1 hardening pass
+ * (see docs/runbooks/key-compromise.md). A shorter TTL bounds the
+ * theft window when a key is compromised — at 30d an attacker can
+ * sign for a month; at 7d they can sign for one week before the
+ * session expires and the on-chain delegate becomes inactive.
+ *
+ * 7d is the published industry sweet spot for "hot signing key with
+ * limited authority" (CubeSigner, Lombard) — 24h is tighter still but
+ * forces every active user to re-sign daily, which we'll only adopt
+ * once we have in-product session-expiry notifications wired up.
+ *
+ * The existing /chat session-expiry warning surface (added in
+ * Phase 8) plus the Renew button already cover the UX: users will
+ * see the "expires in N hours" badge a few hours before TTL.
+ */
+const SESSION_TTL_DAYS = 7;
 
 /**
  * Activate copy trading: encrypt and store the user's session keypair.

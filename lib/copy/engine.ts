@@ -4,6 +4,8 @@ import { acquireAdvisoryLock } from "../db-history";
 import { withRetry } from "../util/retry";
 import { getAccount, getUser, getMarketStats } from "../n1/client";
 import { placeOrder, closePosition, setTrigger } from "../n1/user-client";
+import { verifySigningPolicy } from "../copytrade/signing-policy";
+import { isCopyTradingPaused } from "../copytrade/kill-switch";
 import { ensureMarketCache, getCachedMarkets } from "../n1/constants";
 import { restoreNordUser } from "./norduser-restore";
 import {
@@ -520,6 +522,54 @@ async function executeCopyForFollower(
       return { success: false, skipped: true, error: `Market ${diff.symbol} claimed by another cycle` };
     }
   }
+
+  // ─── Signing policy gate ────────────────────────────────────────
+  //
+  // Last-line check before any SDK call. Even with a valid session
+  // key in hand, the signer must refuse anything outside the
+  // subscription envelope. Catches:
+  //   - leverage that doesn't match the user's chosen mult
+  //   - position size beyond per-market cap or allocation × mult
+  //   - slippage above the 5% hard ceiling (mirrors B2 clamp)
+  //   - degenerate mark price / size / side
+  //
+  // Refusals are NOT retryable — same inputs will refuse again next
+  // tick. Surface as a copy_trade row with the reason so the operator
+  // can investigate. See lib/copytrade/signing-policy.ts for the
+  // formula + threat model.
+  const policyVerdict = verifySigningPolicy({
+    walletAddr: follower.followerAddr,
+    symbol: diff.symbol,
+    marketId: diff.marketId,
+    side: diff.side,
+    size: roundedSize,
+    leverage: leverageMult,
+    slippage: DEFAULT_SLIPPAGE,
+    markPrice,
+    subscription: {
+      allocationUsdc: allocation,
+      leverageMult,
+      maxPositionUsdc: maxPos,
+    },
+    action: diff.action,
+  });
+  if (!policyVerdict.ok) {
+    Sentry.captureMessage(`[copy-engine] signing policy refused`, {
+      level: "warning",
+      tags: { component: "copy-engine", event: "policy-refused" },
+      extra: {
+        walletAddr: follower.followerAddr.slice(0, 8),
+        symbol: diff.symbol,
+        action: diff.action,
+        reason: policyVerdict.reason,
+      },
+    });
+    await updateCopyTradeStatus(tradeId, "failed", {
+      error: `policy refused: ${policyVerdict.reason}`,
+    });
+    return { success: false, error: `policy refused: ${policyVerdict.reason}` };
+  }
+
   let exchangeOrderResult: { fills?: { price: number; size: number }[] } | undefined;
   try {
     if (diff.action === "close" || diff.action === "decrease") {
@@ -710,6 +760,22 @@ export async function runCopyEngine(): Promise<EngineResult> {
     };
   }
 
+  // Kill switch check — early exit if copy trading is paused globally.
+  // Re-checked again inside the per-leader loop (last-second guard) so a
+  // mid-cycle pause stops new signs immediately. The 2s in-memory cache
+  // in isCopyTradingPaused keeps this cheap even at the per-sign call.
+  {
+    const killState = await isCopyTradingPaused();
+    if (killState.paused) {
+      return {
+        leadersProcessed: 0, diffsDetected: 0, ordersPlaced: 0,
+        ordersFailed: 0, skipped: 0,
+        errors: [`Skipped: copy trading paused (${killState.reason ?? "no reason"})`],
+        durationMs: 0,
+      };
+    }
+  }
+
   // Cross-process global lock — refuses if another container, an
   // accidental second worker, or a manual /api/copy/engine call is
   // running the engine right now. Without this, scaling out to 2+
@@ -763,6 +829,19 @@ export async function runCopyEngine(): Promise<EngineResult> {
 
     for (const leaderAddr of leaders) {
       try {
+        // Re-check kill switch each leader iteration. If an admin
+        // flipped the pause mid-cycle, we stop processing the
+        // remaining leaders rather than blasting through the queue.
+        // The 2s in-memory cache absorbs the hot-path cost.
+        const killState = await isCopyTradingPaused();
+        if (killState.paused) {
+          addError(
+            result,
+            `${leaderAddr}: skipped (copy trading paused mid-cycle)`,
+          );
+          break;
+        }
+
         const accountId = await resolveAccountId(leaderAddr);
         if (accountId === null) {
           addError(result, `${leaderAddr}: cannot resolve accountId`);
