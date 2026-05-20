@@ -399,9 +399,12 @@ async function syncDeposits(accountId: number, walletAddr: string, since?: strin
 
     const d = page.data;
     const result = await historyPool.query(
+      // ON CONFLICT key is (accountId, time, amount) since 2026-05-17 —
+       // walletAddr is mutable (placeholder → real after propagateWallet),
+       // accountId is stable, so the dedup must key on it.
       `INSERT INTO deposit_history (id, "accountId", "walletAddr", amount, balance, "tokenId", "time")
        SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::numeric[], $5::numeric[], $6::int[], $7::timestamptz[])
-       ON CONFLICT ("walletAddr", "time", amount) DO NOTHING`,
+       ON CONFLICT ("accountId", "time", amount) DO NOTHING`,
       [
         d.map(() => uuid()),
         d.map(() => accountId),
@@ -436,9 +439,11 @@ async function syncWithdrawals(accountId: number, walletAddr: string, since?: st
 
     const d = page.data;
     const result = await historyPool.query(
+      // ON CONFLICT key migrated to (accountId, time, amount) — see comment
+       // in syncDeposits for the rationale.
       `INSERT INTO withdrawal_history (id, "accountId", "walletAddr", amount, balance, fee, "destPubkey", "time")
        SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::numeric[], $5::numeric[], $6::numeric[], $7::text[], $8::timestamptz[])
-       ON CONFLICT ("walletAddr", "time", amount) DO NOTHING`,
+       ON CONFLICT ("accountId", "time", amount) DO NOTHING`,
       [
         d.map(() => uuid()),
         d.map(() => accountId),
@@ -474,9 +479,11 @@ async function syncLiquidations(accountId: number, walletAddr: string, since?: s
 
     const d = page.data;
     const result = await historyPool.query(
+      // ON CONFLICT key migrated to (accountId, time, fee) — see comment
+       // in syncDeposits for the rationale.
       `INSERT INTO liquidation_history (id, "accountId", "walletAddr", fee, "liquidationKind", margins, "time")
        SELECT * FROM unnest($1::text[], $2::int[], $3::text[], $4::numeric[], $5::text[], $6::jsonb[], $7::timestamptz[])
-       ON CONFLICT ("walletAddr", "time", fee) DO NOTHING`,
+       ON CONFLICT ("accountId", "time", fee) DO NOTHING`,
       [
         d.map(() => uuid()),
         d.map(() => accountId),

@@ -181,7 +181,12 @@ export async function recomputeVolumeCalendar(
        gen_random_uuid(),
        $1::int,
        $2::text,
-       to_char(date_trunc('day', "time"), 'YYYY-MM-DD')                             AS date,
+       -- date column was widened from TEXT to DATE on 2026-05-17; insert
+       -- the truncated timestamp directly (PostgreSQL casts timestamp →
+       -- date losslessly). Sending a 'YYYY-MM-DD' string here causes a
+       -- "column 'date' is of type date but expression is of type text"
+       -- error from the planner on every aggregate recompute.
+       date_trunc('day', "time")::date                                              AS date,
        COALESCE(SUM(size::numeric * price::numeric), 0)                             AS volume,
        COALESCE(SUM(size::numeric * price::numeric) FILTER (WHERE role = 'maker'), 0) AS maker_volume,
        COALESCE(SUM(size::numeric * price::numeric) FILTER (WHERE role = 'taker'), 0) AS taker_volume,
