@@ -5,6 +5,7 @@ import * as Sentry from "@sentry/nextjs";
 import { useWallet as useSolanaWallet } from "@solana/wallet-adapter-react";
 import { PublicKey } from "@solana/web3.js";
 import type { NordUser } from "@n1xyz/nord-ts";
+import { isSessionError } from "@/lib/n1/session-errors";
 
 type ExecStatus = "idle" | "signing" | "submitting" | "verifying" | "confirmed" | "error";
 
@@ -363,19 +364,11 @@ export function useOrderExecution() {
         return await fn(user);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : "";
-        // Session-expiry retry: narrow to SDK's actual session errors. Avoid
-        // matching "invalid" alone — it also matches "Invalid market",
-        // "Invalid order size", "invalid leverage", which would tear down a
-        // good session, prompt a wallet popup, and re-submit the same bad
-        // order. Real SDK session error: "Invalid or empty session ID.
-        // Please create or refresh your session." Engine error variants:
-        // "session expired", "session not found", "Invalid session".
-        const isSessionError =
-          /invalid\s+or\s+empty\s+session\s+id/i.test(msg) ||
-          /session\s+(expired|not\s+found|invalid|revoked)/i.test(msg) ||
-          /invalid\s+session/i.test(msg) ||
-          /please\s+(create|refresh)\s+your\s+session/i.test(msg);
-        if (isSessionError) {
+        // Session-expiry retry: narrow to SDK's actual session errors. The
+        // matcher lives in lib/n1/session-errors.ts so the patterns + test
+        // cases are co-located and the precedence can't drift across edits
+        // — see the doc-comment there for the full list of SDK phrases.
+        if (isSessionError(msg)) {
           invalidateSession();
           const freshUser = await getOrCreateUser({
             walletPubkey: safePubkey,
