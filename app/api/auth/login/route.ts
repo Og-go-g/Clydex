@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import * as Sentry from "@sentry/nextjs";
 import { getSession } from "@/lib/auth/session";
 import { parseSiwsMessage, verifySiwsSignature, isValidSolanaAddress } from "@/lib/auth/siws";
-import { consumeNonce } from "@/lib/auth/nonce-store";
+import { consumeNonce, NonceStoreUnavailableError } from "@/lib/auth/nonce-store";
 
 /** POST /api/auth/login — verify Solana signature and create a session. */
 export async function POST(req: Request) {
@@ -83,6 +83,20 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ address: newSession.address });
   } catch (error) {
+    // Postgres-side nonce store is down — fail closed (503) rather than
+    // pretending the nonce was invalid (401). Returning 401 here would be
+    // indistinguishable from a real bad-credential response and the client
+    // would surface a misleading "auth failed" message; 503 tells the
+    // caller "try again shortly" which is the truth.
+    if (error instanceof NonceStoreUnavailableError) {
+      Sentry.captureException(error, {
+        tags: { endpoint: "auth-login", reason: "nonce_store_unavailable" },
+      });
+      return NextResponse.json(
+        { error: "Authentication temporarily unavailable" },
+        { status: 503 },
+      );
+    }
     Sentry.captureException(error, { tags: { endpoint: "auth-login" } });
     return NextResponse.json(
       { error: "Authentication failed" },

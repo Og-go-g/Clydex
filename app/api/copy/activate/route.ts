@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAuthAddress } from "@/lib/auth/session";
 import { activateSession, deactivateSession, isSessionActive } from "@/lib/copy/session-activator";
 import { CURRENT_TERMS_VERSION, hasAcceptedCurrentTerms } from "@/lib/legal";
+import { NonceStoreUnavailableError } from "@/lib/auth/nonce-store";
 
 /**
  * POST /api/copy/activate
@@ -55,6 +56,15 @@ export async function POST(req: NextRequest) {
       expiresAt: result.expiresAt.toISOString(),
     });
   } catch (err) {
+    // Nonce store unreachable — same reasoning as /api/auth/login: 503, not
+    // 400. Lets the browser distinguish "your request is malformed" from
+    // "our backend is briefly degraded, retry in a few seconds".
+    if (err instanceof NonceStoreUnavailableError) {
+      return NextResponse.json(
+        { error: "Activation temporarily unavailable" },
+        { status: 503 },
+      );
+    }
     const message = err instanceof Error ? err.message : "Activation failed";
     return NextResponse.json({ error: message }, { status: 400 });
   }

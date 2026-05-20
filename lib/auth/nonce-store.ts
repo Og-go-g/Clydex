@@ -9,6 +9,9 @@
  *       guarantee (row-level lock prevents two concurrent verifies from
  *       both succeeding). Pattern is the canonical Supabase Auth approach
  *       for one-time tokens.
+ *   v3: Asymmetric fallback. Store is best-effort (PG fail → memSet). Consume
+ *       is strict (PG fail → throw NonceStoreUnavailableError → caller returns
+ *       503). See `consumeNonce` for the threat-model reasoning.
  *
  * Atomicity of single-use:
  *   `DELETE FROM nonces WHERE value = $1 AND expires_at > NOW() RETURNING value`
@@ -16,13 +19,6 @@
  *   returns the deleted row in one statement. Two parallel `verify` requests
  *   for the same nonce serialise on the lock and only one returns a row.
  *   No race window between read and delete.
- *
- * Fallback chain on Postgres outage:
- *   pgConsumeNonce returns false on any error → memTake() is checked next.
- *   The store path mirrors it: pgStoreNonce reports failure → memSet() runs.
- *   On a single-process deployment that's enough; cross-process consistency
- *   isn't required because every login flow happens within one Next.js
- *   server instance handling both the /nonce and /login halves.
  */
 
 import { prisma } from "../db";
@@ -61,6 +57,22 @@ function memTake(nonce: string): boolean {
 /*  Postgres backend                                                  */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Thrown when the Postgres nonce store is unreachable. Distinct from
+ * "nonce not found" so callers can return 503 instead of 401: a brief PG
+ * hiccup must NOT cause us to silently fall through to memTake during
+ * consume — that would open a replay window for previously-captured SIWS
+ * payloads on multi-replica deployments where the memStore state is
+ * per-process.
+ */
+export class NonceStoreUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super("Nonce store unavailable");
+    this.name = "NonceStoreUnavailableError";
+    if (cause !== undefined) (this as { cause?: unknown }).cause = cause;
+  }
+}
+
 let lastPgWarnAt = 0;
 const PG_WARN_INTERVAL_MS = 60_000;
 
@@ -94,6 +106,12 @@ async function pgStoreNonce(nonce: string): Promise<boolean> {
   }
 }
 
+/**
+ * Atomically delete a nonce from Postgres. Returns true if the row existed
+ * and was deleted; false if it didn't exist (already consumed or expired).
+ * THROWS `NonceStoreUnavailableError` on any Postgres error — callers MUST
+ * treat that as "consume failed, can't tell why" and surface 503.
+ */
 async function pgConsumeNonce(nonce: string): Promise<boolean> {
   try {
     const rows = await prisma.$queryRaw<{ value: string }[]>`
@@ -105,7 +123,7 @@ async function pgConsumeNonce(nonce: string): Promise<boolean> {
     return rows.length > 0;
   } catch (err) {
     warn("pgConsumeNonce", err);
-    return false;
+    throw new NonceStoreUnavailableError(err);
   }
 }
 
@@ -144,8 +162,16 @@ export async function storeNonce(nonce: string): Promise<string> {
  * Atomically consume a nonce. Returns true if the nonce was valid and is now
  * burned (it was deleted from the store; subsequent calls return false).
  *
- * Tries Postgres first, falls back to the in-memory map if PG is down or
- * if the nonce was originally written there during a prior outage.
+ * THROWS `NonceStoreUnavailableError` when Postgres errors out — callers
+ * MUST translate that to a 503 response rather than 401. Falling through
+ * to memTake on PG error would let an attacker who captured a previously
+ * issued SIWS payload replay it: in multi-replica deployments memStore is
+ * per-process, so a PG hiccup is the one window where a replica can be
+ * convinced a fresh nonce is "valid" because it was never told otherwise.
+ *
+ * On a normal PG return of zero rows (nonce expired or never existed in PG)
+ * we DO fall through to memTake, since storeNonce's PG-fail path writes to
+ * memStore — that's the legitimate use of the in-memory backing store.
  */
 export async function consumeNonce(nonce: string): Promise<boolean> {
   ensureCleanupTimer();
