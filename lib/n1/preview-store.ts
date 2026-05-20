@@ -13,11 +13,16 @@ import { prisma } from "../db";
 // History:
 //   v1: Upstash Redis primary (atomic GETDEL + Lua-script ownership
 //       check), in-memory fallback. Removed in Phase 8a.
-//   v2 (this file): Postgres primary. Atomic single-use guarantee via
-//       `DELETE ... WHERE id = ? AND user_id = ? AND expires_at > NOW()
-//       RETURNING payload` — ownership, TTL, and consume happen inside
-//       one statement so a different user can't burn someone else's
-//       preview, and a single retry can't double-execute.
+//   v2: Postgres primary. Atomic single-use guarantee via DELETE-
+//       RETURNING. In-memory fallback on BOTH store and consume.
+//   v3 (this file): Asymmetric fallback. storePreview / getPreview keep
+//       the in-memory fallback because failure there only costs a
+//       re-prepare. consumePreview drops the in-memory fallback on PG
+//       error: on a multi-replica deploy each replica has its own
+//       memStore, so a retried execute could land on a different
+//       replica and burn the preview a second time → double-execute on
+//       chain. On PG error consumePreview throws
+//       PreviewStoreUnavailableError and the route returns 503.
 
 const PREVIEW_TTL_S = 300; // 5 minutes
 
@@ -50,6 +55,23 @@ function memEvictOldest(): void {
     }
   }
   if (oldestId) memStore.delete(oldestId);
+}
+
+/* ─── Errors ─── */
+
+/**
+ * Thrown by consumePreview when Postgres is unreachable. Routes that
+ * catch this MUST return 503 — the alternative is falling through to
+ * the per-replica memStore which would allow a retried execute to
+ * land on a different replica and double-burn the preview, executing
+ * the order twice on chain.
+ */
+export class PreviewStoreUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super("Preview store unavailable");
+    this.name = "PreviewStoreUnavailableError";
+    if (cause !== undefined) (this as { cause?: unknown }).cause = cause;
+  }
 }
 
 /* ─── Logging throttle for PG outage warnings ─── */
@@ -135,6 +157,18 @@ export async function storePreview(
  * applies the userId + expires_at predicates inside the same
  * statement. Two concurrent confirms for the same previewId serialise
  * on the lock and only one returns a row.
+ *
+ * THROWS `PreviewStoreUnavailableError` if Postgres errors out — the
+ * caller MUST return 503 and refuse to execute. Falling through to
+ * the per-replica memStore here would let a retried execute on a
+ * different replica burn the preview a second time and submit the
+ * order to chain twice. A null return is reserved for "PG confirmed
+ * the preview is not consumable" (expired, wrong user, already burned).
+ *
+ * Memory fallback IS still consulted, but only when PG returned zero
+ * rows — i.e. PG is healthy and definitively says the preview isn't
+ * there. That's the legitimate path for previews that were stored
+ * via memStore during a prior PG outage.
  */
 export async function consumePreview(
   previewId: string,
@@ -150,12 +184,14 @@ export async function consumePreview(
       RETURNING payload;
     `;
     if (rows.length > 0) return rows[0].payload;
-    // Not in PG (or wrong user / expired) — try memory fallback in case
-    // the preview was stored under PG outage.
   } catch (err) {
     warn("consumePreview", err);
+    throw new PreviewStoreUnavailableError(err);
   }
 
+  // PG returned zero rows — preview may still live in memStore from a
+  // prior store-time PG outage. Same atomicity guarantee within this
+  // process: Map operations are synchronous, no double-take possible.
   const entry = memStore.get(previewId);
   if (!entry) return null;
   if (entry.userId !== userId) return null;

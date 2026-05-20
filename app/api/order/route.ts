@@ -4,7 +4,7 @@ import { z } from "zod/v4";
 import { getAuthAddress } from "@/lib/auth/session";
 import { getUser, getAccount, getMarketStats, getNord } from "@/lib/n1/client";
 import { resolveMarket, validateLeverage, ensureMarketCache, TIERS } from "@/lib/n1/constants";
-import { storePreview, consumePreview } from "@/lib/n1/preview-store";
+import { storePreview, consumePreview, PreviewStoreUnavailableError } from "@/lib/n1/preview-store";
 import { acquireCloseLock, releaseCloseLock } from "@/lib/n1/close-lock-store";
 import { RATE_LIMITS, safeRateLimit } from "@/lib/ratelimit";
 import { checkIdempotency, storeIdempotency } from "@/lib/idempotency";
@@ -331,6 +331,20 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ error: "Unknown action" }, { status: 400 });
   } catch (error) {
+    // Preview store unreachable — must NOT 500 (looks like a bug to the
+    // client) or 400 (says "your input is bad"). 503 telegraphs "infra
+    // is briefly degraded, retry shortly". Critical: do NOT let the
+    // catch above silently swallow this — a 500 here followed by client
+    // retry would just re-throw on the next consumePreview call.
+    if (error instanceof PreviewStoreUnavailableError) {
+      Sentry.captureException(error, {
+        tags: { endpoint: "order", reason: "preview_store_unavailable" },
+      });
+      return NextResponse.json(
+        { error: "Order execution temporarily unavailable" },
+        { status: 503 },
+      );
+    }
     Sentry.captureException(error, { tags: { endpoint: "order" } });
     return NextResponse.json(
       { error: "Failed to process order" },
