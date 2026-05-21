@@ -8,6 +8,8 @@
  * - Debounced writes — don't hammer the API on every keystroke
  */
 
+import { apiFetch } from "@/lib/apiFetch";
+
 // Per-session debounce to avoid cancelling syncs for different sessions
 const syncTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -85,7 +87,7 @@ export function syncSessionToDb(
     pendingSyncs.delete(sessionId);
     try {
       // Upsert the session
-      await fetch("/api/history/sessions", {
+      await apiFetch("/api/history/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: sessionId, title }),
@@ -93,7 +95,7 @@ export function syncSessionToDb(
 
       // Sync messages
       if (messages.length > 0) {
-        await fetch("/api/history/messages", {
+        await apiFetch("/api/history/messages", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ sessionId, messages }),
@@ -110,7 +112,7 @@ export function syncSessionToDb(
  */
 export async function deleteSessionFromDb(sessionId: string) {
   try {
-    await fetch(`/api/history/sessions?id=${encodeURIComponent(sessionId)}`, {
+    await apiFetch(`/api/history/sessions?id=${encodeURIComponent(sessionId)}`, {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
     });
@@ -166,7 +168,7 @@ export async function recordSwap(data: {
   txHash?: string;
 }): Promise<string | null> {
   try {
-    const res = await fetch("/api/history/swaps", {
+    const res = await apiFetch("/api/history/swaps", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
@@ -184,7 +186,7 @@ export async function recordSwap(data: {
  */
 export async function updateSwapStatus(id: string, status: "confirmed" | "failed", txHash?: string) {
   try {
-    await fetch("/api/history/swaps", {
+    await apiFetch("/api/history/swaps", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id, status, txHash }),

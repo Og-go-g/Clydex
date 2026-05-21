@@ -6,6 +6,7 @@ import { useWallet as useSolanaWallet } from "@solana/wallet-adapter-react";
 import { PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import { useToast } from "@/components/alerts/ToastProvider";
+import { apiFetch } from "@/lib/apiFetch";
 
 // ─── Types ─────────────────────────────────────────────────────
 
@@ -549,7 +550,7 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
     // Optimistic remove — restored by re-fetch on error.
     setOpenPositions((prev) => prev.filter((p) => p.marketId !== marketId));
     try {
-      const res = await fetch("/api/copy/close-position", {
+      const res = await apiFetch("/api/copy/close-position", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ marketId }),
@@ -608,7 +609,7 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
     setTermsRecording(true);
     setError(null);
     try {
-      const ar = await fetch("/api/terms/accept", {
+      const ar = await apiFetch("/api/terms/accept", {
         method: "POST",
         // Content-Type header is required by middleware on every mutating
         // request — without it the response is 415 and the user sees an
@@ -665,7 +666,7 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
       const messageBytes = new TextEncoder().encode(activationMessage);
       const walletSig = await signMessage(messageBytes);
 
-      const res = await fetch("/api/copy/activate", {
+      const res = await apiFetch("/api/copy/activate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -695,7 +696,7 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
 
   const handleDeactivate = async () => {
     try {
-      const res = await fetch("/api/copy/activate", { method: "DELETE" });
+      const res = await apiFetch("/api/copy/activate", { method: "DELETE" });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         addToast({ type: "error", title: "Disable Failed", message: data.error ?? "Unknown error" });
@@ -712,7 +713,7 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
 
   const handleToggle = async (subId: string, active: boolean) => {
     try {
-      await fetch("/api/copy/subscribe", {
+      await apiFetch("/api/copy/subscribe", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: subId, active }),
@@ -725,7 +726,7 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
 
   const handleSaveSettings = async (subId: string, settings: Record<string, unknown>) => {
     try {
-      const res = await fetch("/api/copy/subscribe", {
+      const res = await apiFetch("/api/copy/subscribe", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: subId, ...settings }),
@@ -749,7 +750,7 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
     try {
       const params = new URLSearchParams({ leader: target });
       if (closePositions) params.set("closePositions", "true");
-      const res = await fetch(`/api/copy/subscribe?${params}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/copy/subscribe?${params}`, { method: "DELETE" });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         // PRE-2026-05-16 this path silently called fetchStatus and

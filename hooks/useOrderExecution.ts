@@ -6,6 +6,7 @@ import { useWallet as useSolanaWallet } from "@solana/wallet-adapter-react";
 import { PublicKey } from "@solana/web3.js";
 import type { NordUser } from "@n1xyz/nord-ts";
 import { isSessionError } from "@/lib/n1/session-errors";
+import { apiFetch } from "@/lib/apiFetch";
 
 type ExecStatus = "idle" | "signing" | "submitting" | "verifying" | "confirmed" | "error";
 
@@ -423,7 +424,7 @@ export function useOrderExecution() {
         };
 
         if (orderData.previewId) {
-          const consumeRes = await fetch("/api/order", {
+          const consumeRes = await apiFetch("/api/order", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ action: "execute", previewId: orderData.previewId }),
@@ -533,7 +534,7 @@ export function useOrderExecution() {
       // a close that'll race with another tab's already-in-flight close.
       let serverLockAcquired = false;
       try {
-        const lockRes = await fetch("/api/order", {
+        const lockRes = await apiFetch("/api/order", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action: "close-acquire", symbol: data.market, side: data.side }),
@@ -553,7 +554,7 @@ export function useOrderExecution() {
         // Step 1: Consume preview server-side (only if previewId exists from chat flow)
         // Close from confirmed position card has no previewId — skip consume
         if (data.previewId) {
-          const consumeRes = await fetch("/api/order", {
+          const consumeRes = await apiFetch("/api/order", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ action: "execute", previewId: data.previewId }),
@@ -605,7 +606,7 @@ export function useOrderExecution() {
         const ck = `${data.market}:${data.side}`;
         closingMarkets.delete(ck);
         if (serverLockAcquired) {
-          void fetch("/api/order", {
+          void apiFetch("/api/order", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ action: "close-release", symbol: data.market, side: data.side }),

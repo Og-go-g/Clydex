@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useNordMarketTicker } from "@/hooks/useNordMarketTicker";
+import { apiFetch } from "@/lib/apiFetch";
 
 // Copy-trading close modal. Mirrors the look-and-feel of
 // `components/collateral/ClosePositionModal.tsx` but talks to the
@@ -85,7 +86,7 @@ export function CloseCopyPositionModal({ isOpen, data, onClose, onSuccess }: Pro
     setStep("submitting");
     setErrorMsg(null);
     try {
-      const res = await fetch("/api/copy/close-position", {
+      const res = await apiFetch("/api/copy/close-position", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ marketId: data.marketId }),

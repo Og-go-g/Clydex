@@ -3,6 +3,7 @@
 import { useState, useCallback, useEffect } from "react";
 import { useAuth } from "@/lib/auth/context";
 import { trackInteraction } from "@/lib/util/track-interaction";
+import { apiFetch } from "@/lib/apiFetch";
 import type { LeaderboardEntry } from "./CompactLeaderboard";
 
 type Step = "input" | "confirm" | "submitting" | "success" | "error";
@@ -270,7 +271,7 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
       if (maxTotal) body.maxTotalPositionUsdc = parseFloat(maxTotal);
       if (stopLoss) body.stopLossPct = parseFloat(stopLoss);
 
-      const res = await fetch("/api/copy/subscribe", {
+      const res = await apiFetch("/api/copy/subscribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

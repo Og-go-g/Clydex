@@ -22,13 +22,15 @@
  * to swallow network errors before they bubble to React.
  */
 
+import { apiFetch } from "@/lib/apiFetch";
+
 export type InteractionKind = "view" | "search" | "follow";
 
 export function trackInteraction(walletAddr: string, kind: InteractionKind): void {
   if (typeof window === "undefined") return;
   if (!walletAddr || walletAddr.startsWith("account:")) return;
 
-  void fetch("/api/track/account-interaction", {
+  void apiFetch("/api/track/account-interaction", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ walletAddr, kind }),

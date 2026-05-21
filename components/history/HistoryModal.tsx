@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import { apiFetch } from "@/lib/apiFetch";
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -234,7 +235,7 @@ export function HistoryModal({ isOpen, onClose }: HistoryModalProps) {
     setSyncing(true);
     setSyncResults(null);
     try {
-      const res = await fetch("/api/history/sync", {
+      const res = await apiFetch("/api/history/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
       });

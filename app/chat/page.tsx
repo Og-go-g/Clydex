@@ -9,6 +9,7 @@ import { useChatSessions } from "@/lib/chat/context";
 import { getMessages, saveMessages } from "@/lib/chat/store";
 import { syncSessionToDb } from "@/lib/chat/sync";
 import { useAuth } from "@/lib/auth/context";
+import { apiFetch } from "@/lib/apiFetch";
 import { useNordPrices } from "@/hooks/useNordPrices";
 import { useOrderExecution, isPreviewConsumed, isPreviewFailed, getConfirmedPosition } from "@/hooks/useOrderExecution";
 import { useOrderActions } from "@/hooks/useOrderActions";
@@ -543,9 +544,13 @@ function ChatContent({ chatId, chatMode, onModeChange }: { chatId: string; chatM
 
   // Stable transport per chat mode — doesn't change mid-conversation
   // because mode switch creates a new chat (handleModeChange above).
+  // `fetch: apiFetch` plugs the CSRF double-submit token into every
+  // streaming request the AI SDK sends (we POST to /api/chat[/copytrade],
+  // a mutating route).
   const transport = useMemo(
     () => new DefaultChatTransport({
       api: chatMode === "copytrade" ? "/api/chat/copytrade" : "/api/chat",
+      fetch: apiFetch,
     }),
     [chatMode],
   );

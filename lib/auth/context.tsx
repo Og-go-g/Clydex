@@ -11,6 +11,7 @@ import {
 } from "react";
 import { useWallet } from "@/lib/wallet/context";
 import { createSiwsMessage } from "@/lib/auth/siws";
+import { apiFetch, clearCsrfToken } from "@/lib/apiFetch";
 
 /* ------------------------------------------------------------------ */
 /*  Auth context — Sign-In with Solana state                          */
@@ -134,7 +135,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signOut = useCallback(async () => {
     try {
-      const res = await fetch("/api/auth/logout", {
+      const res = await apiFetch("/api/auth/logout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
       });
@@ -144,6 +145,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch {
       // Network error — still clear local session
     }
+    // CSRF token is now stale (associated with the burned session) —
+    // drop the in-memory cache so the next mutating call seeds a
+    // fresh one from /api/auth/csrf.
+    clearCsrfToken();
     rejectedRef.current = false;
     setSignInError(null);
     setSessionAddress(null);
@@ -181,11 +186,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!shouldLogout || logoutInFlightRef.current) return;
     logoutInFlightRef.current = true;
     const currentAddr = address;
-    fetch("/api/auth/logout", {
+    apiFetch("/api/auth/logout", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
     })
       .finally(() => {
+        clearCsrfToken();
         logoutInFlightRef.current = false;
         // Address changed during fetch — a new effect cycle will handle it
         if (addressRef.current !== currentAddr) return;

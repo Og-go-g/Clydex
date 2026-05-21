@@ -5,6 +5,7 @@ import { useAuth } from "@/lib/auth/context";
 import { useCollateral } from "@/hooks/useCollateral";
 import { useWallet as useSolanaWallet } from "@solana/wallet-adapter-react";
 import { useVerification } from "@/components/collateral/VerificationProvider";
+import { apiFetch } from "@/lib/apiFetch";
 
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const USDC_DECIMALS = 6;
@@ -91,7 +92,7 @@ export function DepositWithdrawModal({
       return;
     }
     try {
-      const res = await fetch("/api/solana-rpc", {
+      const res = await apiFetch("/api/solana-rpc", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -221,7 +222,7 @@ export function DepositWithdrawModal({
     setErrorMsg(null);
 
     try {
-      const res = await fetch("/api/collateral", {
+      const res = await apiFetch("/api/collateral", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: tab, amount: parsedAmount }),
@@ -286,7 +287,7 @@ export function DepositWithdrawModal({
         // requests without `application/json` with a 415, which would
         // surface here as the unhelpful "Could not record acceptance"
         // toast even though the endpoint itself works fine.
-        const acceptRes = await fetch("/api/terms/accept", {
+        const acceptRes = await apiFetch("/api/terms/accept", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: "{}",

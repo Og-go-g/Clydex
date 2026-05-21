@@ -12,6 +12,7 @@ import { useOrderActions } from "@/hooks/useOrderActions";
 import { useNordAccount } from "@/hooks/useNordAccount";
 import { useNordWsHealth } from "@/hooks/useNordWsHealth";
 import { isNordWsEnabledForSession } from "@/lib/feature-flags";
+import { apiFetch } from "@/lib/apiFetch";
 
 // Minimum position size threshold — positions below this are treated as dust/zero
 const MIN_POS_SIZE = 1e-12;
@@ -264,7 +265,7 @@ export default function PortfolioPage() {
   const triggerHSync = useCallback(async () => {
     setHSyncing(true); setHSyncResults(null);
     try {
-      const res = await fetch("/api/history/sync", { method: "POST", headers: { "Content-Type": "application/json" } });
+      const res = await apiFetch("/api/history/sync", { method: "POST", headers: { "Content-Type": "application/json" } });
       if (res.ok) {
         const b = await res.json();
         setHSyncResults(b.results);
