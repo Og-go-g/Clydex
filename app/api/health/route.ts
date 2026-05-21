@@ -15,7 +15,7 @@
  * detail on failure. Cache-Control: no-store so intermediaries never
  * memoize a healthy response past a real outage.
  *
- * Exempt from middleware (rate-limit + CSRF) — see middleware.ts. This
+ * Exempt from middleware (rate-limit + CSRF) — see proxy.ts. This
  * lets docker hammer it every 30s without burning the rate-limit bucket
  * shared with real /api/* traffic.
  *

@@ -144,24 +144,52 @@ const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 // ─── Middleware ───────────────────────────────────────────────
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
   const isApi = pathname.startsWith("/api/");
 
   // Generate one nonce per request and use it for the CSP header on
-  // every response we return below. The same nonce is also pushed
-  // into the request headers as `x-nonce` so server components can
-  // read it via `headers().get('x-nonce')` for any custom inline
-  // scripts they emit. Next.js's own hydration scripts pick up the
-  // nonce automatically from this same header.
+  // every response we return below.
+  //
+  // Two headers, two consumers:
+  //
+  //   1. `Content-Security-Policy` on the *request* (forwarded via
+  //      NextResponse.next({ request: { headers } })). Next.js's app
+  //      renderer reads `request.headers['content-security-policy']`,
+  //      parses out the `'nonce-<x>'` token, and applies it to every
+  //      framework / page bundle script it emits. Without this, those
+  //      scripts ship without a `nonce` attribute and 'strict-dynamic'
+  //      refuses them — the 2026-05-21 black-screen mode.
+  //      See node_modules/next/dist/server/app-render/app-render.js:150.
+  //
+  //   2. `x-nonce` on the *request*. Purely for our own server
+  //      components to read via `headers().get('x-nonce')` when they
+  //      need to nonce a custom <Script>. Next.js does NOT use this
+  //      header for its own scripts — the doc claim "set x-nonce and
+  //      Next.js will auto-apply" is misleading; the actual driver is
+  //      (1).
+  //
+  // Both are also echoed on the response so the browser enforces the
+  // same policy it was rendered against.
   const nonce = generateCspNonce();
-  const cspRelaxed = process.env.CSP_RELAXED === "true";
+  // Dev mode auto-relaxes: React injects `eval` for source-map and
+  // server-error reconstruction, so a strict 'strict-dynamic' policy
+  // would refuse it and break Fast Refresh. The CSP_RELAXED env flag
+  // is the prod escape hatch (set on Hetzner during the 2026-05-21
+  // rollback).
+  const cspRelaxed =
+    process.env.CSP_RELAXED === "true" ||
+    process.env.NODE_ENV === "development";
   const cspValue = buildCsp(nonce, cspRelaxed);
 
-  // Build the pass-through response with x-nonce on the request so
-  // it propagates to layout.tsx and friends.
+  // Build the pass-through request headers. Both the CSP (consumed by
+  // Next.js's app renderer for script nonce-tagging) and x-nonce
+  // (consumed by our server components) ride here.
   const passThroughHeaders = new Headers(request.headers);
   passThroughHeaders.set("x-nonce", nonce);
+  if (!cspRelaxed) {
+    passThroughHeaders.set("Content-Security-Policy", cspValue);
+  }
 
   // Helper: attach CSP header to any response we're about to return.
   // Returning early (rate limit, CSRF refuse, healthcheck) still
@@ -322,6 +350,20 @@ export const config = {
     // every chunk/image, and skips request paths that look like
     // direct asset hits (anything containing a dot in the last
     // segment — image.png, robots.txt, sitemap.xml, etc.).
-    "/((?!api|_next/static|_next/image|favicon.ico|.*\\.[a-z0-9]+$).*)",
+    //
+    // Prefetched RSC payloads (`next-router-prefetch` / `purpose:
+    // prefetch` headers) skip middleware too — they're JSON, not
+    // HTML, so they don't need a per-request CSP nonce and skipping
+    // them avoids burning a nonce per hover-prefetch. The actual
+    // navigation to the prefetched page runs middleware normally and
+    // picks up a fresh CSP nonce.
+    {
+      source:
+        "/((?!api|_next/static|_next/image|favicon.ico|.*\\.[a-z0-9]+$).*)",
+      missing: [
+        { type: "header", key: "next-router-prefetch" },
+        { type: "header", key: "purpose", value: "prefetch" },
+      ],
+    },
   ],
 };

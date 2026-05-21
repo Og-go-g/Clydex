@@ -210,7 +210,7 @@ function ensureCleanupTimer(): void {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Public API — what /api/* routes and middleware.ts call            */
+/*  Public API — what /api/* routes and proxy.ts call                 */
 /* ------------------------------------------------------------------ */
 
 /**

@@ -8,7 +8,7 @@
  * directly instead of pulling in Node `crypto`.
  *
  * The policy itself is documented at the call site
- * (middleware.ts → buildCsp comment block). Summary of decisions:
+ * (proxy.ts → buildCsp comment block). Summary of decisions:
  *
  *  - script-src     : `'self' 'nonce-<x>' 'strict-dynamic'` so
  *                     Next.js hydration + its dynamically-loaded
@@ -31,10 +31,17 @@
  */
 
 /**
- * Per-request CSP nonce. Caller must pass the result to both:
- *   - the `Content-Security-Policy` response header (via buildCsp), AND
- *   - the `x-nonce` request header so server components can read it
- *     via `next/headers#headers().get('x-nonce')`.
+ * Per-request CSP nonce. Caller must:
+ *   - put the full CSP header on the FORWARDED REQUEST headers (via
+ *     `NextResponse.next({ request: { headers } })`), so Next.js's app
+ *     renderer parses the nonce out of it and tags every framework /
+ *     page bundle script. This is the load-bearing one — without it
+ *     'strict-dynamic' refuses every script (2026-05-21 black-screen).
+ *   - put the same CSP header on the RESPONSE so the browser enforces it.
+ *   - optionally put the raw nonce in an `x-nonce` request header so
+ *     server components can read it for custom <Script nonce={...}/>
+ *     tags. Next.js itself does NOT use this header — it parses the
+ *     CSP header instead.
  *
  * Uses Web Crypto so it runs unchanged on the edge runtime.
  */
