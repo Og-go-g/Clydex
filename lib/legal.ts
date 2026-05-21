@@ -12,7 +12,15 @@ import { prisma } from "./db";
  * changes, jurisdiction changes, or anything that materially affects the
  * user's obligations or rights does.
  */
-export const CURRENT_TERMS_VERSION = "1.0";
+/**
+ * Version history:
+ *   1.0 (2026-05-17) — initial draft, Copy / Trade flows, deposit + risk.
+ *   1.1 (2026-05-21) — copy-session TTL tightened 30d → 7d (security
+ *                      hardening, per the C7 Week-1 deploy). The new
+ *                      sign_log + per-action policy + hash-chained
+ *                      audit added to the Privacy disclosure.
+ */
+export const CURRENT_TERMS_VERSION = "1.1";
 
 /**
  * Returns true if `walletAddr` has accepted the current ToS version.

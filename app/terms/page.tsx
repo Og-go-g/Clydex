@@ -6,8 +6,8 @@ export const metadata: Metadata = {
   description: "Terms governing the use of Clydex N1, a frontend interface for the 01 Exchange perpetual futures platform on Solana.",
 };
 
-const LAST_UPDATED = "2026-05-17";
-const VERSION = "1.0";
+const LAST_UPDATED = "2026-05-21";
+const VERSION = "1.1";
 
 export default function TermsPage() {
   return (
@@ -185,9 +185,11 @@ export default function TermsPage() {
         <p>
           For trading we generate an ephemeral session keypair held only in
           your browser memory; for copy trading the session secret is
-          encrypted server-side so the engine can mirror trades while you
-          are offline. Either may be revoked at any time by disconnecting
-          your wallet or disabling copy trading.
+          encrypted server-side with AES-256-GCM so the engine can mirror
+          trades while you are offline. Copy-trading session keys expire
+          after 7 days — you will be prompted to re-sign in your wallet
+          to continue copying. Either kind of session may be revoked at
+          any time by disconnecting your wallet or disabling copy trading.
         </p>
       </Section>
 

@@ -431,7 +431,7 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
         // Transient unavailability (DB hiccup). Don't flip loading→
         // false: if it's an initial-mount race, that would briefly
         // show the "Enable Copy Trading" screen even though the user
-        // has a live 30-day session in the DB. Schedule one retry.
+        // has a live 7-day session in the DB. Schedule one retry.
         // For subsequent polls (status already set) we also retry —
         // the prior status stays visible while we recheck.
         setTimeout(() => { fetchStatus(); }, 3_000);
@@ -850,7 +850,7 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
               </p>
               <p className="flex items-start gap-1.5">
                 <span className="text-emerald-500 mt-0.5">✓</span>
-                Session expires in 30 days — disable anytime
+                Session expires in 7 days — disable anytime
               </p>
               <p className="flex items-start gap-1.5">
                 <span className="text-emerald-500 mt-0.5">✓</span>

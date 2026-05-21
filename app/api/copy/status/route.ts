@@ -84,7 +84,7 @@ export async function GET() {
     // PRE-2026-05-16 this branch returned a fake "empty session" body
     // (sessionActive:false, subscriptions:[]) on ECONNREFUSED so local
     // dev wouldn't crash. On PROD this masked transient DB hiccups
-    // (pool exhaustion, brief network blip) as "you lost your 30-day
+    // (pool exhaustion, brief network blip) as "you lost your 7-day
     // session and all your subscriptions" — user reloads, sees the
     // activate UI, clicks Enable, and the active DB session gets
     // overwritten by a fresh wallet sign. Same mask also made

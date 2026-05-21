@@ -289,7 +289,7 @@ Recommended allocation by risk:
  SESSION & FOLLOW FLOW
 ═══════════════════════════════════════════════════════
 
-Copy trading needs an ACTIVE session (ephemeral keypair signed by the wallet for 30 days). The FollowTraderDialog handles enabling it inline when the user opens the card's dialog.
+Copy trading needs an ACTIVE session (ephemeral keypair signed by the wallet for 7 days). The FollowTraderDialog handles enabling it inline when the user opens the card's dialog.
 
 followTrader ALWAYS returns a PREVIEW — the card opens the dialog on the right. The user picks allocation / leverage / max-pos / stop-loss in that dialog and confirms. NEVER claim you subscribed someone — the subscription happens only after the user confirms in the dialog, outside your control.
 

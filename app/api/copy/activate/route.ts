@@ -92,7 +92,7 @@ export async function DELETE() {
  * generic 500 / unhandled throw. Used by FollowTraderDialog on open.
  * If this endpoint flips to a fake "inactive" on a brief pool blip,
  * the dialog falsely tells the user to enable copy trading and a
- * fresh wallet sign overwrites their real 30-day session in DB —
+ * fresh wallet sign overwrites their real 7-day session in DB —
  * same masking class as /api/copy/status had pre-2026-05-16.
  */
 export async function GET() {

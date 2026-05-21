@@ -116,7 +116,7 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
   //
   // 503 from /api/copy/activate (DB transient) is NOT treated as
   // "inactive" — that would prompt the user to re-enable and
-  // overwrite their real 30-day session. We re-poll once, and if
+  // overwrite their real 7-day session. We re-poll once, and if
   // still 503 we leave sessionActive as null (the UI shows a
   // loading state instead of the enable prompt).
   useEffect(() => {

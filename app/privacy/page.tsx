@@ -6,8 +6,8 @@ export const metadata: Metadata = {
   description: "How Clydex N1 collects, uses, and protects information when you use the service.",
 };
 
-const LAST_UPDATED = "2026-05-17";
-const VERSION = "1.0";
+const LAST_UPDATED = "2026-05-21";
+const VERSION = "1.1";
 
 export default function PrivacyPage() {
   return (
@@ -66,7 +66,7 @@ export default function PrivacyPage() {
             your wallet&apos;s seed) is encrypted with AES-256-GCM and stored
             server-side so the engine can mirror trades while you are
             offline. The encrypted blob is deleted when you disable copy
-            trading or when the 30-day session expires.
+            trading or when the 7-day session expires.
           </li>
           <li>
             <strong className="text-white">Error telemetry.</strong> When a
@@ -168,7 +168,9 @@ export default function PrivacyPage() {
           </li>
           <li>
             <strong className="text-white">Copy-trading session key:</strong>{" "}
-            deleted when you disable copy trading or after 30 days.
+            deleted when you disable copy trading or after 7 days. Every
+            sign-on-your-behalf is recorded in a hash-chained audit log
+            you can inspect at any time via the Copy Trading panel.
           </li>
           <li>
             <strong className="text-white">Trading / portfolio cache:</strong>{" "}
