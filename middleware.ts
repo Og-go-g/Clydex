@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { generateCspNonce, buildCsp } from "@/lib/security/csp";
 
 /**
  * Edge-runtime middleware: coarse, IP-keyed rate limit + CSRF/Content-Type
@@ -129,10 +130,49 @@ function maybeCleanup(): void {
 
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
+// ─── CSP nonce — see lib/security/csp.ts for the full directive set
+//     and the rationale behind each one. Per-request nonce closes the
+//     XSS-via-inline-script vector that the previous static
+//     'unsafe-inline' CSP left open. CSP_RELAXED=true reverts to the
+//     old behaviour as a no-redeploy rollback. ────────────────────
+
 // ─── Middleware ───────────────────────────────────────────────
 
 export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname;
+  const isApi = pathname.startsWith("/api/");
+
+  // Generate one nonce per request and use it for the CSP header on
+  // every response we return below. The same nonce is also pushed
+  // into the request headers as `x-nonce` so server components can
+  // read it via `headers().get('x-nonce')` for any custom inline
+  // scripts they emit. Next.js's own hydration scripts pick up the
+  // nonce automatically from this same header.
+  const nonce = generateCspNonce();
+  const cspRelaxed = process.env.CSP_RELAXED === "true";
+  const cspValue = buildCsp(nonce, cspRelaxed);
+
+  // Build the pass-through response with x-nonce on the request so
+  // it propagates to layout.tsx and friends.
+  const passThroughHeaders = new Headers(request.headers);
+  passThroughHeaders.set("x-nonce", nonce);
+
+  // Helper: attach CSP header to any response we're about to return.
+  // Returning early (rate limit, CSRF refuse, healthcheck) still
+  // needs the header so the error page itself can't be a CSP gap.
+  function withCsp(res: NextResponse): NextResponse {
+    res.headers.set("Content-Security-Policy", cspValue);
+    return res;
+  }
+
+  // Non-API path: HTML page or static asset. Rate-limit + CSRF do
+  // not apply (those are mutation-flow concerns). Just attach the
+  // CSP header and propagate x-nonce.
+  if (!isApi) {
+    return withCsp(
+      NextResponse.next({ request: { headers: passThroughHeaders } }),
+    );
+  }
 
   // /api/health is hit every 30s by the Docker healthcheck and possibly
   // continuously by external uptime monitors. Bypass rate-limiting and
@@ -219,5 +259,14 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: "/api/:path*",
+  matcher: [
+    // API routes: rate-limit + CSRF + Content-Type checks.
+    "/api/:path*",
+    // Page routes: nonce + CSP header. The negative lookahead excludes
+    // Next.js static internals so we don't pay middleware cost on
+    // every chunk/image, and skips request paths that look like
+    // direct asset hits (anything containing a dot in the last
+    // segment — image.png, robots.txt, sitemap.xml, etc.).
+    "/((?!api|_next/static|_next/image|favicon.ico|.*\\.[a-z0-9]+$).*)",
+  ],
 };

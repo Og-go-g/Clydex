@@ -30,11 +30,11 @@ const nextConfig = {
             key: "Permissions-Policy",
             value: "camera=(), microphone=(), geolocation=(), payment=(), usb=(), bluetooth=(), interest-cohort=()",
           },
-          {
-            key: "Content-Security-Policy",
-            value:
-              "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: https: blob:; connect-src 'self' https://zo-mainnet.n1.xyz wss://zo-mainnet.n1.xyz https://api.mainnet-beta.solana.com https://01.xyz; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'; worker-src 'self' blob:",
-          },
+          // Content-Security-Policy moved into middleware.ts so each
+          // request can carry a fresh per-request nonce. Setting it
+          // statically here would either force 'unsafe-inline' (the
+          // baseline we're trying to remove) or refuse Next.js's own
+          // hydration scripts. See middleware.ts buildCsp().
         ],
       },
       {
