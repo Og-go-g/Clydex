@@ -286,6 +286,14 @@ export async function middleware(request: NextRequest) {
       const verdict = verifyCsrfPair({ headerToken, cookieToken });
       if (!verdict.ok) {
         const strict = process.env.CSRF_STRICT === "true";
+        // Single-line warn-log so `docker compose logs worker | grep csrf-warn`
+        // (or the same on the app container) gives a rate count. We
+        // don't fire a Sentry event from middleware — edge runtime
+        // doesn't share the Node Sentry client and emitting from here
+        // would balloon bundle size for nothing the log can't show.
+        console.warn(
+          `[csrf-warn] path=${pathname} method=${request.method} reason=${verdict.reason} strict=${strict}`,
+        );
         if (strict) {
           return NextResponse.json(
             { error: "Forbidden: CSRF check failed" },
