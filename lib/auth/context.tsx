@@ -47,7 +47,7 @@ export function useAuth() {
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const { address, signMessage } = useWallet();
+  const { address, signMessage, isConnecting } = useWallet();
   const [sessionAddress, setSessionAddress] = useState<string | null>(null);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const isSigningInRef = useRef(false);
@@ -178,8 +178,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [address, sessionAddress, isSigningIn, sessionChecked, signIn]);
 
   // Server-side logout when wallet detaches or swaps to a different pubkey.
+  //
+  // CRITICAL race fix (2026-05-21):
+  //   Page-load order is roughly:
+  //     1. session cookie is read on the server → sessionAddress hydrates
+  //     2. wallet adapter starts autoConnect → isConnecting=true
+  //     3. wallet adapter finishes → address populates (or stays null if
+  //        the user has the wallet installed but denied / has no wallet)
+  //
+  //   Between steps 1 and 3 we briefly have `sessionAddress=X, address=null`,
+  //   which previously fired the shouldLogout branch BEFORE the wallet
+  //   adapter could finish reconnecting. That POSTed /api/auth/logout
+  //   which inserted `session_revocations.revokedAt = NOW()` server-side,
+  //   permanently blocking the user's existing session from validating
+  //   even after the wallet finished connecting. The next mutating call
+  //   (Disable, Deposit, etc.) returned 401 "Not authenticated".
+  //
+  //   We observed this in production after a deploy that caused users to
+  //   hard-refresh repeatedly (CSP-nonce blackscreen). The revocations
+  //   table showed wallets revoked during the reload-storm. Fix: wait
+  //   until BOTH the session check has finished AND the wallet adapter
+  //   is no longer in its `isConnecting` initial phase before deciding
+  //   whether to log out.
   const logoutInFlightRef = useRef(false);
   useEffect(() => {
+    if (!sessionChecked || isConnecting) return;
+
     const shouldLogout =
       (!address && sessionAddress) ||
       (address && sessionAddress && address !== sessionAddress);
@@ -197,7 +221,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (addressRef.current !== currentAddr) return;
         setSessionAddress(null);
       });
-  }, [address, sessionAddress]);
+  }, [address, sessionAddress, sessionChecked, isConnecting]);
 
   return (
     <AuthContext.Provider
