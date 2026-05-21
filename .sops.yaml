@@ -1,0 +1,27 @@
+# sops encryption config.
+#
+# Picks the encryption key automatically based on the file path /
+# regex. The current setup encrypts to a SINGLE age recipient (the
+# local dev key) for `.env*` files; production will add a second
+# recipient when the prod age key is generated on Hetzner — see
+# docs/runbooks/secrets-rotation.md.
+#
+# Adding a new recipient (e.g. a teammate):
+#   1. They run `age-keygen -o ~/.config/sops/age/keys.txt`
+#   2. They share `# public key: age1...` from that file
+#   3. Append it under `age:` below, separated by `,`
+#   4. Run `sops updatekeys .env.local.sops` to re-encrypt for the
+#      new recipient set.
+#
+# Rotation:
+#   - Generate a fresh age key, swap the `age:` entry, run
+#     `sops updatekeys` on every encrypted file, destroy the old key.
+#   - The encrypted ciphertext stays the same shape — only the DEK
+#     envelope at the bottom of the file changes.
+creation_rules:
+  # Match `.env`, `.env.local`, `.env.prod`, etc. — anything that
+  # looks like a dotenv. Encrypted output convention is to add a
+  # `.sops` suffix (e.g. `.env.local.sops`), which this regex also
+  # matches so re-encrypts pick up the same recipient list.
+  - path_regex: "\\.env(\\..*)?(\\.sops)?$"
+    age: age1aflqjxfetupfc8nf26xpz2ua3g8nkalrpgd62pjlpn8grws3n3tqktqh05

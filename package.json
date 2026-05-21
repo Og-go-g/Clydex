@@ -9,7 +9,11 @@
     "sync:history": "tsx scripts/sync-all-history.ts",
     "start": "next start",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "env:encrypt": "sops --encrypt --input-type=dotenv --output-type=dotenv .env.local > .env.local.sops && echo 'wrote .env.local.sops'",
+    "env:decrypt": "scripts/env-decrypt.sh",
+    "env:edit": "sops --input-type=dotenv --output-type=dotenv .env.local.sops",
+    "env:check": "scripts/env-precommit-check.sh"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.50",

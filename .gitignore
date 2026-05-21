@@ -5,7 +5,8 @@ node_modules/
 .next/
 out/
 
-# Environment variables
+# Environment variables — PLAINTEXT only. Encrypted (.sops) variants
+# are re-allowed below; they are safe to commit.
 .env
 .env.local
 .env.production
@@ -13,6 +14,12 @@ out/
 .env.staging
 .env.test
 .env.*.local
+# Allow the encrypted forms back in.
+!*.sops
+
+# Age private keys — local-only, never commit.
+*.age-key
+keys.txt
 
 # IDE
 .vscode/
