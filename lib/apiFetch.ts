@@ -105,7 +105,18 @@ export async function apiFetch(
   input: RequestInfo | URL,
   init: RequestInit = {},
 ): Promise<Response> {
-  const method = (init.method ?? "GET").toUpperCase();
+  // Method can live either on `init` (the canonical app call shape:
+  // `apiFetch(url, { method: 'POST', ... })`) or on a Request object
+  // passed as the only argument (what @solana/web3.js's Connection
+  // does internally). Prefer init when both are set — that matches
+  // global fetch precedence.
+  const methodRaw =
+    init.method ??
+    (typeof Request !== "undefined" && input instanceof Request
+      ? input.method
+      : undefined) ??
+    "GET";
+  const method = methodRaw.toUpperCase();
   if (!MUTATING_METHODS.has(method)) {
     return fetch(input, init);
   }

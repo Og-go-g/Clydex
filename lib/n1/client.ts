@@ -1,10 +1,11 @@
 import { Nord } from "@n1xyz/nord-ts";
-import { Connection } from "@solana/web3.js";
+import { Connection, type ConnectionConfig } from "@solana/web3.js";
 import {
   N1_MAINNET_URL,
   N1_APP_ID,
   SOLANA_MAINNET_RPC,
 } from "./constants";
+import { apiFetch } from "@/lib/apiFetch";
 
 // ─── Singleton Nord Client (public data, no auth) ───────────────
 
@@ -30,9 +31,23 @@ export async function getNord(): Promise<Nord> {
 
     const apiUrl = process.env.N1_API_URL || N1_MAINNET_URL;
 
+    // On the browser path the RPC traffic is POST → /api/solana-rpc,
+    // which sits behind our middleware's CSRF check. web3.js's
+    // default Connection uses raw fetch and ships no CSRF header,
+    // so every RPC call logs `[csrf-warn] /api/solana-rpc` (and
+    // will outright 403 once CSRF_STRICT flips). Route the
+    // Connection through apiFetch so each request carries the
+    // double-submit token. Server-side keeps the default fetch —
+    // there's no document.cookie to read and no CSRF cookie in the
+    // node-side flow.
+    const connectionConfig: ConnectionConfig = { commitment: "confirmed" };
+    if (isBrowser) {
+      connectionConfig.fetch = apiFetch as ConnectionConfig["fetch"];
+    }
+
     initPromise = Nord.new({
       app: N1_APP_ID,
-      solanaConnection: new Connection(rpcUrl, "confirmed"),
+      solanaConnection: new Connection(rpcUrl, connectionConfig),
       webServerUrl: apiUrl,
     }).then((nord) => {
       nordInstance = nord;
