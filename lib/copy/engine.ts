@@ -6,6 +6,7 @@ import { getAccount, getUser, getMarketStats } from "../n1/client";
 import { placeOrder, closePosition, setTrigger } from "../n1/user-client";
 import { verifySigningPolicy } from "../copytrade/signing-policy";
 import { isCopyTradingPaused } from "../copytrade/kill-switch";
+import { appendSignLog, type SignLogEntry } from "../copytrade/sign-log";
 import { ensureMarketCache, getCachedMarkets } from "../n1/constants";
 import { restoreNordUser } from "./norduser-restore";
 import {
@@ -553,6 +554,41 @@ async function executeCopyForFollower(
     },
     action: diff.action,
   });
+
+  // Build the sign-log entry from the same context we just policy-checked.
+  // Append happens RIGHT AFTER the verdict so the log records every
+  // sign attempt — approved AND refused — with the exact params the
+  // engine was about to commit. An attacker who later silently
+  // re-writes a row breaks the chain; the chain root is mirrored
+  // off-box (Week 4 ops work) so even DB compromise is detectable.
+  const signLogEntry: SignLogEntry = {
+    followerWallet: follower.followerAddr,
+    leaderWallet: follower.leaderAddr,
+    action: diff.action,
+    marketId: diff.marketId,
+    symbol: diff.symbol,
+    side: diff.side,
+    size: roundedSize,
+    leverage: leverageMult,
+    slippage: DEFAULT_SLIPPAGE,
+    markPrice,
+    policyResult: policyVerdict.ok ? "approved" : `refused:${policyVerdict.reason}`,
+    signedAt: new Date(),
+  };
+  // Fire-and-forget — a sign-log write failure must NOT block the
+  // actual order. The engine's worst case is one missing audit row;
+  // the chain still validates around the gap (next row's prev_hash
+  // skips to the row before the missing one and verifyChain reports
+  // the break at that point). Sentry captures the underlying error
+  // so an outage of sign-log writes is observable.
+  void appendSignLog(signLogEntry).catch((err) => {
+    Sentry.captureException(err, {
+      level: "warning",
+      tags: { component: "copy-engine", event: "sign-log-write-failed" },
+      extra: { walletAddr: follower.followerAddr.slice(0, 8), action: diff.action },
+    });
+  });
+
   if (!policyVerdict.ok) {
     Sentry.captureMessage(`[copy-engine] signing policy refused`, {
       level: "warning",
