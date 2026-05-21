@@ -28,9 +28,14 @@ const nextConfig = {
           },
           {
             key: "Permissions-Policy",
-            value: "camera=(), microphone=(), geolocation=(), payment=(), usb=(), bluetooth=(), interest-cohort=()",
+            // `interest-cohort=()` was here historically — it's an
+            // obsolete FLoC opt-out that no current browser
+            // recognises. Chrome logs a yellow warning on every
+            // page load. Removed; we use `Referrer-Policy` /
+            // `connect-src` to keep tracking surface tight.
+            value: "camera=(), microphone=(), geolocation=(), payment=(), usb=(), bluetooth=()",
           },
-          // Content-Security-Policy moved into middleware.ts so each
+          // Content-Security-Policy moved into proxy.ts so each
           // request can carry a fresh per-request nonce. Setting it
           // statically here would either force 'unsafe-inline' (the
           // baseline we're trying to remove) or refuse Next.js's own
