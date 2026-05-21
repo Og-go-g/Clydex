@@ -336,7 +336,11 @@ export function HistoryModal({ isOpen, onClose }: HistoryModalProps) {
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 backdrop-blur-sm" onClick={onClose}>
       <div
-        className="relative mx-4 my-8 w-full max-w-6xl rounded-2xl border border-[#262626] bg-[#0a0a0a] shadow-2xl"
+        // overflow-hidden clips the inner scrollable body's sticky
+        // header background + scrollbar to the rounded corners —
+        // without it the grey poked out past the bottom corners on
+        // the trades / orders tabs.
+        className="relative mx-4 my-8 w-full max-w-6xl overflow-hidden rounded-2xl border border-[#262626] bg-[#0a0a0a] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

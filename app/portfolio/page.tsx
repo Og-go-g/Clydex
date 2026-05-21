@@ -1087,7 +1087,11 @@ export default function PortfolioPage() {
 
           {/* ─── History tab content ──────────────────────────── */}
           {isHistoryTab && (
-            <div className="rounded-2xl border border-border bg-card/50 backdrop-blur-sm">
+            // overflow-hidden clips the sticky-header bg and the inner
+            // scrollbar to the parent's rounded shape — without it the
+            // gray header background and the scrollbar column poke out
+            // past the rounded corners.
+            <div className="overflow-hidden rounded-2xl border border-border bg-card/50 backdrop-blur-sm">
               {hSyncing && (
                 <div className="border-b border-emerald-500/20 bg-emerald-500/5 px-4 py-2">
                   <div className="flex items-center gap-2 text-xs text-emerald-400">
