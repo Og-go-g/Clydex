@@ -34,6 +34,14 @@ export async function selectAccountsForTier(
 }
 
 async function selectTier1(copyLeaderAddrs: string[]): Promise<TierAccount[]> {
+  // The outer GROUP BY collapses any accountId that lands in BOTH the
+  // top500 PnL set AND the active-copy-leader set. Without it, the
+  // UNION emits two rows for the same accountId with different
+  // reasons, `upsertTierMembership`'s `ON CONFLICT ("accountId") DO
+  // UPDATE` sees the duplicate target, and Postgres throws
+  // "ON CONFLICT DO UPDATE command cannot affect row a second time".
+  // 'copy_leader' wins over 'top500' — both are valid reasons but the
+  // leader status is the more informative one for a human auditor.
   return query<TierAccount>(
     `WITH top500 AS (
        SELECT "accountId", "walletAddr", 'top500' AS reason
@@ -46,23 +54,44 @@ async function selectTier1(copyLeaderAddrs: string[]): Promise<TierAccount[]> {
        SELECT DISTINCT pt."accountId", pt."walletAddr", 'copy_leader' AS reason
        FROM pnl_totals pt
        WHERE pt."walletAddr" = ANY($1::text[])
+     ),
+     combined AS (
+       SELECT "accountId", "walletAddr", reason FROM top500
+       UNION ALL
+       SELECT "accountId", "walletAddr", reason FROM leaders
      )
-     SELECT "accountId", "walletAddr", reason FROM top500
-     UNION
-     SELECT "accountId", "walletAddr", reason FROM leaders`,
+     SELECT
+       "accountId",
+       MAX("walletAddr") AS "walletAddr",
+       CASE WHEN BOOL_OR(reason = 'copy_leader') THEN 'copy_leader'
+            ELSE 'top500' END AS reason
+     FROM combined
+     GROUP BY "accountId"`,
     [copyLeaderAddrs],
   );
 }
 
 async function selectTier2(): Promise<TierAccount[]> {
+  // GROUP BY accountId so an account with multiple interaction kinds
+  // (e.g. both 'view' and 'follow' within the 7-day window) collapses
+  // to a single row. The pre-2026-05-21 query used `DISTINCT` over
+  // (accountId, walletAddr, reason), which kept two rows because the
+  // derived reason differed — and then `upsertTierMembership`'s
+  // ON CONFLICT ("accountId") refused to update the same row twice
+  // in one statement. Priority: follow > view > search.
   return query<TierAccount>(
-    `SELECT DISTINCT ai."accountId", ai."walletAddr",
-       CASE WHEN ai.kind = 'follow' THEN 'followed'
-            WHEN ai.kind = 'view'   THEN 'viewed'
-            ELSE 'searched' END AS reason
+    `SELECT
+       ai."accountId",
+       MAX(ai."walletAddr") AS "walletAddr",
+       CASE
+         WHEN BOOL_OR(ai.kind = 'follow') THEN 'followed'
+         WHEN BOOL_OR(ai.kind = 'view')   THEN 'viewed'
+         ELSE 'searched'
+       END AS reason
      FROM account_interactions ai
      WHERE ai."at" >= NOW() - INTERVAL '7 days'
-       AND ai."walletAddr" NOT LIKE 'account:%'`,
+       AND ai."walletAddr" NOT LIKE 'account:%'
+     GROUP BY ai."accountId"`,
   );
 }
 
