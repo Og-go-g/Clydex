@@ -1,5 +1,11 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { generateCspNonce, buildCsp } from "@/lib/security/csp";
+import {
+  CSRF_COOKIE_NAME,
+  CSRF_HEADER_NAME,
+  isCsrfExempt,
+  verifyCsrfPair,
+} from "@/lib/security/csrf";
 
 /**
  * Edge-runtime middleware: coarse, IP-keyed rate limit + CSRF/Content-Type
@@ -227,7 +233,7 @@ export async function middleware(request: NextRequest) {
     );
   }
 
-  // ── Content-Type + CSRF checks for mutating requests ──
+  // ── Content-Type + Origin/Host + CSRF checks for mutating requests ──
   if (MUTATING_METHODS.has(request.method)) {
     // DELETE requests without body don't need Content-Type
     const contentLength = request.headers.get("content-length");
@@ -252,6 +258,47 @@ export async function middleware(request: NextRequest) {
       }
     } catch {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
+    // ── CSRF double-submit token check ──
+    //
+    // Layered ON TOP of the Origin/Host check above for defense in
+    // depth (Origin can be spoofed in some edge cases — null
+    // origin from sandboxed iframes, browser bug). Verifies the
+    // `x-csrf-token` header matches the `clydex-csrf` cookie, both
+    // of which the legit client got from /api/auth/csrf and an
+    // attacker on a different origin can't read.
+    //
+    // Exempted paths (CSRF_EXEMPT_PATHS): /api/auth/csrf itself
+    // (the bootstrap), /api/auth/login + /api/auth/nonce (proven
+    // by SIWS signature instead), /api/admin/* (CRON_SECRET
+    // bearer), /api/health.
+    //
+    // Rollout flag CSRF_STRICT:
+    //   - unset / != "true" → warn-only. Mismatch fires a Sentry-
+    //     visible response header (`x-csrf-warning`) but the
+    //     request proceeds. Lets us migrate all 30+ call sites and
+    //     watch for late stragglers before flipping to enforce.
+    //   - "true" → enforced. Mismatch returns 403.
+    if (!isCsrfExempt(pathname)) {
+      const headerToken = request.headers.get(CSRF_HEADER_NAME);
+      const cookieToken = request.cookies.get(CSRF_COOKIE_NAME)?.value ?? null;
+      const verdict = verifyCsrfPair({ headerToken, cookieToken });
+      if (!verdict.ok) {
+        const strict = process.env.CSRF_STRICT === "true";
+        if (strict) {
+          return NextResponse.json(
+            { error: "Forbidden: CSRF check failed" },
+            { status: 403 },
+          );
+        }
+        // Warn-only: attach a header that downstream Sentry
+        // breadcrumbs / observability can pick up without breaking
+        // legitimate callers that haven't migrated yet.
+        const res = NextResponse.next();
+        res.headers.set("x-csrf-warning", verdict.reason);
+        return res;
+      }
     }
   }
 
