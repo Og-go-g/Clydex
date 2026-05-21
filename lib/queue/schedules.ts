@@ -64,7 +64,15 @@ export async function registerSchedules(boss: PgBoss): Promise<void> {
   // of runCopyEngine() spaced 15s apart, giving ~15s mirror-lag for copy
   // traders. Replaces the legacy host-level curl cron that was invisible
   // to code review and silently stopped when PG died on 2026-04-19.
+  await boss.createQueue(JOB.copyEngineTick);
   await boss.schedule(JOB.copyEngineTick, "* * * * *", {});
+
+  // Anomaly scan — every minute. Reads the last few minutes of sign_log
+  // looking for burst / refused-spike / mark-deviation / leverage-spike
+  // patterns. Cheap query set; idempotent via the dedup index on
+  // anomaly_alerts so retries don't double-alarm.
+  await boss.createQueue(JOB.anomalyScan);
+  await boss.schedule(JOB.anomalyScan, "* * * * *", {});
 
   console.log("[worker] schedules registered");
 }
@@ -81,5 +89,6 @@ export async function clearSchedules(boss: PgBoss): Promise<void> {
   await boss.unschedule(JOB.syncUsersEnqueuer);
   await boss.unschedule(JOB.resolveWallets);
   await boss.unschedule(JOB.copyEngineTick);
+  await boss.unschedule(JOB.anomalyScan);
   console.log("[worker] schedules cleared");
 }

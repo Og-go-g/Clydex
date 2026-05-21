@@ -16,6 +16,7 @@ import { handleSyncUsersEnqueuer } from "./sync-users-enqueuer";
 import { handleResolveWallets } from "./resolve-wallets";
 import { handleResolveWalletsBatch } from "./resolve-wallets-batch";
 import { handleCopyEngineTick } from "./copy-engine-tick";
+import { handleAnomalyScan } from "./anomaly-scan";
 
 const BATCH_CONCURRENCY = Number(process.env.WORKER_BATCH_CONCURRENCY || "5");
 const RESOLVE_CONCURRENCY = Number(process.env.RESOLVE_WALLETS_CONCURRENCY || "3");
@@ -114,12 +115,26 @@ export async function registerHandlers(boss: PgBoss): Promise<void> {
   );
 
   // Copy trading engine — 1 job/min, each runs 4 x 15s cycles
+  await boss.createQueue(JOB.copyEngineTick);
   await boss.work<Payloads[typeof JOB.copyEngineTick]>(
     JOB.copyEngineTick,
     { localConcurrency: 1 },
     async (jobs) => {
       for (const j of jobs) {
         await handleCopyEngineTick(j as AnyJob<Payloads[typeof JOB.copyEngineTick]>);
+      }
+    },
+  );
+
+  // Anomaly scan — 1 job/min. Cheap SELECT-only over sign_log; dedup
+  // unique index makes retries safe.
+  await boss.createQueue(JOB.anomalyScan);
+  await boss.work<Payloads[typeof JOB.anomalyScan]>(
+    JOB.anomalyScan,
+    { localConcurrency: 1 },
+    async (jobs) => {
+      for (const j of jobs) {
+        await handleAnomalyScan(j as AnyJob<Payloads[typeof JOB.anomalyScan]>);
       }
     },
   );
