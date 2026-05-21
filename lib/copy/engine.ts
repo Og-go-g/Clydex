@@ -746,11 +746,32 @@ async function executeCopyForFollower(
     // the ownership we optimistically claimed BEFORE the order — the
     // exchange has no record of the trade, so leaving ownership claimed
     // would block all future copies on this market from this follower.
+    //
+    // If the release itself fails (PG hiccup during a SDK failure window
+    // — possible but narrow), the ownership row is stranded: this
+    // follower can no longer copy this market until someone clears the
+    // row manually. We log it as a Sentry WARNING (not just console) so
+    // the operator gets paged the first time it happens — silent
+    // console.warn is exactly how we missed the 6-day PG outage in
+    // April. Future ops work: a periodic sweeper that cleans owner
+    // rows whose follower no longer has the on-chain position.
     if (isOpening) {
       try {
         await releaseOwnership(follower.followerAddr, diff.marketId);
       } catch (releaseErr) {
         console.warn("[copy-engine] failed to release ownership after order error:", releaseErr);
+        Sentry.captureException(releaseErr, {
+          level: "warning",
+          tags: { component: "copy-engine", event: "ownership-release-failed" },
+          extra: {
+            followerAddr: follower.followerAddr,
+            leaderAddr: follower.leaderAddr,
+            marketId: diff.marketId,
+            symbol: diff.symbol,
+            action: diff.action,
+            originalError: err instanceof Error ? err.message : String(err),
+          },
+        });
       }
     }
     let errorMsg: string;
