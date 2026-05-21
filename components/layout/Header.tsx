@@ -47,13 +47,17 @@ export function Header() {
     label: string;
     external?: boolean;
     badge?: string;
+    /** When true the item is rendered as a non-clickable greyed-out
+     * span. Used for SOON-style placeholders so users see the future
+     * tab but can't navigate to a half-finished destination. */
+    disabled?: boolean;
   }> = [
     { href: "/chat", label: "Chat" },
     { href: "/markets", label: "Markets" },
     { href: "/portfolio", label: "Portfolio" },
-    // External — friend's analytics site, still in build-out. The SOON
-    // badge tells users it's a preview link, not a polished surface.
-    { href: "https://n1stats.xyz/", label: "N1stats", external: true, badge: "SOON" },
+    // External — friend's analytics site, still in build-out. Disabled
+    // until the destination is ready; the SOON badge tells users why.
+    { href: "https://n1stats.xyz/", label: "N1stats", external: true, badge: "SOON", disabled: true },
   ];
 
   return (
@@ -72,13 +76,15 @@ export function Header() {
             <span className="text-lg font-semibold text-white">Clydex</span>
           </Link>
           <nav className="hidden items-center gap-6 md:flex">
-            {navItems.map(({ href, label, external, badge }) => {
-              const isActive = !external && (pathname === href || (href !== "/" && pathname.startsWith(href)));
-              const className = `relative text-sm transition-colors hover:text-white ${
-                isActive
-                  ? "text-white after:absolute after:bottom-[-0.25rem] after:left-0 after:right-0 after:h-[2px] after:bg-gradient-to-r after:from-emerald-400 after:to-emerald-400/10 after:animate-[tab-fill_0.3s_ease-out]"
-                  : "text-gray-500"
-              }`;
+            {navItems.map(({ href, label, external, badge, disabled }) => {
+              const isActive = !external && !disabled && (pathname === href || (href !== "/" && pathname.startsWith(href)));
+              const className = disabled
+                ? "relative text-sm text-gray-600 cursor-not-allowed select-none"
+                : `relative text-sm transition-colors hover:text-white ${
+                    isActive
+                      ? "text-white after:absolute after:bottom-[-0.25rem] after:left-0 after:right-0 after:h-[2px] after:bg-gradient-to-r after:from-emerald-400 after:to-emerald-400/10 after:animate-[tab-fill_0.3s_ease-out]"
+                      : "text-gray-500"
+                  }`;
               const content = (
                 <span className="inline-flex items-center gap-1.5">
                   {label}
@@ -89,6 +95,20 @@ export function Header() {
                   )}
                 </span>
               );
+              // Disabled: render as a non-interactive span — no href, no
+              // navigation, aria-disabled for screen readers.
+              if (disabled) {
+                return (
+                  <span
+                    key={href}
+                    className={className}
+                    aria-disabled="true"
+                    title="Coming soon"
+                  >
+                    {content}
+                  </span>
+                );
+              }
               return external ? (
                 <a
                   key={href}
@@ -226,12 +246,14 @@ export function Header() {
       {mobileNavOpen && (
         <div className="border-t border-[#262626] bg-[#0a0a0a]/95 md:hidden">
           <nav className="flex flex-col px-6 py-3">
-            {navItems.map(({ href, label, external, badge }) => {
-              const className = `flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm transition-colors ${
-                !external && pathname === href
-                  ? "bg-[#1a1a1a] text-white"
-                  : "text-gray-400 hover:text-white"
-              }`;
+            {navItems.map(({ href, label, external, badge, disabled }) => {
+              const className = disabled
+                ? "flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm text-gray-600 cursor-not-allowed select-none"
+                : `flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm transition-colors ${
+                    !external && pathname === href
+                      ? "bg-[#1a1a1a] text-white"
+                      : "text-gray-400 hover:text-white"
+                  }`;
               const content = (
                 <>
                   {label}
@@ -242,6 +264,17 @@ export function Header() {
                   )}
                 </>
               );
+              if (disabled) {
+                return (
+                  <span
+                    key={href}
+                    className={className}
+                    aria-disabled="true"
+                  >
+                    {content}
+                  </span>
+                );
+              }
               return external ? (
                 <a
                   key={href}
