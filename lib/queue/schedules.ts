@@ -74,6 +74,14 @@ export async function registerSchedules(boss: PgBoss): Promise<void> {
   await boss.createQueue(JOB.anomalyScan);
   await boss.schedule(JOB.anomalyScan, "* * * * *", {});
 
+  // pg-boss health scan — every 5 min. Detects cron jobs stuck in
+  // state=failed OR schedules that haven't completed in 2× their
+  // expected interval. Closes the silent-failure window that hid the
+  // 2026-05-21 tier-2 bug for 24 h. Sentry deduplicates repeat events
+  // so a sustained outage produces one issue, not 288 events/day.
+  await boss.createQueue(JOB.pgbossHealthScan);
+  await boss.schedule(JOB.pgbossHealthScan, "*/5 * * * *", {});
+
   console.log("[worker] schedules registered");
 }
 
@@ -90,5 +98,6 @@ export async function clearSchedules(boss: PgBoss): Promise<void> {
   await boss.unschedule(JOB.resolveWallets);
   await boss.unschedule(JOB.copyEngineTick);
   await boss.unschedule(JOB.anomalyScan);
+  await boss.unschedule(JOB.pgbossHealthScan);
   console.log("[worker] schedules cleared");
 }

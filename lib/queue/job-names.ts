@@ -13,6 +13,7 @@ export const JOB = {
   resolveWalletsBatch: "resolve-wallets-batch",
   copyEngineTick:      "copy-engine-tick",
   anomalyScan:         "anomaly-scan",
+  pgbossHealthScan:    "pgboss-health-scan",
 } as const;
 
 export type JobName = (typeof JOB)[keyof typeof JOB];
@@ -45,6 +46,7 @@ export interface Payloads {
   [JOB.resolveWalletsBatch]: { accountIds: number[] };
   [JOB.copyEngineTick]:      Record<string, never>;
   [JOB.anomalyScan]:         Record<string, never>;
+  [JOB.pgbossHealthScan]:    Record<string, never>;
 }
 
 // Priority ordering — higher runs first

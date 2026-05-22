@@ -17,6 +17,7 @@ import { handleResolveWallets } from "./resolve-wallets";
 import { handleResolveWalletsBatch } from "./resolve-wallets-batch";
 import { handleCopyEngineTick } from "./copy-engine-tick";
 import { handleAnomalyScan } from "./anomaly-scan";
+import { handlePgbossHealthScan } from "./pgboss-health-scan";
 
 const BATCH_CONCURRENCY = Number(process.env.WORKER_BATCH_CONCURRENCY || "5");
 const RESOLVE_CONCURRENCY = Number(process.env.RESOLVE_WALLETS_CONCURRENCY || "3");
@@ -135,6 +136,23 @@ export async function registerHandlers(boss: PgBoss): Promise<void> {
     async (jobs) => {
       for (const j of jobs) {
         await handleAnomalyScan(j as AnyJob<Payloads[typeof JOB.anomalyScan]>);
+      }
+    },
+  );
+
+  // pg-boss health scan — 1 job per 5 min. Reads pgboss.job for
+  // recently-failed rows + checks for stalled schedules. Sentry alert
+  // per (job_name, error_message) tuple; Sentry's own dedup collapses
+  // repeats into one issue.
+  await boss.createQueue(JOB.pgbossHealthScan);
+  await boss.work<Payloads[typeof JOB.pgbossHealthScan]>(
+    JOB.pgbossHealthScan,
+    { localConcurrency: 1 },
+    async (jobs) => {
+      for (const j of jobs) {
+        await handlePgbossHealthScan(
+          j as AnyJob<Payloads[typeof JOB.pgbossHealthScan]>,
+        );
       }
     },
   );
