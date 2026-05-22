@@ -223,8 +223,11 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
     if (alloc < 10) {
       return "Minimum allocation is $10";
     }
-    if (alloc > 1_000_000) {
-      return "Maximum allocation is $1,000,000";
+    // Beta cap mirrors MAX_BETA_ALLOCATION_USDC on the server. The
+    // server-side validator is the authoritative gate; this check just
+    // prevents a wasted round-trip and surfaces the cap to the user.
+    if (alloc > 1000) {
+      return "Closed beta limit: max $1,000 allocation per subscription";
     }
     if (stopLoss) {
       const sl = parseFloat(stopLoss);
@@ -415,7 +418,10 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
                           className="w-full rounded-lg border border-[#262626] bg-[#141414] py-2 pl-6 pr-2.5 text-xs font-mono text-white placeholder-gray-600 outline-none transition-colors focus:border-emerald-500/50"
                         />
                       </div>
-                      {[50, 100, 250, 500].map((v) => (
+                      {/* Beta-allocation quick-picks. Top value matches the
+                          server-side beta cap of $1,000 — bump in sync if
+                          MAX_BETA_ALLOCATION_USDC is raised. */}
+                      {[100, 250, 500, 1000].map((v) => (
                         <button
                           key={v}
                           onClick={() => setAllocation(v.toString())}
@@ -429,6 +435,9 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
                         </button>
                       ))}
                     </div>
+                    <p className="mt-1.5 text-[10px] text-gray-500">
+                      Closed beta: max <span className="text-gray-300 font-medium">$1,000</span> per subscription.
+                    </p>
                   </div>
 
                   {/* Leverage */}
@@ -438,10 +447,15 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
                       <InfoHint align="start">
                         Multiplier on the mirror ratio. <strong className="text-gray-200">2×</strong>
                         {" "}doubles your proportional exposure relative to the leader.
+                        At <strong className="text-amber-300">3×</strong> a 33% adverse move liquidates.
                       </InfoHint>
                     </label>
+                    {/* Beta-leverage quick-picks. 3× matches MAX_BETA_LEVERAGE_MULT
+                        server default; raising the cap should also raise the
+                        top button here. Dropped 5× during closed-beta to
+                        avoid auto-sign liquidation on overnight volatility. */}
                     <div className="flex gap-1.5">
-                      {[1, 2, 3, 5].map((v) => (
+                      {[1, 2, 3].map((v) => (
                         <button
                           key={v}
                           onClick={() => setLeverage(v)}
@@ -455,6 +469,11 @@ export function FollowTraderDialog({ isOpen, onClose, onSuccess, trader }: Follo
                         </button>
                       ))}
                     </div>
+                    {leverage >= 3 && (
+                      <p className="mt-1.5 text-[10px] text-amber-300/80">
+                        At 3× a 33% adverse move liquidates your position. Crypto can move this much overnight.
+                      </p>
+                    )}
                   </div>
 
                   {/* Caps + Stop Loss — single 3-col row */}

@@ -28,7 +28,16 @@
  *     policy module moves with it and becomes uncircumventable
  *   - audit trail: refused-by-policy events are explicit, logged,
  *     and actionable
+ *
+ * 2026-05-22: beta-mode cap layered on top — the gate now also refuses
+ * leverage above the current closed-beta ceiling (3× by default; see
+ * lib/copytrade/beta-limits.ts). Defense in depth: even if a
+ * subscription row carries a higher leverage_mult (legacy data, direct
+ * DB mutation, or future code path that skips the route validator),
+ * the engine refuses to sign it.
  */
+
+import { getBetaLimits } from "./beta-limits";
 
 export interface SigningPolicyContext {
   /** Wallet address whose session key is about to sign. */
@@ -136,6 +145,19 @@ export function verifySigningPolicy(ctx: SigningPolicyContext): PolicyVerdict {
     return {
       ok: false,
       reason: `signed leverage ${leverage} does not match subscription mult ${subscription.leverageMult}`,
+    };
+  }
+
+  // Beta-mode cap. The subscribe/PATCH routes already refuse out-of-
+  // cap subscriptions, but we re-check at sign time so a row inserted
+  // before the cap landed (or any future direct-DB mutation) can't
+  // produce a high-leverage signed order. Fail-closed is correct:
+  // refusing one order is much cheaper than mis-leveraged execution.
+  const betaLimits = getBetaLimits();
+  if (leverage > betaLimits.maxLeverageMult + 0.01) {
+    return {
+      ok: false,
+      reason: `leverage ${leverage} exceeds beta-mode cap ${betaLimits.maxLeverageMult}`,
     };
   }
 

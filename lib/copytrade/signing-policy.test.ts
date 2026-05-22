@@ -85,6 +85,43 @@ describe("verifySigningPolicy — leverage refusals", () => {
     );
     expect(verdict.ok).toBe(false);
   });
+
+  it("refuses leverage above the closed-beta cap (3× default)", () => {
+    // Both the signed leverage AND the subscription mult are 4× —
+    // this passes the "must match subscription" check, then trips the
+    // new beta-mode hard ceiling. Catches the case where a
+    // subscription row carries a higher mult (legacy / direct DB
+    // mutation) and reaches the engine.
+    const verdict = verifySigningPolicy(
+      ctx({
+        leverage: 4,
+        subscription: {
+          allocationUsdc: 100,
+          leverageMult: 4,
+          maxPositionUsdc: 1000,
+        },
+      }),
+    );
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toMatch(/beta-mode cap/);
+  });
+
+  it("approves up to the beta cap (3×) when subscription matches", () => {
+    // size $1000 / leverage 3 = needs at least $334 allocation;
+    // use $1000 alloc to clear with margin. Per-market cap raised
+    // to $5000 so the alloc × leverage gate is the only ceiling.
+    const verdict = verifySigningPolicy(
+      ctx({
+        leverage: 3,
+        subscription: {
+          allocationUsdc: 1000,
+          leverageMult: 3,
+          maxPositionUsdc: 5000,
+        },
+      }),
+    );
+    expect(verdict.ok).toBe(true);
+  });
 });
 
 describe("verifySigningPolicy — position-size refusals", () => {

@@ -8,6 +8,10 @@ import {
   deleteSubscription,
 } from "@/lib/copy/queries";
 import { closeFollowerPositions } from "@/lib/copy/close-positions";
+import {
+  validateAgainstBetaLimits,
+  validateSubscriptionCount,
+} from "@/lib/copytrade/beta-limits";
 
 /**
  * POST /api/copy/subscribe
@@ -48,10 +52,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Cannot follow yourself" }, { status: 400 });
     }
 
-    // Check for existing subscription
-    const existing = (await getSubscriptions(addr)).find((s) => s.leaderAddr === leaderAddr);
+    // Closed-beta caps. Defense-in-depth: signing-policy also enforces
+    // the leverage cap at sign time so a stale UI can't sneak through
+    // a higher-leverage subscription via direct API call. See
+    // lib/copytrade/beta-limits.ts for the full ENV-toggle story.
+    const betaErr = validateAgainstBetaLimits({ allocationUsdc, leverageMult });
+    if (betaErr) {
+      return NextResponse.json({ error: betaErr }, { status: 400 });
+    }
+
+    // Check for existing subscription + subscription-count cap.
+    const subs = await getSubscriptions(addr);
+    const existing = subs.find((s) => s.leaderAddr === leaderAddr);
     if (existing) {
       return NextResponse.json({ error: "You already follow this trader. Modify settings from the Copy Trading panel." }, { status: 409 });
+    }
+    const countErr = validateSubscriptionCount(subs.length);
+    if (countErr) {
+      return NextResponse.json({ error: countErr }, { status: 400 });
     }
 
     const id = await createSubscription({
@@ -124,6 +142,19 @@ export async function PATCH(req: NextRequest) {
     }
     if (active !== undefined && typeof active !== "boolean") {
       return NextResponse.json({ error: "active must be boolean" }, { status: 400 });
+    }
+
+    // Closed-beta caps apply on PATCH too — without this, a user
+    // could create a subscription within beta limits and then PATCH
+    // it up to $10M / 5× via direct API call.
+    if (allocationUsdc !== undefined || leverageMult !== undefined) {
+      const betaErr = validateAgainstBetaLimits({
+        allocationUsdc: allocationUsdc ?? Number(sub.allocationUsdc),
+        leverageMult: leverageMult ?? Number(sub.leverageMult),
+      });
+      if (betaErr) {
+        return NextResponse.json({ error: betaErr }, { status: 400 });
+      }
     }
 
     // Build settings update — only toggle if that's the only field
