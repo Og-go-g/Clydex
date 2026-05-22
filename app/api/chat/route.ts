@@ -1,6 +1,7 @@
 import { streamText, tool, zodSchema, convertToModelMessages, stepCountIs } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
+import { pickChatProvider } from "@/lib/chat/provider-fallback";
 import * as Sentry from "@sentry/nextjs";
 import { z } from "zod";
 import { getAuthAddress } from "@/lib/auth/session";
@@ -37,13 +38,16 @@ function sanitize(val: unknown, depth = 0): unknown {
   return String(val).slice(0, 200);
 }
 
-function getModel() {
-  if (process.env.ANTHROPIC_API_KEY) {
+const ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
+const OPENAI_MODEL = "gpt-4o";
+
+function getModelFor(provider: "anthropic" | "openai") {
+  if (provider === "anthropic") {
     const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    return anthropic("claude-sonnet-4-20250514");
+    return anthropic(ANTHROPIC_MODEL);
   }
   const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  return openai("gpt-4o");
+  return openai(OPENAI_MODEL);
 }
 
 // ─── System Prompt (English — primary language for API) ──────────
@@ -430,8 +434,16 @@ export async function POST(req: Request) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const modelMessages = await convertToModelMessages(trimmedMessages as any);
 
+  // Per-session sticky provider with Anthropic→OpenAI fallback on
+  // new-session 429. See lib/chat/provider-fallback.ts for the
+  // probe + sticky rules. The probe only fires for the FIRST user
+  // message of a new chat session; existing sessions read the
+  // provider from the previous assistant turn's metadata and skip
+  // the probe entirely (~0ms overhead).
+  const chosenProvider = await pickChatProvider(trimmedMessages, ANTHROPIC_MODEL);
+
   const result = streamText({
-    model: getModel(),
+    model: getModelFor(chosenProvider),
     // System prompt is ~14.5K characters of mostly-static instructions.
     // Wrap it in a SystemModelMessage with Anthropic `cacheControl:
     // ephemeral` so Anthropic's prompt cache keeps it warm for 5 min
@@ -1234,5 +1246,17 @@ export async function POST(req: Request) {
     toolChoice: "auto",
   });
 
-  return result.toUIMessageStreamResponse();
+  // Stamp the chosen provider in the assistant message's metadata so
+  // the next request from this client carries it back in `messages[]`
+  // and our pickChatProvider() returns it sticky. Without this stamp
+  // every request would re-probe, defeating the per-session model
+  // pinning.
+  return result.toUIMessageStreamResponse({
+    messageMetadata: ({ part }) => {
+      if (part.type === "start") {
+        return { provider: chosenProvider };
+      }
+      return undefined;
+    },
+  });
 }

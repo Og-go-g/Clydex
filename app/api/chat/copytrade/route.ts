@@ -1,6 +1,7 @@
 import { streamText, tool, zodSchema, convertToModelMessages, stepCountIs } from "ai";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
+import { pickChatProvider } from "@/lib/chat/provider-fallback";
 import { z } from "zod";
 import { getAuthAddress } from "@/lib/auth/session";
 import { RATE_LIMITS, safeRateLimit } from "@/lib/ratelimit";
@@ -47,13 +48,16 @@ function sanitize(val: unknown, depth = 0): unknown {
 
 // ─── Model ──────────────────────────────────────────────────────
 
-function getModel() {
-  if (process.env.ANTHROPIC_API_KEY) {
+const ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
+const OPENAI_MODEL = "gpt-4o";
+
+function getModelFor(provider: "anthropic" | "openai") {
+  if (provider === "anthropic") {
     const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    return anthropic("claude-sonnet-4-20250514");
+    return anthropic(ANTHROPIC_MODEL);
   }
   const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  return openai("gpt-4o");
+  return openai(OPENAI_MODEL);
 }
 
 // ─── System Prompt ──────────────────────────────────────────────
@@ -420,8 +424,11 @@ export async function POST(req: Request) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const modelMessages = await convertToModelMessages(trimmedMessages as any);
 
+  // Per-session sticky provider — see /api/chat/route.ts for rationale.
+  const chosenProvider = await pickChatProvider(trimmedMessages, ANTHROPIC_MODEL);
+
   const result = streamText({
-    model: getModel(),
+    model: getModelFor(chosenProvider),
     // Anthropic prompt caching — see /api/chat/route.ts for the full
     // rationale. Copy-mode system prompt is even longer than trade
     // mode (~14K chars) so caching pays back especially well here.
@@ -1304,7 +1311,15 @@ export async function POST(req: Request) {
     toolChoice: "auto",
   });
 
-  return result.toUIMessageStreamResponse();
+  // Stamp provider in assistant message metadata — see /api/chat/route.ts.
+  return result.toUIMessageStreamResponse({
+    messageMetadata: ({ part }) => {
+      if (part.type === "start") {
+        return { provider: chosenProvider };
+      }
+      return undefined;
+    },
+  });
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────
