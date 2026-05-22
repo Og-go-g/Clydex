@@ -34,6 +34,15 @@ services:
     network_mode: host
     env_file:
       - .env
+    # Resource ceiling — Hetzner CPX32 is 4 vCPU / 8 GB RAM. Reserve
+    # ~2.5 GB for Postgres + the system + nginx; cap the Node runtime
+    # at 3 GB so a runaway AI stream or chat-history blowup can't take
+    # down the whole box (which happened pre-2026-05-03 during builds,
+    # see postgres_oom_protection.md). Worker gets ~1.5 GB. CPUs are
+    # left soft-capped via `cpus` so the kernel scheduler still gives
+    # bursty work the headroom.
+    mem_limit: 3g
+    cpus: 2.5
     healthcheck:
       # 127.0.0.1 explicitly — Alpine's wget resolves `localhost` to ::1 (IPv6),
       # but Next.js binds only to 0.0.0.0 (IPv4), giving false "unhealthy".
@@ -70,6 +79,10 @@ services:
     network_mode: host
     env_file:
       - .env
+    # Same rationale as `app` above. Worker is lighter (no AI streaming
+    # in-process) so 1.5 GB is plenty for pg-boss polling + sync jobs.
+    mem_limit: 1.5g
+    cpus: 1.5
     stop_grace_period: 60s
     healthcheck:
       # Worker writes /tmp/worker.healthy ONLY after a successful DB

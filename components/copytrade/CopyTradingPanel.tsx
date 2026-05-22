@@ -958,10 +958,39 @@ export function CopyTradingContent({ onRefreshRef }: { onRefreshRef?: MutableRef
 
           {/* Subscriptions — expandable cards */}
           {status.subscriptions.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-[#262626] p-3 text-center">
-              <p className="text-[11px] text-[#666]">
-                No traders followed yet. Click "Copy" on a trader in the Top Traders tab.
-              </p>
+            <div className="space-y-2">
+              <div className="rounded-lg border border-dashed border-[#262626] p-3 text-center">
+                <p className="text-[11px] text-[#666]">
+                  No traders followed yet. Click "Copy" on a trader in the Top Traders tab.
+                </p>
+              </div>
+              {/* First-time user onboarding card. Mounts when there are
+                  zero subscriptions, regardless of whether the user has
+                  ever had one — re-shows after unfollow-all is fine. */}
+              <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3">
+                <p className="mb-1.5 text-[11px] font-medium text-emerald-300">
+                  How copy trading works
+                </p>
+                <ol className="space-y-1 text-[11px] text-[#aaa]">
+                  <li>
+                    <span className="text-[#666]">1.</span> Pick a trader from the leaderboard
+                    (Top Traders tab).
+                  </li>
+                  <li>
+                    <span className="text-[#666]">2.</span> Choose your allocation (max{" "}
+                    <span className="text-gray-200">$1,000</span> in beta) and leverage
+                    (max <span className="text-gray-200">3×</span>).
+                  </li>
+                  <li>
+                    <span className="text-[#666]">3.</span> One signature. Engine mirrors their
+                    trades within ~15 s. You can pause or unfollow anytime.
+                  </li>
+                </ol>
+                <p className="mt-2 text-[10px] text-amber-300/70">
+                  Beta: caps are intentionally low. They'll lift after we run cleanly
+                  for a few weeks.
+                </p>
+              </div>
             </div>
           ) : (
             <div className="space-y-1.5">

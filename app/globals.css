@@ -4,11 +4,20 @@
 
 html {
   background: #0a0a0a;
+  /* Mobile: prevent accidental horizontal scroll from one stray
+     unconstrained element. The app is desktop-first; many pages have
+     not yet had per-component mobile audits. This stops the worst
+     class of break — a page-wide horizontal scroll that hides
+     content off-screen on a phone — without restyling each component
+     individually. Per-page mobile work can incrementally remove this
+     fallback once the underlying overflow is handled cleanly. */
+  overflow-x: hidden;
 }
 
 body {
   background: transparent;
   color: #ededed;
+  overflow-x: hidden;
 }
 
 ::-webkit-scrollbar {
