@@ -52,3 +52,7 @@ yarn-error.log*
 # Claude project files (session-specific, not code)
 .claude/
 NEXT_SESSION_PROMPT.md
+
+# Operator-local — never commit
+backups/
+copy-engine.sh
