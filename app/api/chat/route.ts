@@ -399,12 +399,53 @@ export async function POST(req: Request) {
     return new Response("No valid messages after sanitization", { status: 400 });
   }
 
+  // Sliding-window trim: cap recent history at N messages to bound the
+  // per-request input-token cost. The hard 100-cap above is the
+  // server-side abuse guard; this trim is the cost guard for legitimate
+  // long conversations.
+  //
+  // Pair-preservation: tool_use parts in an assistant message must
+  // pair with a tool_result in the next user message. Dropping just
+  // one half leaves the other orphaned and Anthropic rejects the
+  // request with "tool_use without matching tool_result". Walk
+  // forward from the naïve cut until we land on a "user" boundary —
+  // a user message is always the START of a turn, never the orphaned
+  // half of a tool pair.
+  const MAX_HISTORY_MESSAGES = Math.max(
+    4,
+    Number(process.env.MAX_CHAT_HISTORY_MESSAGES) || 30,
+  );
+  let trimmedMessages = sanitizedMessages;
+  if (sanitizedMessages.length > MAX_HISTORY_MESSAGES) {
+    let cut = sanitizedMessages.length - MAX_HISTORY_MESSAGES;
+    while (
+      cut < sanitizedMessages.length &&
+      sanitizedMessages[cut]?.role !== "user"
+    ) {
+      cut++;
+    }
+    trimmedMessages = sanitizedMessages.slice(cut);
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const modelMessages = await convertToModelMessages(sanitizedMessages as any);
+  const modelMessages = await convertToModelMessages(trimmedMessages as any);
 
   const result = streamText({
     model: getModel(),
-    system: SYSTEM_PROMPT,
+    // System prompt is ~14.5K characters of mostly-static instructions.
+    // Wrap it in a SystemModelMessage with Anthropic `cacheControl:
+    // ephemeral` so Anthropic's prompt cache keeps it warm for 5 min
+    // between calls — saves ~90% on the system-prompt input tokens for
+    // any user mid-conversation. The cacheControl key is ignored
+    // silently by the OpenAI fallback provider, so this is safe even
+    // when ANTHROPIC_API_KEY is unset.
+    system: {
+      role: "system",
+      content: SYSTEM_PROMPT,
+      providerOptions: {
+        anthropic: { cacheControl: { type: "ephemeral" } },
+      },
+    },
     messages: modelMessages,
     tools: {
       // ═══════════════════════════════════════════════════

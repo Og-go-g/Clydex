@@ -399,12 +399,40 @@ export async function POST(req: Request) {
     return new Response("No valid messages after sanitization", { status: 400 });
   }
 
+  // Sliding-window trim — see /api/chat/route.ts for the full
+  // rationale + pair-preservation invariant.
+  const MAX_HISTORY_MESSAGES = Math.max(
+    4,
+    Number(process.env.MAX_CHAT_HISTORY_MESSAGES) || 30,
+  );
+  let trimmedMessages = sanitizedMessages;
+  if (sanitizedMessages.length > MAX_HISTORY_MESSAGES) {
+    let cut = sanitizedMessages.length - MAX_HISTORY_MESSAGES;
+    while (
+      cut < sanitizedMessages.length &&
+      sanitizedMessages[cut]?.role !== "user"
+    ) {
+      cut++;
+    }
+    trimmedMessages = sanitizedMessages.slice(cut);
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const modelMessages = await convertToModelMessages(sanitizedMessages as any);
+  const modelMessages = await convertToModelMessages(trimmedMessages as any);
 
   const result = streamText({
     model: getModel(),
-    system: SYSTEM_PROMPT,
+    // Anthropic prompt caching — see /api/chat/route.ts for the full
+    // rationale. Copy-mode system prompt is even longer than trade
+    // mode (~14K chars) so caching pays back especially well here.
+    // OpenAI fallback silently ignores the providerOptions.
+    system: {
+      role: "system",
+      content: SYSTEM_PROMPT,
+      providerOptions: {
+        anthropic: { cacheControl: { type: "ephemeral" } },
+      },
+    },
     messages: modelMessages,
     tools: {
       // ─── Leaderboard ─────────────────────────────────
