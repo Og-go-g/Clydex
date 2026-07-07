@@ -55,9 +55,8 @@ export function Header() {
     { href: "/chat", label: "Chat" },
     { href: "/markets", label: "Markets" },
     { href: "/portfolio", label: "Portfolio" },
-    // External — friend's analytics site, still in build-out. Disabled
-    // until the destination is ready; the SOON badge tells users why.
-    { href: "https://n1stats.xyz/", label: "N1stats", external: true, badge: "SOON", disabled: true },
+    // External analytics site — live 2026-07-07.
+    { href: "https://n1stats.xyz/", label: "N1stats", external: true },
   ];
 
   return (
